@@ -10,6 +10,7 @@ It is a **port** of the original **DF1Comm.vb** written by **Archie Jacobs of Ma
 - A reusable **DF1 communication library** (`DF1Comm`)
 - A **standalone SLC 5/03 emulator** (`DF1Emulator`) for testing without real PLC hardware
 - An **example client** that demonstrates all major library features
+- A **desktop GUI tool** (`DF1ProgramTool`) for upload/download/compare PLC programs
 
 All components target .NET 8 and are licensed under GNU General Public License v3.0 or later (GPLv3+).
 
@@ -73,6 +74,7 @@ DF1Comm/
 
 ### DF1Emulator (Standalone Tool)
 - Emulates an **SLC 5/03** DF1 port (processor type `0x49`)
+- **Loads real PLC program** from embedded .bin resource (converted from APS .ACH archive)
 - Implements the full DF1 link layer: ACK/NAK, ENQ handling, checksum validation
 - In‑memory file system with pre‑defined data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, and additional B/N files up to file 31)
 - Responds to **Get Status** (CMD 0x06 FNC 0x03) with realistic 24‑byte payload
@@ -232,7 +234,7 @@ The implementation follows **Allen‑Bradley Publication 1770‑6.5.16** (DF1 Pr
 | `0x0B` (Set Variables) | Configure communication parameters (RSLinx auto‑configure) |
 | `0x0A` (Diagnostic Counters) | Read modem and packet statistics |
 | `0x67` (Read Modified Data) | Simplified read variant |
-| `0xF` (Execute Command List) | Multi‑function commands (mode change, I/O config, upload/download) |
+| `0x0F` (Execute Command List) | Multi‑function commands (mode change, I/O config, upload/download) |
 
 Checksum modes as per AB specification:
 - **BCC**: uses two's complement of sum.

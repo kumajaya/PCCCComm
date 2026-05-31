@@ -120,6 +120,16 @@ This format is **not compatible** with `.RSS` files from RSLogix; it is intended
 The file includes both CRC32 and SHA256 checksums to detect accidental corruption and intentional tampering.  
 During download, the tool validates the processor type and bulletin against the target PLC to prevent mismatched downloads.
 
+## Creating Backup Files from APS Archives
+
+DF1ProgramTool reads/writes `.bin` files in its own format.  
+To convert an existing **APS .ACH archive** to this format, use the external converter:
+
+```bash
+python Tools/ach_to_df1.py DBU550.ACH --out DBU550.bin
+```
+The resulting `.bin` file can be downloaded to a real PLC or the DF1Emulator.
+
 ## Troubleshooting
 
 | Issue | Likely solution |
@@ -132,14 +142,19 @@ During download, the tool validates the processor type and bulletin against the 
 | **Compare shows mismatches** | Normal if the PLC program has changed since the backup was created. Use Upload to create a fresh backup. |
 
 ## Project structure
+
 | File | Description |
 |------|-------------|
 | `Program.cs` | Application entry point |
 | `App.axaml` / `App.axaml.cs` | Avalonia application setup |
 | `Views/MainWindow.axaml` | Main window XAML layout |
 | `ViewModels/MainWindowViewModel.cs` | MVVM logic for communication and transfer |
+| `Models/CompareResult.cs` | Comparison result data structure |
+| `Models/FileTypeHelper.cs` | DF1 file type to string conversion |
 | `Models/PlcInfo.cs` | PLC type information |
+| `Services/AvaloniaDialogService.cs` | Dialog service implementation for Avalonia |
 | `Services/FrameDecoder.cs` | DF1 serial frame decoder for logging |
+| `Services/IDialogService.cs` | Dialog service interface |
 | `Services/PlcIdentifier.cs` | Processor type detection |
 | `Services/ProgramTransferService.cs` | Upload/download and file serialisation |
 | `Utilities/Crc32.cs` | Small CRC32 helper (IEEE 802.3 polynomial 0xEDB88320) |

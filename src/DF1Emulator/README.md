@@ -12,6 +12,8 @@ Lightweight, standalone DF1 RS-232 emulator that mimics an SLC 5/03 PLC for test
 - Configurable serial settings via command line
 - Console logging of RX/TX hex for debugging
 - Independent – no external dependencies except `System.IO.Ports`
+- **Loads real SLC 5/03 program** from embedded .bin resource (converted from APS .ACH archive)
+- Contains 21 data files + 10 LAD files – bit‑exact copy of original PLC memory
 
 ## Requirements
 - .NET 8 SDK or later
@@ -28,6 +30,18 @@ dotnet build -c Release DF1Emulator.csproj
 **Default** (COM2, 19200, no parity, node 1, CRC checksum):
 ```bash
 dotnet run --project DF1Emulator.csproj -- COM2
+[BIN] DF1Emulator.Resources.DBU550.bin
+      Size=9921 Magic=0xDF1A Ver=1 Type=0x49 SLC 5/03
+      Files=33 TS=2026-05-31 01:59:11
+      Loaded: 21 data files, 10 program files
+DF1 PLC memory initialized with embedded program.
+DF1 Emulator started on COM2...
+DF1 Emulator running on COM2
+  Baud rate : 19200
+  Parity    : None
+  Node ID   : 1
+  Checksum  : Crc
+Press Enter to stop.
 ```
 
 **Examples:**
