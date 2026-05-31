@@ -31,12 +31,14 @@ using System.IO.Ports;
 ///   --parity <none|odd|even> : parity mode (default none)
 ///   --node <n>               : emulator node id (default 1)
 ///   --checksum <crc|bcc>     : checksum mode (default crc)
+///   --mode <df1|dh485|eip>   : protocol mode (default df1)
 ///   --quiet, -q              : disable logging for maximum performance
 ///   --help, -h               : show usage
 ///
 /// Example:
-///   dotnet run --project DF1Emulator.csproj -- COM2 --baud 19200 --checksum crc
-///   dotnet run --project DF1Emulator.csproj -- COM2 --quiet          # High performance mode
+///   dotnet run -- COM2 --baud 19200 --checksum crc
+///   dotnet run -- COM2 --mode eip --port 44818
+///   dotnet run -- COM2 --quiet                          # High performance mode
 /// </summary>
 class Program
 {
@@ -48,6 +50,8 @@ class Program
         Parity parity = Parity.None;
         int node = 1;
         string checksum = "crc";
+        string mode = "df1";
+        int eipPort = 44818;
         bool quietMode = false;
 
         // Parse positional port argument
@@ -82,6 +86,15 @@ class Program
             {
                 checksum = args[++i].ToLowerInvariant();
             }
+            else if (a == "--mode" && i + 1 < args.Length)
+            {
+                mode = args[++i].ToLowerInvariant();
+            }
+            else if (a == "--port" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[++i], out var p))
+                    eipPort = p;
+            }
             else if (a == "--quiet" || a == "-q")
             {
                 quietMode = true;
@@ -93,8 +106,17 @@ class Program
             }
         }
 
+        // Validate mode
+        var emulatorMode = mode switch
+        {
+            "df1" => DF1Emulator.EmulatorMode.DF1,
+            "dh485" => DF1Emulator.EmulatorMode.DH485,
+            "eip" => DF1Emulator.EmulatorMode.EIP,
+            _ => DF1Emulator.EmulatorMode.DF1
+        };
+
         // Create and start emulator
-        using var emulator = new DF1Emulator(portName, baud, parity)
+        using var emulator = new DF1Emulator(portName, baud, parity, emulatorMode, eipPort)
         {
             MyNode = node,
             CheckSum = checksum == "crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc
@@ -110,8 +132,16 @@ class Program
         {
             emulator.Start();
             Console.WriteLine($"DF1 Emulator running on {portName}");
-            Console.WriteLine($"  Baud rate : {baud}");
-            Console.WriteLine($"  Parity    : {parity}");
+            Console.WriteLine($"  Mode      : {mode.ToUpper()}");
+            if (emulatorMode == DF1Emulator.EmulatorMode.DF1)
+            {
+                Console.WriteLine($"  Baud rate : {baud}");
+                Console.WriteLine($"  Parity    : {parity}");
+            }
+            else if (emulatorMode == DF1Emulator.EmulatorMode.EIP)
+            {
+                Console.WriteLine($"  EIP Port  : {eipPort}");
+            }
             Console.WriteLine($"  Node ID   : {node}");
             Console.WriteLine($"  Checksum  : {emulator.CheckSum}");
             Console.WriteLine($"  Logging   : {(quietMode ? "Disabled (High Performance)" : "Enabled")}");
@@ -137,15 +167,23 @@ class Program
         Console.WriteLine("  --parity <none|odd|even>  Parity mode (default none)");
         Console.WriteLine("  --node <n>           Emulator node ID (default 1)");
         Console.WriteLine("  --checksum <crc|bcc> Checksum mode (default crc)");
+        Console.WriteLine("  --mode <df1|dh485|eip> Protocol mode (default df1)");
+        Console.WriteLine("  --port <n>           EIP port number (default 44818)");
         Console.WriteLine("  --quiet, -q          Disable logging for maximum performance");
         Console.WriteLine("  --help, -h           Show this help");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run -- COM2 --baud 19200 --checksum crc");
         Console.WriteLine("  dotnet run -- COM3 --baud 9600 --parity even --node 2");
+        Console.WriteLine("  dotnet run -- COM2 --mode eip --port 44818");
         Console.WriteLine("  dotnet run -- COM2 --quiet                    # High performance mode");
         Console.WriteLine();
         Console.WriteLine("Note: Disabling logging eliminates string allocations and");
         Console.WriteLine("      significantly improves throughput under high load.");
+        Console.WriteLine();
+        Console.WriteLine("Protocol Modes:");
+        Console.WriteLine("  df1    - Serial DF1 full-duplex (default, works with existing code)");
+        Console.WriteLine("  dh485  - DH485 via serial (future)");
+        Console.WriteLine("  eip    - EtherNet/IP (EIP/PCCC) via TCP (planned)");
     }
 }
