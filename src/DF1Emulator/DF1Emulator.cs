@@ -111,10 +111,13 @@ public class DF1Emulator : IDisposable
     private Task _processingTask = Task.CompletedTask;
 
     // ─── Buffer Management ───────────────────────────────────────────────────
-    private readonly List<byte> _rx = new List<byte>();
+    private byte[] _rxBuffer = new byte[8192];  // Power of two for mask optimization
+    private int _rxHead = 0;   // Read position (start of valid data)
+    private int _rxTail = 0;   // Write position (end of valid data)
+    private int _rxCount = 0;  // Number of bytes available (_rxTail - _rxHead with wrap)
+    private volatile int _rxResetRequested = 0;  // Signal from error handler to reset circular buffer
 
     // Lock ordering: always acquire _rxLock before _txLock to avoid deadlock.
-    private readonly object _rxLock = new object();
     private readonly object _txLock = new object();
     private readonly PlcMemory _memory;
 
@@ -251,8 +254,8 @@ public class DF1Emulator : IDisposable
         
         Console.WriteLine($"[ERR]  Serial port error: {e.EventType}");
         
-        // Discard buffers for any error to recover
-        lock (_rxLock) { _rx.Clear(); }
+        // Signal consumer to reset circular buffer (lock-free)
+        Interlocked.Exchange(ref _rxResetRequested, 1);
         
         try
         {
@@ -511,6 +514,16 @@ public class DF1Emulator : IDisposable
         {
             await foreach (var buffer in _receiveChannel.Reader.ReadAllAsync(_processingCts.Token))
             {
+                // Check for reset request from error handler
+                if (Interlocked.CompareExchange(ref _rxResetRequested, 0, 1) == 1)
+                {
+                    _rxHead = 0;
+                    _rxTail = 0;
+                    _rxCount = 0;
+                    if (_isLoggingEnabled)
+                        Console.WriteLine("[INFO] Circular buffer reset due to error");
+                }
+                
                 Interlocked.Increment(ref _framesProcessed);
 
                 // Optional: Periodic performance logging
@@ -521,8 +534,48 @@ public class DF1Emulator : IDisposable
                     Console.WriteLine($"[PERF] Processed {frames} frames, GC.GetTotalMemory: {GC.GetTotalMemory(false) / 1024:N0} KB");
                 }
 
-                foreach (byte b in buffer)
-                    _rx.Add(b);
+                // Add data to circular buffer
+                int bytesToAdd = buffer.Length;
+                
+                // Ensure we have enough space (resize if needed)
+                if (_rxCount + bytesToAdd > _rxBuffer.Length)
+                {
+                    // Grow buffer by doubling
+                    int newSize = Math.Max(_rxBuffer.Length * 2, _rxCount + bytesToAdd);
+                    byte[] newBuffer = new byte[newSize];
+                    
+                    // Copy existing data to new buffer (linearize)
+                    if (_rxHead <= _rxTail)
+                    {
+                        Array.Copy(_rxBuffer, _rxHead, newBuffer, 0, _rxCount);
+                    }
+                    else
+                    {
+                        int firstPart = _rxBuffer.Length - _rxHead;
+                        Array.Copy(_rxBuffer, _rxHead, newBuffer, 0, firstPart);
+                        Array.Copy(_rxBuffer, 0, newBuffer, firstPart, _rxTail);
+                    }
+                    
+                    _rxBuffer = newBuffer;
+                    _rxHead = 0;
+                    _rxTail = _rxCount;
+                }
+                
+                // Copy new data to circular buffer
+                if (_rxTail + bytesToAdd <= _rxBuffer.Length)
+                {
+                    Array.Copy(buffer, 0, _rxBuffer, _rxTail, bytesToAdd);
+                }
+                else
+                {
+                    int firstPart = _rxBuffer.Length - _rxTail;
+                    Array.Copy(buffer, 0, _rxBuffer, _rxTail, firstPart);
+                    Array.Copy(buffer, firstPart, _rxBuffer, 0, bytesToAdd - firstPart);
+                }
+                
+                _rxTail = (_rxTail + bytesToAdd) % _rxBuffer.Length;
+                _rxCount += bytesToAdd;
+                
                 ParseBuffer();
             }
         }
@@ -673,53 +726,95 @@ public class DF1Emulator : IDisposable
     private void ParseBuffer()
     {
         int chkBytes = CheckSum == CheckSumOptions.Bcc ? 1 : 2;
-        int i = 0;
-
-        while (i < _rx.Count)
+        int scanPos = _rxHead;
+        int remaining = _rxCount;
+        
+        while (remaining > 0)
         {
+            // Need at least 2 bytes for any valid frame start (DLE STX or ENQ)
+            if (remaining < 2) break;
+            
+            byte b1 = _rxBuffer[scanPos];
+            byte b2 = _rxBuffer[(scanPos + 1) % _rxBuffer.Length];
+            
             // Handle standalone ENQ (DLE 0x05) — RSLinx auto-configure node probe
-            if (i + 1 < _rx.Count && _rx[i] == 0x10 && _rx[i + 1] == 0x05)
+            if (b1 == 0x10 && b2 == 0x05)
             {
-                _rx.RemoveRange(i, 2);
+                // Remove ENQ from buffer
+                _rxHead = (_rxHead + 2) % _rxBuffer.Length;
+                _rxCount -= 2;
+                scanPos = _rxHead;
+                remaining = _rxCount;
                 HandleEnq();
-                i = 0;
                 continue;
             }
-
+            
             // Look for DLE STX frame start
-            if (i + 1 < _rx.Count && _rx[i] == 0x10 && _rx[i + 1] == 0x02)
+            if (b1 == 0x10 && b2 == 0x02)
             {
                 // Scan for DLE ETX, skipping over stuffed 0x10 0x10 pairs in the payload.
-                int etxIndex = -1;
-                for (int j = i + 2; j + 1 < _rx.Count; j++)
+                int tempPos = (scanPos + 2) % _rxBuffer.Length;
+                int bytesScanned = 0;
+                int payloadLen = -1;
+                
+                while (bytesScanned + 1 < remaining - 2) // -2 for DLE STX already consumed
                 {
-                    if (_rx[j] == 0x10 && _rx[j + 1] == 0x10) { j++; continue; }
-                    if (_rx[j] == 0x10 && _rx[j + 1] == 0x03) { etxIndex = j; break; }
+                    byte current = _rxBuffer[tempPos];
+                    byte next = _rxBuffer[(tempPos + 1) % _rxBuffer.Length];
+                    
+                    if (current == 0x10 && next == 0x10)
+                    {
+                        tempPos = (tempPos + 2) % _rxBuffer.Length;
+                        bytesScanned += 2;
+                        continue;
+                    }
+                    if (current == 0x10 && next == 0x03)
+                    {
+                        payloadLen = bytesScanned;
+                        break;
+                    }
+                    tempPos = (tempPos + 1) % _rxBuffer.Length;
+                    bytesScanned++;
                 }
-
-                if (etxIndex == -1) break; // incomplete frame — wait for more bytes
-
-                int lastChkIndex = etxIndex + 1 + chkBytes;
-                if (lastChkIndex >= _rx.Count) break; // checksum bytes not yet received
-
-                int frameLen = lastChkIndex - i + 1;
-
-                // Optimized: CopyTo instead of LINQ Skip/Take/ToArray
+                
+                if (payloadLen == -1) break; // incomplete frame — wait for more bytes
+                
+                // Frame structure: DLE STX (2) + stuffed_payload (payloadLen) + DLE ETX (2) + checksum (chkBytes)
+                int frameLen = 2 + payloadLen + 2 + chkBytes;
+                
+                if (frameLen > remaining) break; // checksum bytes not yet received
+                
+                // Extract frame bytes (linearize to contiguous array) - optimized with Array.Copy
                 byte[] frame = new byte[frameLen];
-                _rx.CopyTo(i, frame, 0, frameLen);
-                _rx.RemoveRange(i, frameLen);
+                int spaceToEnd = _rxBuffer.Length - scanPos;
+                if (spaceToEnd >= frameLen)
+                {
+                    // Frame does not wrap — single copy
+                    Array.Copy(_rxBuffer, scanPos, frame, 0, frameLen);
+                }
+                else
+                {
+                    // Frame wraps — two copies
+                    Array.Copy(_rxBuffer, scanPos, frame, 0, spaceToEnd);
+                    Array.Copy(_rxBuffer, 0, frame, spaceToEnd, frameLen - spaceToEnd);
+                }
+                
+                // Remove frame from buffer
+                _rxHead = (_rxHead + frameLen) % _rxBuffer.Length;
+                _rxCount -= frameLen;
+                scanPos = _rxHead;
+                remaining = _rxCount;
                 ProcessFrame(frame);
-                i = 0;
             }
-            else i++;
+            else
+            {
+                // Skip single byte that cannot start a valid frame
+                _rxHead = (_rxHead + 1) % _rxBuffer.Length;
+                _rxCount--;
+                scanPos = _rxHead;
+                remaining = _rxCount;
+            }
         }
-
-        // Discard bytes that were scanned and cannot start a valid frame
-        if (i > 0)
-            _rx.RemoveRange(0, i);
-
-        // Prevent unbounded growth from line noise
-        if (_rx.Count > 8192) _rx.RemoveRange(0, _rx.Count - 4096);
     }
 
     // ─── ENQ handler ─────────────────────────────────────────────────────────
