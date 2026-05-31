@@ -31,10 +31,12 @@ using System.IO.Ports;
 ///   --parity <none|odd|even> : parity mode (default none)
 ///   --node <n>               : emulator node id (default 1)
 ///   --checksum <crc|bcc>     : checksum mode (default crc)
+///   --quiet, -q              : disable logging for maximum performance
 ///   --help, -h               : show usage
 ///
 /// Example:
 ///   dotnet run --project DF1Emulator.csproj -- COM2 --baud 19200 --checksum crc
+///   dotnet run --project DF1Emulator.csproj -- COM2 --quiet          # High performance mode
 /// </summary>
 class Program
 {
@@ -46,6 +48,7 @@ class Program
         Parity parity = Parity.None;
         int node = 1;
         string checksum = "crc";
+        bool quietMode = false;
 
         // Parse positional port argument
         if (args.Length > 0 && !args[0].StartsWith("--"))
@@ -79,6 +82,10 @@ class Program
             {
                 checksum = args[++i].ToLowerInvariant();
             }
+            else if (a == "--quiet" || a == "-q")
+            {
+                quietMode = true;
+            }
             else if (a == "--help" || a == "-h")
             {
                 PrintUsage();
@@ -93,6 +100,12 @@ class Program
             CheckSum = checksum == "crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc
         };
 
+        // Disable logging if quiet mode is enabled
+        if (quietMode)
+        {
+            emulator.SetLoggingEnabled(false);
+        }
+
         try
         {
             emulator.Start();
@@ -101,6 +114,7 @@ class Program
             Console.WriteLine($"  Parity    : {parity}");
             Console.WriteLine($"  Node ID   : {node}");
             Console.WriteLine($"  Checksum  : {emulator.CheckSum}");
+            Console.WriteLine($"  Logging   : {(quietMode ? "Disabled (High Performance)" : "Enabled")}");
             Console.WriteLine("Press Enter to stop.");
             Console.ReadLine();
             emulator.Stop();
@@ -123,10 +137,15 @@ class Program
         Console.WriteLine("  --parity <none|odd|even>  Parity mode (default none)");
         Console.WriteLine("  --node <n>           Emulator node ID (default 1)");
         Console.WriteLine("  --checksum <crc|bcc> Checksum mode (default crc)");
+        Console.WriteLine("  --quiet, -q          Disable logging for maximum performance");
         Console.WriteLine("  --help, -h           Show this help");
         Console.WriteLine();
-        Console.WriteLine("Example:");
+        Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run -- COM2 --baud 19200 --checksum crc");
         Console.WriteLine("  dotnet run -- COM3 --baud 9600 --parity even --node 2");
+        Console.WriteLine("  dotnet run -- COM2 --quiet                    # High performance mode");
+        Console.WriteLine();
+        Console.WriteLine("Note: Disabling logging eliminates string allocations and");
+        Console.WriteLine("      significantly improves throughput under high load.");
     }
 }

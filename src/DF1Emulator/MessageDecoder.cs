@@ -19,19 +19,25 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 /// <summary>
 /// Helper methods for checksum calculation, DLE stuffing/unstuffing,
 /// and DF1 error code decoding.
-/// CRC uses CRC-16 table lookup (init=0x0000, polynomial 0xA001),
-/// identical to the VB original. ETX byte (0x03) is included in the
-/// CRC calculation as per AB specification.
-/// BCC uses two's complement of sum, as per VB original.
+///
+/// HIGH-PERFORMANCE NOTES:
+/// - All methods use ReadOnlySpan&lt;byte&gt; for zero-copy operations
+/// - CRC uses CRC-16 table lookup (init=0x0000, polynomial 0xA001),
+///   identical to the VB original. ETX byte (0x03) is included in the
+///   CRC calculation as per AB specification.
+/// - BCC uses two's complement of sum, as per VB original.
+/// - RemoveDleStuffing writes to destination Span to avoid allocations
+/// - ApplyDleStuffing returns length and writes to destination Span
 /// </summary>
 public static class MessageDecoder
 {
     // ─── CRC-16 lookup table (matches VB aCRC16Table) ────────────────────────
+    // 256 entries pre-computed for fast table lookup CRC calculation
     private static readonly ushort[] CRC16Table =
     {
         0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
@@ -73,69 +79,110 @@ public static class MessageDecoder
     /// <summary>
     /// Calculates CRC-16 or BCC checksum over the given data.
     /// For CRC, the ETX byte (0x03) is appended as per AB spec.
+    /// 
+    /// HIGH-PERFORMANCE: Uses ReadOnlySpan to avoid allocations.
+    /// Caller can pass any contiguous memory (array, stackalloc, native).
     /// </summary>
-    public static ushort CalculateChecksum(byte[] data, CheckSumOptions option)
+    /// <param name="data">The payload data to checksum (without DLE stuffing)</param>
+    /// <param name="option">CRC (default) or BCC checksum algorithm</param>
+    /// <returns>16-bit checksum (BCC returns in low byte, high byte = 0)</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ushort CalculateChecksum(ReadOnlySpan<byte> data, CheckSumOptions option)
     {
         if (option == CheckSumOptions.Crc)
         {
-            ushort crc = 0x0000; // AB DF1 init value — NOT Modbus 0xFFFF
-            foreach (byte b in data)
+            // CRC-16 with polynomial 0xA001, init 0x0000 (AB DF1 specification)
+            ushort crc = 0x0000;
+            
+            // Process all data bytes
+            for (int i = 0; i < data.Length; i++)
             {
-                byte t = (byte)((crc & 0xFF) ^ b);
-                crc = (ushort)((crc >> 8) ^ CRC16Table[t]);
+                byte tableIdx = (byte)((crc & 0xFF) ^ data[i]);
+                crc = (ushort)((crc >> 8) ^ CRC16Table[tableIdx]);
             }
-            // Include ETX (0x03) as per AB specification
-            byte etx = (byte)((crc & 0xFF) ^ 0x03);
-            crc = (ushort)((crc >> 8) ^ CRC16Table[etx]);
+            
+            // Include ETX (0x03) as per AB DF1 specification
+            // ETX is NOT part of the unstuffed payload; it's added during CRC calc
+            byte etx = 0x03;
+            byte finalIdx = (byte)((crc & 0xFF) ^ etx);
+            crc = (ushort)((crc >> 8) ^ CRC16Table[finalIdx]);
+            
             return crc;
         }
         else
         {
-            // BCC: two's complement of sum, same as VB CalculateBCC
+            // BCC: Two's complement of sum (matches VB CalculateBCC)
             int sum = 0;
-            foreach (byte b in data) sum += b;
+            for (int i = 0; i < data.Length; i++)
+            {
+                sum += data[i];
+            }
             sum = sum & 0xFF;
             return (ushort)((0x100 - sum) & 0xFF);
         }
     }
 
-    // ─── DLE Stuffing ─────────────────────────────────────────────────────────
+    // ─── DLE Stuffing (Zero-Allocation) ──────────────────────────────────────
 
     /// <summary>
     /// Apply DLE stuffing: every 0x10 in payload becomes 0x10 0x10.
+    /// 
+    /// HIGH-PERFORMANCE: Writes to destination Span instead of allocating new array.
+    /// Returns the actual number of bytes written to destination.
     /// </summary>
-    public static byte[] ApplyDleStuffing(byte[] payload)
+    /// <param name="source">Unstuffed payload (raw bytes)</param>
+    /// <param name="destination">Pre-allocated buffer (must be at least source.Length * 2)</param>
+    /// <returns>Number of bytes written to destination</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int ApplyDleStuffing(ReadOnlySpan<byte> source, Span<byte> destination)
     {
-        var list = new List<byte>(payload.Length * 2);
-        foreach (byte b in payload)
+        int destPos = 0;
+        
+        for (int i = 0; i < source.Length; i++)
         {
-            list.Add(b);
-            if (b == 0x10) list.Add(0x10);
+            byte b = source[i];
+            destination[destPos++] = b;
+            
+            // DLE byte (0x10) must be doubled
+            if (b == 0x10)
+            {
+                destination[destPos++] = 0x10;
+            }
         }
-        return list.ToArray();
+        
+        return destPos;
     }
 
     /// <summary>
     /// Remove DLE stuffing: 0x10 0x10 → single 0x10.
+    /// 
+    /// HIGH-PERFORMANCE: Writes to destination Span, zero allocation.
+    /// Returns the actual number of bytes written to destination.
     /// </summary>
-    public static byte[] RemoveDleStuffing(byte[] stuffed)
+    /// <param name="source">Stuffed payload (with doubled 0x10 bytes)</param>
+    /// <param name="destination">Pre-allocated buffer (at least source.Length)</param>
+    /// <returns>Number of bytes written to destination (always ≤ source.Length)</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int RemoveDleStuffing(ReadOnlySpan<byte> source, Span<byte> destination)
     {
-        var list = new List<byte>(stuffed.Length);
-        for (int i = 0; i < stuffed.Length; i++)
+        int destPos = 0;
+        
+        for (int i = 0; i < source.Length; i++)
         {
-            byte b = stuffed[i];
-            if (b == 0x10 && i + 1 < stuffed.Length && stuffed[i + 1] == 0x10)
+            byte b = source[i];
+            destination[destPos++] = b;
+            
+            // If this is a DLE byte and next byte is also DLE, skip the next byte
+            if (b == 0x10 && i + 1 < source.Length && source[i + 1] == 0x10)
             {
-                list.Add(0x10);
-                i++;
+                i++; // Skip the stuffed duplicate
             }
-            else
-                list.Add(b);
         }
-        return list.ToArray();
+        
+        return destPos;
     }
 
-    // ─── DecodeMessage ────────────────────────────────────────────────────────
+    // ─── DecodeMessage ───────────────────────────────────────────────────────
 
     /// <summary>
     /// Converts a DF1 message/status code to a human-readable string.
@@ -190,6 +237,11 @@ public static class MessageDecoder
     }
 }
 
+/// <summary>
+/// Checksum algorithm selection for DF1 frames.
+/// CRC (default) is more reliable and standard for modern AB PLCs.
+/// BCC (XOR) is legacy but still supported by some older systems.
+/// </summary>
 public enum CheckSumOptions
 {
     Crc = 0,
