@@ -130,7 +130,7 @@ public class DF1Protocol : ILinkProtocol
     /// The PDU is the unstuffed inner payload without DLE framing.
     /// Format: DST, SRC, CMD, STS, TNS_LO, TNS_HI, [FUNC], [DATA...]
     /// </summary>
-    public event EventHandler<byte[]>? PduReceived;
+    public event EventHandler<(byte[] pdu, object ClientContext)>? PduReceived;
     
     /// <summary>
     /// Human-readable name of this protocol for logging.
@@ -326,7 +326,7 @@ public class DF1Protocol : ILinkProtocol
     /// This method adds DLE STX/ETX framing, DLE stuffing, and checksum.
     /// </summary>
     /// <param name="pdu">Inner frame PDU to send (without DLE framing)</param>
-    public void SendResponse(byte[] pdu)
+    public void SendResponse(byte[] pdu, object clientContext)
     {
         SendRawFrame(pdu);
     }
@@ -783,7 +783,8 @@ public class DF1Protocol : ILinkProtocol
             // Build PDU and raise event for emulator to dispatch
             byte[] pdu = new byte[unstuffedLen];
             unstuffed.CopyTo(pdu);
-            PduReceived?.Invoke(this, pdu);
+            // DF1 is a single-client protocol, pass 'this' as client context (ignored by emulator)
+            PduReceived?.Invoke(this, (pdu, this));
         }
         catch (Exception ex) { if (_isLoggingEnabled) Console.WriteLine("ProcessFrame error: " + ex.Message); }
     }

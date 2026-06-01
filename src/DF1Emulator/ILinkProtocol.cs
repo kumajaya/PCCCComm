@@ -40,13 +40,15 @@ public interface ILinkProtocol
     /// The PDU is the inner frame (DST, SRC, CMD, STS, TNS, FUNC, DATA...)
     /// </summary>
     /// <param name="pdu">Inner frame PDU to send</param>
-    void SendResponse(byte[] pdu);
+    /// <param name="clientContext">Client context object (e.g., EIPClient instance) for routing response to correct client.
+    /// For single-client protocols like DF1 serial, this parameter is ignored.</param>
+    void SendResponse(byte[] pdu, object clientContext);
 
     /// <summary>
     /// Raised when a complete PDU (inner frame) has been received and parsed.
     /// The handler should dispatch the command to PlcMemory.
     /// </summary>
-    event EventHandler<byte[]> PduReceived;
+    event EventHandler<(byte[] pdu, object ClientContext)> PduReceived;
 
     /// <summary>
     /// Human-readable name of the protocol for logging.

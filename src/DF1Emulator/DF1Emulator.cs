@@ -35,9 +35,9 @@ using System.Threading.Tasks;
 ///   3. Delegates protocol-specific I/O to ILinkProtocol implementations
 /// 
 /// Supported protocols:
-///   - DF1 (serial) via DF1Protocol (fully implemented)
+///   - DF1 (serial) via DF1Protocol (default, fully implemented)
 ///   - DH485 via serial (planned for future release)
-///   - EtherNet/IP (EIP/PCCC) via TCP (planned for future release)
+///   - EtherNet/IP (EIP/PCCC) via TCP (fully implemented)
 /// 
 /// FRAME FORMAT (DF1 mode only - other protocols use different framing):
 ///   DLE STX | DST SRC CMD STS TNS_LO TNS_HI [FUNC] [DATA...] | DLE ETX | CHK
@@ -89,7 +89,7 @@ public class DF1Emulator : IDisposable
     {
         DF1,      // Serial DF1 full-duplex (default, fully implemented)
         DH485,    // DH485 via serial (planned for future release)
-        EIP       // EtherNet/IP (EIP/PCCC) via TCP (planned for future release)
+        EIP       // EtherNet/IP (EIP/PCCC) via TCP (fully implemented)
     }
 
     private readonly EmulatorMode _mode;
@@ -200,7 +200,7 @@ public class DF1Emulator : IDisposable
         {
             EmulatorMode.DF1 => new DF1Protocol(this, portName, baudRate, parity),
             EmulatorMode.DH485 => throw new NotImplementedException("DH485 protocol support is planned for a future release"),
-            EmulatorMode.EIP => throw new NotImplementedException("EtherNet/IP (EIP/PCCC) support is planned for a future release"),
+            EmulatorMode.EIP => new EIPProtocol(this, eipPort),
             _ => throw new ArgumentException($"Unknown emulator mode: {mode}")
         };
 
@@ -270,6 +270,8 @@ public class DF1Emulator : IDisposable
         _isLoggingEnabled = enabled;
         if (_protocol is DF1Protocol df1Proto)
             df1Proto.SetLoggingEnabled(enabled);
+        if (_protocol is EIPProtocol eipProto)
+            eipProto.SetLoggingEnabled(enabled);
         if (!enabled)
             Console.WriteLine("[PERF] Logging disabled for maximum throughput");
     }
@@ -314,16 +316,16 @@ public class DF1Emulator : IDisposable
     /// The PDU is the inner frame without protocol-specific framing.
     /// Format: [DST, SRC, CMD, STS, TNS_LO, TNS_HI, FUNC?, DATA...]
     /// </summary>
-    private void OnPduReceived(object? sender, byte[] pdu)
+    private void OnPduReceived(object? sender, (byte[] pdu, object ClientContext) args)
     {
         Interlocked.Increment(ref _framesProcessed);
-        DispatchCommand(pdu);
+        DispatchCommand(args.pdu, args.ClientContext);
     }
 
     // ─── Command Dispatcher (Shared Across All Protocols) ────────────────────
     // All command processing routes through here. The PDU format is the same
     // for DF1 and EIP/PCCC (CIP encapsulated PCCC).
-    private void DispatchCommand(byte[] pdu)
+    private void DispatchCommand(byte[] pdu, object clientContext)
     {
         if (pdu.Length < 6) return;
 
@@ -333,40 +335,43 @@ public class DF1Emulator : IDisposable
         int tns = pdu[4] | (pdu[5] << 8);
         int func = pdu.Length >= 7 ? pdu[6] : 0;
 
+        if (_isLoggingEnabled)
+            Console.WriteLine($"[EMU]  DispatchCommand: CMD=0x{cmd:X2}, TNS=0x{tns:X4}, FNC=0x{func:X2}");
+
         // Extract data payload (everything after the 6-byte header + optional func byte)
         int dataOffset = (func != 0 || pdu.Length > 7) ? 7 : 6;
         byte[] data = pdu.Length > dataOffset ? pdu[dataOffset..] : Array.Empty<byte>();
 
         // Dispatch based on command code
         if (cmd == 0x06 && func == 0x00)
-            SendGetStatusLoopbackResponse(src, tns, data);
+            SendGetStatusLoopbackResponse(src, tns, data, clientContext);
         else if (cmd == 0x06 && func == 0x03)
-            SendGetStatusResponse(src, tns);
+            SendGetStatusResponse(src, tns, clientContext);
         else if (cmd == 0x06 && func == 0x01)
-            SendDiagnosticCountersResponse(src, tns, replyCmd: 0x46);
+            SendDiagnosticCountersResponse(src, tns, replyCmd: 0x46, clientContext);
         else if (cmd == 0x06 && func == 0x07)
         {
             ResetDiagnosticCounters();
-            SendEmptyResponse(src, tns, 0x46, func);
+            SendEmptyResponse(src, tns, 0x46, func, clientContext);
         }
         else if (cmd == 0x06 && func == 0x02)
-            SendLoopbackResponse(src, tns, data);
+            SendLoopbackResponse(src, tns, data, clientContext);
         else if (cmd == 0x01)
-            SendEmptyResponse(src, tns, 0x41, 0x00);
+            SendEmptyResponse(src, tns, 0x41, 0x00, clientContext);
         else if (cmd == 0x0B)
-            SendEmptyResponse(src, tns, 0x4B, 0x00);
+            SendEmptyResponse(src, tns, 0x4B, 0x00, clientContext);
         else if (cmd == 0x0F)
-            DispatchFunctionCode(src, tns, func, data);
+            DispatchFunctionCode(src, tns, func, data, clientContext);
         else if (cmd == 0x0A)
-            SendDiagnosticCountersResponse(src, tns, 0x4A);
+            SendDiagnosticCountersResponse(src, tns, 0x4A, clientContext);
         else if (cmd == 0x67)
-            HandleReadModifiedData(src, tns, data);
+            HandleReadModifiedData(src, tns, data, clientContext);
         else
-            SendErrorResponse(src, tns, cmd, func, 0x01);
+            SendErrorResponse(src, tns, cmd, func, 0x01, clientContext);
     }
 
     // ─── PCCC Function Code Handlers ─────────────────────────────────────────
-    private void DispatchFunctionCode(int src, int tns, int func, byte[] data)
+    private void DispatchFunctionCode(int src, int tns, int func, byte[] data, object clientContext)
     {
         switch (func)
         {
@@ -374,18 +379,18 @@ public class DF1Emulator : IDisposable
             case 0xA1:  // Two address fields
             case 0xA2:  // Three address fields (with sub-element)
             case 0x68:  // Three address fields (alternate format)
-                HandleReadRequest(src, tns, func, data);
+                HandleReadRequest(src, tns, func, data, clientContext);
                 break;
 
             // Protected Typed Logical Write operations
             case 0xAA:  // Word write
             case 0xAB:  // Bit-masked write
-                HandleWriteRequest(src, tns, func, data);
+                HandleWriteRequest(src, tns, func, data, clientContext);
                 break;
 
             // Read File Info (SLC 5/03 and 5/04 only)
             case 0x94:
-                HandleReadFileInfo(src, tns, data);
+                HandleReadFileInfo(src, tns, data, clientContext);
                 break;
 
             // Change processor mode (CMD=0x80 for SLC 5/03)
@@ -404,7 +409,7 @@ public class DF1Emulator : IDisposable
                     };
                     UpdateProcessorMode();
                 }
-                SendEmptyResponse(src, tns, 0x4F, func);
+                SendEmptyResponse(src, tns, 0x4F, func, clientContext);
                 break;
 
             // Change processor mode (CMD=0x3A for MicroLogix 1000)
@@ -420,7 +425,7 @@ public class DF1Emulator : IDisposable
                     };
                     UpdateProcessorMode();
                 }
-                SendEmptyResponse(src, tns, 0x4F, func);
+                SendEmptyResponse(src, tns, 0x4F, func, clientContext);
                 break;
 
             // Acknowledged commands (no processing required)
@@ -429,11 +434,11 @@ public class DF1Emulator : IDisposable
             case 0x29:  // Unrecognized (sent by RSLinx during auto-configure)
             case 0x52:  // Download Completed
             case 0x88:  // Execute Command List (download initialization)
-                SendEmptyResponse(src, tns, 0x4F, func);
+                SendEmptyResponse(src, tns, 0x4F, func, clientContext);
                 break;
 
             default:
-                SendErrorResponse(src, tns, 0x0F, func, 0x01);
+                SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
                 break;
         }
     }
@@ -452,11 +457,11 @@ public class DF1Emulator : IDisposable
     /// Supports extended element addressing (element >= 255) by decoding 0xFF
     /// followed by two bytes.
     /// </summary>
-    private void HandleReadRequest(int src, int tns, int func, byte[] payload)
+    private void HandleReadRequest(int src, int tns, int func, byte[] payload, object clientContext)
     {
         if (payload == null || payload.Length < 4)
         {
-            SendErrorResponse(src, tns, 0x0F, func, 0x01);
+            SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
             return;
         }
 
@@ -491,11 +496,11 @@ public class DF1Emulator : IDisposable
         // Map status codes to DF1 error codes
         // status 2 = file not found → 0x50 (bad address)
         // status 3 = out of range → 0x10 (illegal format/address)
-        if (status == 2) { SendErrorResponse(src, tns, 0x0F, func, 0x50); return; }
-        if (status == 3) { SendErrorResponse(src, tns, 0x0F, func, 0x10); return; }
-        if (status != 0) { SendErrorResponse(src, tns, 0x0F, func, 0x10); return; }
+        if (status == 2) { SendErrorResponse(src, tns, 0x0F, func, 0x50, clientContext); return; }
+        if (status == 3) { SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext); return; }
+        if (status != 0) { SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext); return; }
 
-        SendDataResponse(src, tns, 0x4F, func, data);
+        SendDataResponse(src, tns, 0x4F, func, data, clientContext);
     }
 
     /// <summary>
@@ -525,11 +530,11 @@ public class DF1Emulator : IDisposable
     /// For I/O image file types (0x8B output-by-slot, 0x8C input-by-slot),
     /// the mask is ignored and data is written directly (SLCCCD section 4.36).
     /// </summary>
-    private void HandleWriteRequest(int src, int tns, int func, byte[] payload)
+    private void HandleWriteRequest(int src, int tns, int func, byte[] payload, object clientContext)
     {
         if (payload == null || payload.Length < 5)
         {
-            SendErrorResponse(src, tns, 0x0F, func, 0x01);
+            SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
             return;
         }
 
@@ -548,7 +553,7 @@ public class DF1Emulator : IDisposable
 
         if (payload.Length <= payloadIdx)
         {
-            SendErrorResponse(src, tns, 0x0F, func, 0x01);
+            SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
             return;
         }
 
@@ -568,7 +573,7 @@ public class DF1Emulator : IDisposable
             // Bit write (masked write) - atomic operation required for multi-client safety
             if (payload.Length < payloadIdx + 4)
             {
-                SendErrorResponse(src, tns, 0x0F, func, 0x01);
+                SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
                 return;
             }
 
@@ -579,7 +584,7 @@ public class DF1Emulator : IDisposable
             bool ok = _memory.ReadModifyWrite(fileType, fileNumber, element, subElement, mask, value);
             if (!ok)
             {
-                SendErrorResponse(src, tns, 0x0F, func, 0x10);
+                SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext);
                 return;
             }
         }
@@ -587,7 +592,7 @@ public class DF1Emulator : IDisposable
         {
             if (payload.Length < payloadIdx + bytesToWrite)
             {
-                SendErrorResponse(src, tns, 0x0F, func, 0x01);
+                SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
                 return;
             }
 
@@ -596,12 +601,12 @@ public class DF1Emulator : IDisposable
             bool ok = _memory.Write(fileType, fileNumber, element, subElement, bytesToWrite, writeData);
             if (!ok)
             {
-                SendErrorResponse(src, tns, 0x0F, func, 0x10);
+                SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext);
                 return;
             }
         }
 
-        SendEmptyResponse(src, tns, 0x4F, func);
+        SendEmptyResponse(src, tns, 0x4F, func, clientContext);
     }
 
     /// <summary>
@@ -626,11 +631,11 @@ public class DF1Emulator : IDisposable
     ///   STS=0x10            illegal format (wrong mask or major file type)
     ///   STS=0x50            bad address / file doesn't exist
     /// </summary>
-    private void HandleReadFileInfo(int src, int tns, byte[] payload)
+    private void HandleReadFileInfo(int src, int tns, byte[] payload, object clientContext)
     {
         if (payload == null || payload.Length < 3)
         {
-            SendErrorResponse(src, tns, 0x0F, 0x94, 0x10);
+            SendErrorResponse(src, tns, 0x0F, 0x94, 0x10, clientContext);
             return;
         }
 
@@ -641,13 +646,13 @@ public class DF1Emulator : IDisposable
         // Validate: mask must be 0x06, major type must be 0x80 (data table)
         if (mask != 0x06 || majorType != 0x80)
         {
-            SendErrorResponse(src, tns, 0x0F, 0x94, 0x10);
+            SendErrorResponse(src, tns, 0x0F, 0x94, 0x10, clientContext);
             return;
         }
 
         if (!_memory.GetFileInfo(fileNumber, out int fileType, out int fileSize, out int elements))
         {
-            SendErrorResponse(src, tns, 0x0F, 0x94, 0x50);
+            SendErrorResponse(src, tns, 0x0F, 0x94, 0x50, clientContext);
             return;
         }
 
@@ -667,18 +672,18 @@ public class DF1Emulator : IDisposable
         // Byte 8: data type code
         reply[8] = (byte)fileType;
 
-        SendDataResponse(src, tns, 0x4F, 0x94, reply);
+        SendDataResponse(src, tns, 0x4F, 0x94, reply, clientContext);
     }
 
     /// <summary>
     /// Read Modified Data (CMD=0x67) – simplified as normal read.
     /// Used by some Rockwell software for optimized data access.
     /// </summary>
-    private void HandleReadModifiedData(int src, int tns, byte[] payload)
+    private void HandleReadModifiedData(int src, int tns, byte[] payload, object clientContext)
     {
         if (payload == null || payload.Length < 5)
         {
-            SendErrorResponse(src, tns, 0x67, 0x00, 0x01);
+            SendErrorResponse(src, tns, 0x67, 0x00, 0x01, clientContext);
             return;
         }
 
@@ -691,18 +696,18 @@ public class DF1Emulator : IDisposable
         int fileSize = _memory.GetFileSize(fileType, fileNumber);
         if (byteOffset + bytesToRead > fileSize)
         {
-            SendErrorResponse(src, tns, 0x67, 0x00, 0x10);
+            SendErrorResponse(src, tns, 0x67, 0x00, 0x10, clientContext);
             return;
         }
 
         byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
         if (status != 0)
         {
-            SendErrorResponse(src, tns, 0x67, 0x00, 0x10);
+            SendErrorResponse(src, tns, 0x67, 0x00, 0x10, clientContext);
             return;
         }
 
-        SendDataResponse(src, tns, 0xA7, 0x00, data);
+        SendDataResponse(src, tns, 0xA7, 0x00, data, clientContext);
     }
 
     // ─── Response Helpers ────────────────────────────────────────────────────
@@ -710,24 +715,24 @@ public class DF1Emulator : IDisposable
     // active protocol's SendResponse() method.
 
     /// <summary>Sends an empty response (no data payload).</summary>
-    private void SendEmptyResponse(int dst, int tns, int cmd, int func)
-        => SendResponse(dst, tns, cmd, func, 0x00, Array.Empty<byte>(), withFunc: true);
+    private void SendEmptyResponse(int dst, int tns, int cmd, int func, object clientContext)
+        => SendResponse(dst, tns, cmd, func, 0x00, Array.Empty<byte>(), withFunc: true, clientContext);
 
     /// <summary>Sends a response with data payload (without FUNC byte).</summary>
-    private void SendDataResponse(int dst, int tns, int cmd, int func, byte[] data)
-        => SendResponse(dst, tns, cmd, func, 0x00, data, withFunc: false);
+    private void SendDataResponse(int dst, int tns, int cmd, int func, byte[] data, object clientContext)
+        => SendResponse(dst, tns, cmd, func, 0x00, data, withFunc: false, clientContext);
 
     /// <summary>Get Status loopback response (CMD=0x06, FNC=0x00).</summary>
-    private void SendGetStatusLoopbackResponse(int dst, int tns, byte[] data)
-        => SendResponse(dst, tns, 0x46, 0x00, 0x00, data, withFunc: true);
+    private void SendGetStatusLoopbackResponse(int dst, int tns, byte[] data, object clientContext)
+        => SendResponse(dst, tns, 0x46, 0x00, 0x00, data, withFunc: true, clientContext);
 
     /// <summary>Diagnostic loopback response (CMD=0x06, FNC=0x02).</summary>
-    private void SendLoopbackResponse(int dst, int tns, byte[] data)
-        => SendResponse(dst, tns, 0x46, 0x02, 0x00, data, withFunc: true);
+    private void SendLoopbackResponse(int dst, int tns, byte[] data, object clientContext)
+        => SendResponse(dst, tns, 0x46, 0x02, 0x00, data, withFunc: true, clientContext);
 
     /// <summary>Sends an error response with the reply bit set (cmd | 0x40).</summary>
-    private void SendErrorResponse(int dst, int tns, int cmd, int func, byte status)
-        => SendResponse(dst, tns, cmd | 0x40, func, status, Array.Empty<byte>(), withFunc: true);
+    private void SendErrorResponse(int dst, int tns, int cmd, int func, byte status, object clientContext)
+        => SendResponse(dst, tns, cmd | 0x40, func, status, Array.Empty<byte>(), withFunc: true, clientContext);
 
     /// <summary>
     /// Sends the GetStatus response (CMD=0x06, FNC=0x03).
@@ -751,14 +756,14 @@ public class DF1Emulator : IDisposable
     ///   Byte 22    : RAM size in Kbytes — 0x10 for 1747-L532E (32K)
     ///   Byte 23    : flags (bits 2-7 = program owner node, 0x3F = no owner)
     /// </summary>
-    private void SendGetStatusResponse(int dst, int tns)
+    private void SendGetStatusResponse(int dst, int tns, object clientContext)
     {
         byte[] payload;
         lock (_cacheLock)
         {
             payload = (byte[])_cachedGetStatusPayload.Clone();
         }
-        SendResponse(dst, tns, 0x46, 0x03, 0x00, payload, withFunc: false);
+        SendResponse(dst, tns, 0x46, 0x03, 0x00, payload, withFunc: false, clientContext);
     }
 
     /// <summary>
@@ -784,7 +789,7 @@ public class DF1Emulator : IDisposable
     /// 
     /// Total: 34 bytes (modem status word + 32 counter bytes).
     /// </summary>
-    private void SendDiagnosticCountersResponse(int dst, int tns, int replyCmd)
+    private void SendDiagnosticCountersResponse(int dst, int tns, int replyCmd, object clientContext)
     {
         UpdateModemStatus();
 
@@ -828,7 +833,7 @@ public class DF1Emulator : IDisposable
         W(24, lost);          // Bytes 24-25: lost modem count
         // Bytes 26-33: 00h unused × 8 (automatically zero from array initialization)
 
-        SendResponse(dst, tns, replyCmd, 0x00, 0x00, counters, withFunc: false);
+        SendResponse(dst, tns, replyCmd, 0x00, 0x00, counters, withFunc: false, clientContext);
     }
 
     /// <summary>
@@ -862,7 +867,8 @@ public class DF1Emulator : IDisposable
     /// <param name="status">Status code (0 for success)</param>
     /// <param name="data">Data payload (may be empty)</param>
     /// <param name="withFunc">True to include FUNC byte in frame, false to omit</param>
-    private void SendResponse(int dst, int tns, int cmd, int func, byte status, byte[] data, bool withFunc)
+    /// <param name="clientContext">Context information for the client</param>
+    private void SendResponse(int dst, int tns, int cmd, int func, byte status, byte[] data, bool withFunc, object clientContext)
     {
         int dataLen = data?.Length ?? 0;
         int headerLen = withFunc ? 7 : 6;
@@ -879,7 +885,7 @@ public class DF1Emulator : IDisposable
         if (dataLen > 0)
             data?.CopyTo(inner, headerLen);
 
-        _protocol?.SendResponse(inner);
+        _protocol?.SendResponse(inner, clientContext);
     }
 
     // ─── Internal Methods Called by DF1Protocol ──────────────────────────────

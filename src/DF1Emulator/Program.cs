@@ -37,7 +37,7 @@ using System.IO.Ports;
 ///
 /// Example:
 ///   dotnet run -- COM2 --baud 19200 --checksum crc
-///   dotnet run -- COM2 --mode eip --port 44818
+///   dotnet run -- --mode eip --port 44818
 ///   dotnet run -- COM2 --quiet                          # High performance mode
 /// </summary>
 class Program
@@ -115,6 +115,12 @@ class Program
             _ => DF1Emulator.EmulatorMode.DF1
         };
 
+        // Warning for serial parameters when using EIP mode
+        if (emulatorMode == DF1Emulator.EmulatorMode.EIP && portName != "COM2")
+        {
+            Console.WriteLine($"[WARN] EIP mode ignores serial port '{portName}'. Using Ethernet only.");
+        }
+
         // Create and start emulator
         using var emulator = new DF1Emulator(portName, baud, parity, emulatorMode, eipPort)
         {
@@ -131,19 +137,30 @@ class Program
         try
         {
             emulator.Start();
-            Console.WriteLine($"DF1 Emulator running on {portName}");
+            Console.WriteLine($"DF1 Emulator running");
             Console.WriteLine($"  Mode      : {mode.ToUpper()}");
+            
             if (emulatorMode == DF1Emulator.EmulatorMode.DF1)
             {
+                Console.WriteLine($"  Port      : {portName}");
                 Console.WriteLine($"  Baud rate : {baud}");
                 Console.WriteLine($"  Parity    : {parity}");
+                Console.WriteLine($"  Node ID   : {node}");
+                Console.WriteLine($"  Checksum  : {emulator.CheckSum}");
+            }
+            else if (emulatorMode == DF1Emulator.EmulatorMode.DH485)
+            {
+                Console.WriteLine($"  Port      : {portName}");
+                Console.WriteLine($"  Baud rate : 19200 (fixed for DH485)");
+                Console.WriteLine($"  Node ID   : {node}");
+                Console.WriteLine($"  Status    : Not yet implemented");
             }
             else if (emulatorMode == DF1Emulator.EmulatorMode.EIP)
             {
                 Console.WriteLine($"  EIP Port  : {eipPort}");
+                Console.WriteLine($"  Node ID   : {node}");
             }
-            Console.WriteLine($"  Node ID   : {node}");
-            Console.WriteLine($"  Checksum  : {emulator.CheckSum}");
+            
             Console.WriteLine($"  Logging   : {(quietMode ? "Disabled (High Performance)" : "Enabled")}");
             Console.WriteLine("Press Enter to stop.");
             Console.ReadLine();
@@ -175,15 +192,15 @@ class Program
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run -- COM2 --baud 19200 --checksum crc");
         Console.WriteLine("  dotnet run -- COM3 --baud 9600 --parity even --node 2");
-        Console.WriteLine("  dotnet run -- COM2 --mode eip --port 44818");
+        Console.WriteLine("  dotnet run -- --mode eip --port 44818");
         Console.WriteLine("  dotnet run -- COM2 --quiet                    # High performance mode");
         Console.WriteLine();
         Console.WriteLine("Note: Disabling logging eliminates string allocations and");
         Console.WriteLine("      significantly improves throughput under high load.");
         Console.WriteLine();
         Console.WriteLine("Protocol Modes:");
-        Console.WriteLine("  df1    - Serial DF1 full-duplex (default, works with existing code)");
+        Console.WriteLine("  df1    - Serial DF1 full-duplex (default, fully implemented)");
         Console.WriteLine("  dh485  - DH485 via serial (future)");
-        Console.WriteLine("  eip    - EtherNet/IP (EIP/PCCC) via TCP (planned)");
+        Console.WriteLine("  eip    - EtherNet/IP (EIP/PCCC) via TCP (implemented)");
     }
 }

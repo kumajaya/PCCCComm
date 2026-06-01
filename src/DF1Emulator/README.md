@@ -1,15 +1,17 @@
 # DF1 SLC 5/03 Emulator
 
 **Purpose**  
-Lightweight, standalone DF1 RS-232 emulator that mimics an SLC 5/03 PLC for testing DF1 clients and RSLinx. This emulator does **not** depend on any external DF1 library – all DF1 framing, checksum (BCC/CRC), DLE stuffing, and memory simulation are self‑contained.
+Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an SLC 5/03 PLC for testing DF1/EIP clients and RSLinx. This emulator does **not** depend on any external DF1 library – all DF1 framing, checksum (BCC/CRC), DLE stuffing, EIP/CIP encapsulation, and memory simulation are self‑contained.
 
 ## Features
-- DF1 full‑duplex framing with DLE STX / DLE ETX and DLE stuffing
+- **DF1 full‑duplex framing** with DLE STX / DLE ETX and DLE stuffing
+- **EtherNet/IP (EIP/PCCC)** support – TCP port 44818, UDP broadcast ListIdentity
 - CRC‑16 (calculation as per AB specification) **default** – BCC (XOR) also supported
 - Get Status response crafted for SLC 5/03 (processor code `0x49`)
 - Reads from File 0 (directory) and any data file listed in the directory
 - In‑memory PLC file store with pre‑defined files (O, I, S, B, N, F, T, C, R)
 - Configurable serial settings via command line
+- Configurable EIP protocol mode with TCP/UDP support
 - Console logging of RX/TX hex for debugging
 - Independent – no external dependencies except `System.IO.Ports`
 - **Loads real SLC 5/03 program** from embedded .bin resource (converted from APS .ACH archive)
@@ -19,6 +21,7 @@ Lightweight, standalone DF1 RS-232 emulator that mimics an SLC 5/03 PLC for test
 - .NET 8 SDK or later
 - Virtual serial pair tool for testing (e.g., com0com on Windows)
 - RSLinx Classic (optional, for integration testing)
+- For EIP mode: network connectivity (TCP/UDP port 44818)
 
 ## Build
 ```bash
@@ -27,16 +30,22 @@ dotnet build -c Release DF1Emulator.csproj
 
 ## Run
 
+### DF1 Serial Mode (Default)
 **Default** (COM2, 19200, no parity, node 1, CRC checksum):
 ```bash
 dotnet run --project DF1Emulator.csproj -- COM2
+```
+
+Output:
+```
 [BIN] DF1Emulator.Resources.DBU550.bin
       Size=9921 Magic=0xDF1A Ver=1 Type=0x49 SLC 5/03
       Files=33 TS=2026-05-31 01:59:11
       Loaded: 21 data files, 10 program files
 DF1 PLC memory initialized with embedded program.
-DF1 Emulator started on COM2...
-DF1 Emulator running on COM2
+DF1 Emulator running
+  Mode      : DF1
+  Port      : COM2
   Baud rate : 19200
   Parity    : None
   Node ID   : 1
@@ -51,16 +60,41 @@ dotnet run --project DF1Emulator.csproj -- COM2 --checksum bcc --node 2
 
 # Change baud rate and parity
 dotnet run --project DF1Emulator.csproj -- COM3 --baud 9600 --parity even
+
+# Quiet mode (high performance, no logging)
+dotnet run --project DF1Emulator.csproj -- COM2 --quiet
+```
+
+### EtherNet/IP (EIP) Mode
+```bash
+# Start emulator in EIP mode on default port 44818
+dotnet run --project DF1Emulator.csproj -- --mode eip
+
+# Custom EIP port
+dotnet run --project DF1Emulator.csproj -- --mode eip --port 44819
+```
+
+Output:
+```
+[EIP]  EtherNet/IP emulator started on TCP/UDP port 44818
+DF1 Emulator running
+  Mode      : EIP
+  EIP Port  : 44818
+  Node ID   : 1
+Press Enter to stop.
 ```
 
 ### Command line options
 | Option | Description | Default |
 |--------|-------------|---------|
-| `[port]` | Serial port name | `COM2` |
-| `--baud <n>` | Baud rate | `19200` |
-| `--parity <none/odd/even>` | Parity mode | `none` |
+| `[port]` | Serial port name (DF1/DH485 mode only) | `COM2` |
+| `--baud <n>` | Baud rate (DF1/DH485 mode only) | `19200` |
+| `--parity <none/odd/even>` | Parity mode (DF1/DH485 mode only) | `none` |
 | `--node <n>` | Emulator node ID | `1` |
-| `--checksum <crc/bcc>` | Checksum mode | `crc` |
+| `--checksum <crc/bcc>` | Checksum mode (DF1 mode only) | `crc` |
+| `--mode <df1\|dh485\|eip>` | Protocol mode | `df1` |
+| `--port <n>` | EIP port number (EIP mode only) | `44818` |
+| `--quiet, -q` | Disable logging for maximum performance | `false` |
 | `--help, -h` | Show usage | – |
 
 ## Linux-specific notes
@@ -120,11 +154,20 @@ sudo usermod -a -G dialout $USER
    ```
 3. Connect your DF1 client to `ttyV1`.
 
-## RSLinx integration
+## RSLinx Integration
+
+### DF1 Serial Mode
 - Create an **RS-232 DF1** driver in RSLinx.
 - Point it to the COM port paired with the emulator.
 - Use **19200 baud, No parity, 8 data bits, 1 stop bit** (or match the emulator settings).
-- If RSLinx does not show the processor or memory, check the emulator console for hex logs and ensure `PlcMemory` file offsets match RSLinx expectations.
+
+### EtherNet/IP (EIP) Mode
+- Create an **EtherNet/IP** driver in RSLinx Classic.
+- Add the emulator's IP address (e.g., `127.0.0.1` or `192.168.x.x`).
+- The emulator will appear as **"1747-L553 SLC 5/05"** in RSWho.
+- **Auto-browse:** The emulator answers UDP broadcast ListIdentity on port 44818, so it appears automatically when browsing the network.
+
+**Firewall note:** UDP port 44818 must be open for RSLinx auto-browse (broadcast ListIdentity). TCP port 44818 is required for connected sessions.
 
 ![RSLinx](Assets/Screenshots/RSLinx.png)
 
@@ -197,28 +240,35 @@ The emulator simulates a specific SLC 5/03 configuration with the following data
 | File | Description |
 |------|-------------|
 | `Program.cs` | CLI entry point, argument parsing, usage help |
-| `DF1Emulator.cs` | Core DF1 frame parsing, command handlers, ACK/NAK, serial I/O |
+| `DF1Emulator.cs` | Protocol factory, PDU dispatcher, command handlers, timers |
+| `DF1Protocol.cs` | DF1 serial framing, DLE stuffing, CRC/BCC, circular buffer |
+| `EIPProtocol.cs` | EtherNet/IP server, session management, CPF/CIP framing |
+| `EIPClient.cs` | Per-connection EIP state, Forward Open/Close, PCCC dispatch |
+| `ILinkProtocol.cs` | Protocol abstraction interface |
 | `MessageDecoder.cs` | DLE stuffing/unstuffing, BCC/CRC checksum calculation |
 | `PlcMemory.cs` | In‑memory file directory (File 0) and data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, etc.) |
 
 ## Extending the emulator
-- **Add new DF1 commands** – extend the dispatch logic in `DF1Emulator.ProcessFrame()`.
-- **Add new data files** – modify `PlcMemory` constructor and the file directory inside `File 0`.
-- **Change element sizes** – update `_bytesPerElement` dictionary and file size arrays.
-- **Simulate timers/counters** – implement background thread that updates T4 and C5 structures.
+- **Add new DF1/PCCC commands** – extend the dispatch logic in `DF1Emulator.DispatchCommand()` or `DispatchFunctionCode()`
+- **Add new EIP services** – extend `EIPClient.DispatchCommand()` switch in `EIPClient.cs`
+- **Add new data files** – modify `PlcMemory` constructor and the file directory inside `File 0`
+- **Change element sizes** – update `_bytesPerElement` dictionary and file size arrays
+- **Simulate timers/counters** – implement background thread that updates T4 and C5 structures
 
 ## Troubleshooting
 | Issue | Likely solution |
 |-------|------------------|
 | **Port busy / access denied** | Ensure no other application (including RSLinx) is using the same COM port. Use a virtual pair so emulator and client use different ends. |
 | **Checksum mismatch** | Verify the client and emulator use the same checksum type (`--checksum crc` or `bcc`). Emulator defaults to **CRC**. |
-| **RSLinx cannot see memory** | Enable verbose logging in emulator. Confirm that `Read File 0` requests are received and that the emulator responds with a valid directory. Check file offsets in `PlcMemory`. |
-| **No response after ENQ** | Make sure the emulator is running on the correct COM port and the baud rate/parity matches the client. The emulator automatically replies with ACK to ENQ. |
+| **RSLinx cannot see DF1 memory** | Enable verbose logging in emulator. Confirm that `Read File 0` requests are received and that the emulator responds with a valid directory. Check file offsets in `PlcMemory`. |
+| **No response after ENQ (DF1)** | Make sure the emulator is running on the correct COM port and the baud rate/parity matches the client. The emulator automatically replies with ACK to ENQ. |
+| **RSLinx cannot find device on network (EIP)** | Ensure UDP port 44818 is not blocked by firewall. Emulator answers broadcast ListIdentity for auto-browse. |
+| **pycomm3 / libplctag connection timeout (EIP)** | Verify `--mode eip` is active. Check firewall allows TCP 44818. |
 
 ## License
 Same as the DF1Comm library.
 
 ## Contributing
 - Fork, create a feature branch, and open a pull request.
-- Keep the code **self‑contained** (no external DF1 library dependencies).
-- Add unit tests for new features (mock `SerialPort` if needed).'
+- Keep the code **self‑contained** (no external DF1/EIP library dependencies).
+- Add unit tests for new features (mock `SerialPort` if needed).
