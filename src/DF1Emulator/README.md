@@ -6,7 +6,7 @@ Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an
 ## Features
 - **DF1 full‑duplex framing** with DLE STX / DLE ETX and DLE stuffing
 - **EtherNet/IP (EIP/PCCC)** support – TCP port 44818, UDP broadcast ListIdentity
-- CRC‑16 (calculation as per AB specification) **default** – BCC (XOR) also supported
+- CRC‑16 (calculation as per AB specification) **default** – BCC (two's complement of byte sum) also supported
 - Get Status response crafted for SLC 5/03 (processor code `0x49`)
 - Reads from File 0 (directory) and any data file listed in the directory
 - In‑memory PLC file store with pre‑defined files (O, I, S, B, N, F, T, C, R)

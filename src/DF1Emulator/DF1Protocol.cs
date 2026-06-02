@@ -116,7 +116,7 @@ public class DF1Protocol : ILinkProtocol
     private DateTime _lastErrorTime = DateTime.MinValue;
     private readonly TimeSpan _errorThrottle = TimeSpan.FromSeconds(5);
 
-    private int _isDisposing = 0;          // Atomic flag for shutdown (0 = running, 1 = disposing)
+    private volatile int _isDisposing = 0; // Atomic flag for shutdown (0 = running, 1 = disposing)
     private int _activeCallbacks = 0;      // Tracks active DataReceived callbacks for graceful shutdown
 
     // Static readonly frames for ACK/NAK (zero allocation per call)
@@ -505,8 +505,6 @@ public class DF1Protocol : ILinkProtocol
                         Console.WriteLine("[INFO] Circular buffer reset due to error");
                 }
 
-                Interlocked.Increment(ref _framesProcessed);
-
                 // Optional periodic performance logging (every 10000 frames)
                 long frames = _framesProcessed;
                 if (_isLoggingEnabled && frames - _lastFrameLog >= 10000)
@@ -810,7 +808,13 @@ public class DF1Protocol : ILinkProtocol
                     LogDelta("type=ACK → \n    TX: 10 06\n");
             }
         }
-        catch { } // Ignore write errors (client may have disconnected)
+        catch (Exception ex) 
+        { 
+            // Client may have disconnected - just log if debugging needed
+            // No need to increment counters as this is a normal disconnect scenario
+            if (_isLoggingEnabled)
+                Console.WriteLine($"[WARN] Failed to send ACK: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -822,62 +826,22 @@ public class DF1Protocol : ILinkProtocol
     {
         try
         {
+            _emulator.IncrementNakReceived();
             lock (_txLock)
             {
-                _emulator.IncrementNakReceived();
                 _port.Write(NAK_FRAME, 0, NAK_FRAME.Length);
                 if (_isLoggingEnabled)
                     LogDelta("type=NAK → \n    TX: 10 15\n");
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            if (_isLoggingEnabled)
+                Console.WriteLine($"[WARN] Failed to send NAK: {ex.Message}");
+        }
     }
 
     // ─── Frame Builders (Optimized, Zero List/ToArray Overhead) ────────────
-    // These methods are kept for backward compatibility but are not currently used.
-    // The emulator uses the public SendResponse() method which calls SendRawFrame directly.
-
-    /// <summary>
-    /// Sends a DF1 response frame WITH FUNC byte.
-    /// Inner payload: DST SRC CMD STS TNS_LO TNS_HI FUNC [DATA...]
-    /// Used for echo responses, reset responses, and error responses.
-    /// </summary>
-    private void SendFrameWithFunc(int dstNode, int srcNode, int cmd, int tns,
-                                   int func, byte status, byte[] data)
-    {
-        int dataLen = data?.Length ?? 0;
-        byte[] inner = new byte[7 + dataLen];
-        inner[0] = (byte)dstNode;
-        inner[1] = (byte)srcNode;
-        inner[2] = (byte)cmd;
-        inner[3] = status;
-        inner[4] = (byte)(tns & 0xFF);
-        inner[5] = (byte)((tns >> 8) & 0xFF);
-        inner[6] = (byte)func;
-        if (dataLen > 0) data!.CopyTo(inner, 7);
-        SendRawFrame(inner);
-    }
-
-    /// <summary>
-    /// Sends a DF1 response frame WITHOUT FUNC byte.
-    /// Inner payload: DST SRC CMD STS TNS_LO TNS_HI [DATA...]
-    /// Used for Get Status, Read, Write, and mode-change responses.
-    /// DF1Comm reads returned data starting at DataPackets[rTNS][6] = inner[6] = DATA[0].
-    /// </summary>
-    private void SendFrameWithoutFunc(int dstNode, int srcNode, int cmd, int tns,
-                                      int func, byte status, byte[] data)
-    {
-        int dataLen = data?.Length ?? 0;
-        byte[] inner = new byte[6 + dataLen];
-        inner[0] = (byte)dstNode;
-        inner[1] = (byte)srcNode;
-        inner[2] = (byte)cmd;
-        inner[3] = status;
-        inner[4] = (byte)(tns & 0xFF);
-        inner[5] = (byte)((tns >> 8) & 0xFF);
-        if (dataLen > 0) data!.CopyTo(inner, 6);
-        SendRawFrame(inner);
-    }
 
     /// <summary>
     /// Core frame transmission method.

@@ -240,7 +240,7 @@ public static class MessageDecoder
 /// <summary>
 /// Checksum algorithm selection for DF1 frames.
 /// CRC (default) is more reliable and standard for modern AB PLCs.
-/// BCC (XOR) is legacy but still supported by some older systems.
+/// BCC (two's complement of byte sum) is legacy but still supported by some older systems.
 /// </summary>
 public enum CheckSumOptions
 {

@@ -28,18 +28,18 @@ using System.Threading.Tasks;
 /// <summary>
 /// EtherNet/IP (EIP) protocol implementation for SLC 5/03 emulator.
 /// Handles TCP connections, session management, and CIP messaging.
-/// 
+///
 /// This file contains the EIPClient nested class which manages individual
 /// client connections and the EIPRequestContext class which encapsulates
 /// per-request state to prevent race conditions.
-/// 
+///
 /// KEY DESIGN PRINCIPLE: Request Context Encapsulation
 /// ----------------------------------------------------
 /// All per-request state (Sender Context, Request ID) is stored in an
 /// EIPRequestContext object that flows with the request through the
 /// processing pipeline. This prevents race conditions where a subsequent
 /// request overwrites state before the previous response is sent.
-/// 
+///
 /// Without this design, when logging is disabled (high performance mode),
 /// the increased processing speed causes request B to overwrite
 /// _pendingSenderContext before response A is sent, resulting in context
@@ -49,12 +49,12 @@ public sealed partial class EIPProtocol
 {
     /// <summary>
     /// Encapsulates per-request state for EIP messaging.
-    /// 
+    ///
     /// This object is created when a request is received and flows through
     /// the entire processing pipeline. It carries the Sender Context (which
     /// must be echoed in the response) and the Request ID (which must be
     /// echoed in the PCCC response).
-    /// 
+    ///
     /// By storing per-request state in this context object rather than in
     /// instance fields of EIPClient, we eliminate race conditions that
     /// occur when multiple requests are processed concurrently or when
@@ -95,29 +95,30 @@ public sealed partial class EIPProtocol
         /// <param name="command">EIP command code from header (bytes 0-1)</param>
         public EIPRequestContext(EIPClient client, ulong senderContext, ushort command)
         {
-            Client = client;
+            Client        = client;
             SenderContext = senderContext;
-            Command = command;
+            Command       = command;
         }
     }
 
     /// <summary>
     /// Represents one TCP client connection in the EIP protocol.
-    /// 
+    ///
     /// This class handles:
     ///   - Per-connection session state (session handle, registration status)
     ///   - Connected messaging state (Forward Open/Close, connection IDs)
     ///   - Packet parsing and dispatching
     ///   - Response building and sending (using EIPRequestContext for state)
-    /// 
+    ///
     /// All packet I/O for this connection runs on the async continuation chain
     /// started by ProcessAsync(); there is no secondary background thread.
-    /// 
-    /// THREAD SAFETY NOTE:
-    ///   This class is designed for single-threaded async processing. All
-    ///   operations run on the same async continuation chain. The only
-    ///   potential concurrency is between the receive loop and SendResponseAsync
-    ///   calls from the emulator. The _isDisposing flag provides safe shutdown.
+    ///
+    /// THREAD SAFETY:
+    ///   The receive loop (ProcessAsync) and the send path (SendSerializedAsync)
+    ///   may run on different thread-pool threads simultaneously.
+    ///   _sendLock (SemaphoreSlim) serializes all outgoing sends to guarantee
+    ///   FIFO response ordering and prevent interleaved writes on the same socket.
+    ///   _disposed is checked in both paths before accessing the socket.
     /// </summary>
     private sealed class EIPClient : IDisposable
     {
@@ -128,6 +129,12 @@ public sealed partial class EIPProtocol
         private readonly TcpClient     _tcp;
         private readonly NetworkStream _stream;
         private          bool          _disposed;
+
+        // ── Per-client send serialization ────────────────────────────────────
+        // SemaphoreSlim(1,1) used as an async mutex to guarantee that responses
+        // are written to the socket in the order they are queued.  Without this,
+        // two concurrent Task.Run sends can interleave their bytes on the wire.
+        private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
 
         // ── Session state ────────────────────────────────────────────────────
 
@@ -156,8 +163,10 @@ public sealed partial class EIPProtocol
         private static int s_nextConnectionId = 0;
 
         // Connection serial number and sequence counter for connected messaging.
+        // _connSequenceNumber is stored as int to allow Interlocked.Increment;
+        // cast to ushort on write so it wraps at 0xFFFF as per EIP spec.
         private ushort _connSerialNumber;
-        private ushort _connSequenceNumber;
+        private int    _connSequenceNumber;
 
         // True after a successful Forward Open; controls which response path
         // is used in SendResponseAsync().
@@ -182,15 +191,20 @@ public sealed partial class EIPProtocol
         // ── Logging helpers ──────────────────────────────────────────────────
 
         private bool IsLogging => _proto._isLoggingEnabled;
-        private void Log(string msg)   { if (IsLogging) Console.WriteLine($"[EIP]  {msg}"); }
-        private void LogHex(string tag, byte[] data, int len)
+
+        /// <summary>
+        /// Sends a raw EIP response packet to the client. The data buffer must
+        /// already contain a properly formatted EIP encapsulation header (24 bytes).
+        /// Callers must hold _sendLock before calling this method.
+        /// </summary>
+        private async Task SendRawResponse(byte[] data, int length)
         {
-            if (IsLogging && len > 0)
-                Console.WriteLine(
-                    $"[EIP]  {tag} {BitConverter.ToString(data, 0, len).Replace("-", " ")}");
+            _proto.LogHex("TX:", data, length);
+            await _stream.WriteAsync(data, 0, length).ConfigureAwait(false);
         }
 
         // ── Construction ─────────────────────────────────────────────────────
+
         /// <summary>
         /// Creates a new EIP client connection handler.
         /// </summary>
@@ -213,7 +227,7 @@ public sealed partial class EIPProtocol
         /// <summary>
         /// Reads and dispatches EIP packets until the TCP connection closes
         /// or the protocol is stopped.
-        /// 
+        ///
         /// IMPORTANT: For each received packet, an EIPRequestContext is created
         /// to hold per-request state. This context flows through all processing
         /// and is used to build the response, preventing race conditions.
@@ -224,7 +238,7 @@ public sealed partial class EIPProtocol
             // MAX_PACKET_SIZE_EX from libplctag session.h = 44 + 4002 bytes.
             var buf = new byte[65536];
 
-            while (_tcp.Connected && _proto._isDisposing == 0)
+            while (!_proto.IsDisposing)
             {
                 try
                 {
@@ -247,20 +261,20 @@ public sealed partial class EIPProtocol
                     {
                         if (await ReadExactAsync(buf, 24, length).ConfigureAwait(false) < length)
                             break;
-                        if (IsLogging) LogHex("RX:", buf, 24 + length);
+                        _proto.LogHex("RX:", buf, 24 + length);
                     }
 
                     // Discard any unexpected extra bytes so subsequent packets parse correctly.
                     await DiscardExcessAsync().ConfigureAwait(false);
 
-                    // Dispatch command with the request context
+                    // Dispatch command with the request context.
                     await DispatchCommand(command, buf, length, context).ConfigureAwait(false);
                 }
                 catch (IOException) { break; }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
                 {
-                    Log($"ProcessAsync error (session 0x{_sessionHandle:X8}): {ex.Message}");
+                    _proto.Log($"ProcessAsync error (session 0x{_sessionHandle:X8}): {ex.Message}");
                     break;
                 }
             }
@@ -297,18 +311,23 @@ public sealed partial class EIPProtocol
         /// </summary>
         private async Task DiscardExcessAsync()
         {
-            if (!_stream.DataAvailable) return;
-            var  tmp  = new byte[4096];
-            int  total = 0;
+            if (!_stream.DataAvailable) return;  // fast-path: nothing to discard
+            var tmp   = new byte[4096];
+            int total = 0;
             try
             {
-                while (_stream.DataAvailable)
-                    total += await _stream.ReadAsync(tmp, 0, tmp.Length).ConfigureAwait(false);
+                // Read once without looping — DataAvailable already confirmed data is
+                // present; a single ReadAsync drains what is buffered right now without
+                // the DataAvailable-vs-ReadAsync race that a while loop would introduce.
+                total = await _stream.ReadAsync(tmp, 0, tmp.Length).ConfigureAwait(false);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                _proto.Log($"DiscardExcessAsync error: {ex.Message}");
+            }
             if (total > 0)
             {
-                Log($"Discarded {total} excess byte(s) — possible protocol framing error");
+                _proto.Log($"Discarded {total} excess byte(s) — possible protocol framing error");
                 _proto._emulator.IncrementBadPacketsDetected();
             }
         }
@@ -354,17 +373,17 @@ public sealed partial class EIPProtocol
                     break;
 
                 case EIP_UNCONNECTED_SEND:
-                    if (!_isRegistered) { Log("Unconnected Send rejected — no session"); return; }
+                    if (!_isRegistered) { _proto.Log("Unconnected Send rejected — no session"); return; }
                     await HandleUnconnectedSend(buf, length, context).ConfigureAwait(false);
                     break;
 
                 case EIP_CONNECTED_SEND:
-                    if (!_isRegistered) { Log("Connected Send rejected — no session"); return; }
+                    if (!_isRegistered) { _proto.Log("Connected Send rejected — no session"); return; }
                     await HandleConnectedSend(buf, length, context).ConfigureAwait(false);
                     break;
 
                 default:
-                    Log($"Unknown command 0x{command:X4} — sending error reply");
+                    _proto.Log($"Unknown command 0x{command:X4} — sending error reply");
                     await SendErrorReply(command, EIP_STATUS_INVALID_CMD, context).ConfigureAwait(false);
                     break;
             }
@@ -388,7 +407,7 @@ public sealed partial class EIPProtocol
 
             if (requestedVersion != EIP_PROTOCOL_VERSION)
             {
-                Log($"RegisterSession: unsupported protocol version {requestedVersion} (expected {EIP_PROTOCOL_VERSION})");
+                _proto.Log($"RegisterSession: unsupported protocol version {requestedVersion} (expected {EIP_PROTOCOL_VERSION})");
                 await SendErrorReply(EIP_REGISTER_SESSION, EIP_STATUS_UNSUPPORTED_VERSION, context)
                     .ConfigureAwait(false);
                 return;
@@ -413,10 +432,10 @@ public sealed partial class EIPProtocol
             response[24] = 0x01; response[25] = 0x00;  // Protocol Version = 1
             response[26] = 0x00; response[27] = 0x00;  // Options = 0
 
-            await _stream.WriteAsync(response, 0, response.Length).ConfigureAwait(false);
+            await SendRawResponse(response, response.Length).ConfigureAwait(false);
             _isRegistered = true;
 
-            Log($"RegisterSession: session 0x{_sessionHandle:X8} registered");
+            _proto.Log($"RegisterSession: session 0x{_sessionHandle:X8} registered");
         }
 
         /// <summary>
@@ -437,10 +456,10 @@ public sealed partial class EIPProtocol
             response[7] = (byte)((_sessionHandle >> 24) & 0xFF);
             BitConverter.TryWriteBytes(response.AsSpan(12), context.SenderContext);
 
-            await _stream.WriteAsync(response, 0, response.Length).ConfigureAwait(false);
+            await SendRawResponse(response, response.Length).ConfigureAwait(false);
             _isRegistered = false;
 
-            Log($"UnregisterSession: session 0x{_sessionHandle:X8} released");
+            _proto.Log($"UnregisterSession: session 0x{_sessionHandle:X8} released");
         }
 
         // ── List commands ────────────────────────────────────────────────────
@@ -449,11 +468,11 @@ public sealed partial class EIPProtocol
         /// Responds to ListServices (0x0004).
         /// Returns one Target Item describing the "Communications" service.
         /// Format per EIP Vol 2, §2-4.2:
-        ///   Item type  = 0x0100
+        ///   Item type   = 0x0100
         ///   Item length = 20 bytes (Version 2 + Capability 2 + Name 16)
-        ///   Version    = 1
-        ///   Capability = 0x0020 (supports EIP encapsulation)
-        ///   Name       = "Communications" (16 bytes, null-padded)
+        ///   Version     = 1
+        ///   Capability  = 0x0020 (supports EIP encapsulation)
+        ///   Name        = "Communications" (16 bytes, null-padded)
         /// </summary>
         /// <param name="context">Request context (contains Sender Context for echo)</param>
         private async Task HandleListServices(EIPRequestContext context)
@@ -475,7 +494,7 @@ public sealed partial class EIPProtocol
 
             FixEipLength(ms, w);
             await FlushAsync(ms).ConfigureAwait(false);
-            Log("ListServices response sent");
+            _proto.Log("ListServices response sent");
         }
 
         /// <summary>
@@ -487,8 +506,8 @@ public sealed partial class EIPProtocol
         private async Task HandleListIdentity(EIPRequestContext context)
         {
             byte[] reply = BuildListIdentityResponse(context.SenderContext, _sessionHandle);
-            await _stream.WriteAsync(reply, 0, reply.Length).ConfigureAwait(false);
-            Log($"ListIdentity response sent ({EIP_PRODUCT_NAME})");
+            await SendRawResponse(reply, reply.Length).ConfigureAwait(false);
+            _proto.Log($"ListIdentity response sent ({EIP_PRODUCT_NAME})");
         }
 
         /// <summary>
@@ -511,8 +530,8 @@ public sealed partial class EIPProtocol
             BitConverter.TryWriteBytes(response.AsSpan(12), context.SenderContext);
             // Bytes 24-25: item count = 0
 
-            await _stream.WriteAsync(response, 0, response.Length).ConfigureAwait(false);
-            Log("ListInterfaces response sent (empty)");
+            await SendRawResponse(response, response.Length).ConfigureAwait(false);
+            _proto.Log("ListInterfaces response sent (empty)");
         }
 
         // ── Unconnected Send (0x006F) ────────────────────────────────────────
@@ -646,7 +665,7 @@ public sealed partial class EIPProtocol
                                         (buf[offset + 2] << 16) | (buf[offset + 3] << 24));
                     if (connId != _targConnectionId)
                     {
-                        Log($"Connected Send: bad connection ID 0x{connId:X8} " +
+                        _proto.Log($"Connected Send: bad connection ID 0x{connId:X8} " +
                             $"(expected 0x{_targConnectionId:X8}) — packet dropped");
                         return;
                     }
@@ -704,11 +723,11 @@ public sealed partial class EIPProtocol
             if (offset + 14 > buf.Length) return;
             _ = buf[offset++]; // secsPerTick  — not stored, we use RPI_US
             _ = buf[offset++]; // timeoutTicks — not stored
-            uint   otConnId  = ReadU32(buf, ref offset); // O→T proposed ID
-            uint   toConnId  = ReadU32(buf, ref offset); // T→O proposed ID
+            uint   otConnId   = ReadU32(buf, ref offset); // O→T proposed ID
+            uint   toConnId   = ReadU32(buf, ref offset); // T→O proposed ID
             ushort connSerial = ReadU16(buf, ref offset);
-            ushort vendorId  = ReadU16(buf, ref offset);
-            uint   serialNum = ReadU32(buf, ref offset);
+            ushort vendorId   = ReadU16(buf, ref offset);
+            uint   serialNum  = ReadU32(buf, ref offset);
             offset++;        // timeoutMultiplier
             offset += 3;     // reserved bytes
 
@@ -722,13 +741,13 @@ public sealed partial class EIPProtocol
             // distinguishes server-generated IDs from client-generated ones.
             uint newId = ((uint)Interlocked.Increment(ref s_nextConnectionId) << 1) | 0x80000000;
 
-            _targConnectionId  = newId;    // Client must send this in Connected Send packets
-            _origConnectionId  = toConnId; // We echo this in our Connected Send replies
-            _connSerialNumber  = connSerial;
+            _targConnectionId   = newId;     // Client must send this in Connected Send packets
+            _origConnectionId   = toConnId;  // We echo this in our Connected Send replies
+            _connSerialNumber   = connSerial;
             _connSequenceNumber = 0;
-            _isConnected       = true;
+            _isConnected        = true;
 
-            Log($"ForwardOpen{(isExtended ? "Ex" : "")}: " +
+            _proto.Log($"ForwardOpen{(isExtended ? "Ex" : "")}: " +
                 $"OT=0x{otConnId:X8} TO=0x{toConnId:X8} → assigned TargID=0x{newId:X8}");
 
             await SendForwardOpenResponse(otConnId, toConnId, connSerial, vendorId, serialNum, isExtended, context)
@@ -755,12 +774,13 @@ public sealed partial class EIPProtocol
             uint   serialNum  = ReadU32(buf, ref offset);
 
             _isConnected = false;
-            Log($"ForwardClose: connection 0x{_origConnectionId:X8} closed");
+            _proto.Log($"ForwardClose: connection 0x{_origConnectionId:X8} closed");
 
             await SendForwardCloseResponse(connSerial, vendorId, serialNum, context).ConfigureAwait(false);
         }
 
         // ── Get Attributes (Identity Object) ────────────────────────────────
+
         /// <summary>
         /// Handles Get Attributes All (0x01) and Get Attribute Single (0x0E)
         /// requests for the Identity Object.
@@ -775,7 +795,7 @@ public sealed partial class EIPProtocol
             WriteNullAddressItem(w);
 
             w.Write(CPF_ITEM_UNCONNECTED_DATA);
-            long lenPos   = ms.Position; w.Write((ushort)0);
+            long lenPos    = ms.Position; w.Write((ushort)0);
             long dataStart = ms.Position;
 
             byte replySvc = (byte)(((serviceCode == CIP_SERVICE_GET_ATTRIBUTES_ALL) ? 0x01 : 0x0E) | 0x80);
@@ -813,10 +833,10 @@ public sealed partial class EIPProtocol
             long dataStart = ms.Position;
 
             // Forward Open Response body — matches eip_forward_open_response_t in libplctag defs.h.
-            w.Write(replySvc);         // Reply service code (0xD4 or 0xDB)
-            w.Write((byte)0x00);       // Reserved
-            w.Write(CIP_STATUS_OK);    // General status
-            w.Write((byte)0x00);       // Additional status size = 0
+            w.Write(replySvc);          // Reply service code (0xD4 or 0xDB)
+            w.Write((byte)0x00);        // Reserved
+            w.Write(CIP_STATUS_OK);     // General status
+            w.Write((byte)0x00);        // Additional status size = 0
             w.Write(_targConnectionId); // orig_to_targ_conn_id — client uses this in Connected Send
             w.Write(_origConnectionId); // targ_to_orig_conn_id — echoed in our Connected Send replies
             w.Write(connSerial);        // Connection serial number (echoed)
@@ -835,7 +855,7 @@ public sealed partial class EIPProtocol
             FixEipLength(ms, w);
             await FlushAsync(ms).ConfigureAwait(false);
 
-            Log($"ForwardOpen response: replySvc=0x{replySvc:X2}, TargID=0x{_targConnectionId:X8}");
+            _proto.Log($"ForwardOpen response: replySvc=0x{replySvc:X2}, TargID=0x{_targConnectionId:X8}");
         }
 
         private async Task SendForwardCloseResponse(ushort connSerial, ushort vendorId, uint serialNum, EIPRequestContext context)
@@ -905,7 +925,7 @@ public sealed partial class EIPProtocol
             byte svc = buf[offset++];
             if (svc != CIP_SERVICE_EXECUTE_PCCC)
             {
-                Log($"ExtractAndDispatchPCCC: unexpected service 0x{svc:X2} (expected 0x4B)");
+                _proto.Log($"ExtractAndDispatchPCCC: unexpected service 0x{svc:X2} (expected 0x4B)");
                 return;
             }
 
@@ -925,7 +945,7 @@ public sealed partial class EIPProtocol
             int skipBytes = requestIdSize >= 1 ? requestIdSize - 1 : 0;
             if (offset + skipBytes > buf.Length || offset + skipBytes > itemEnd) return;
 
-            // Store Request ID in the context object (not in instance field)
+            // Store Request ID in the context object (not in instance field).
             context.RequestId = new byte[requestIdSize];
             context.RequestId[0] = requestIdSize;
             for (int k = 1; k < requestIdSize; k++)
@@ -936,7 +956,7 @@ public sealed partial class EIPProtocol
             // Minimum: CMD(1) STS(1) TNS(2) FUNC(1) = 5 bytes.
             if (offset + 5 > buf.Length || offset + 5 > itemEnd)
             {
-                Log($"ExtractAndDispatchPCCC: truncated PCCC header at offset {offset}");
+                _proto.Log($"ExtractAndDispatchPCCC: truncated PCCC header at offset {offset}");
                 return;
             }
 
@@ -964,7 +984,7 @@ public sealed partial class EIPProtocol
             if (remaining > 0)
                 Array.Copy(buf, offset, pdu, pduOff, Math.Min(remaining, buf.Length - offset));
 
-            Log($"PCCC dispatch: CMD=0x{pcccCmd:X2} TNS=0x{pcccTns:X4} FNC=0x{pcccFunc:X2} data={remaining}B");
+            _proto.Log($"PCCC dispatch: CMD=0x{pcccCmd:X2} TNS=0x{pcccTns:X4} FNC=0x{pcccFunc:X2} data={remaining}B");
 
             _proto.IncrementFramesProcessed();
             _proto._emulator.IncrementTotalPacketsReceived();
@@ -979,18 +999,53 @@ public sealed partial class EIPProtocol
         // ── Response senders ─────────────────────────────────────────────────
 
         /// <summary>
-        /// Entry point called by <see cref="EIPProtocol.SendResponse"/>.
-        /// Routes to <see cref="SendConnectedResponse"/> or
-        /// <see cref="SendUnconnectedResponse"/> depending on whether a
-        /// Forward Open connection has been established.
+        /// Serialized entry point called by <see cref="EIPProtocol.SendResponse"/>.
+        /// Acquires _sendLock before delegating to SendResponseAsync() to guarantee
+        /// FIFO ordering of outgoing responses within a single client session.
+        ///
+        /// Using a SemaphoreSlim(1,1) here ensures that if two requests complete on
+        /// the thread pool at the same time, their responses are written to the socket
+        /// in the order they were queued, not interleaved.
+        ///
+        /// Exceptions from the send path are caught and logged here so the caller
+        /// (EIPProtocol.SendResponse) can safely fire-and-forget this task.
         /// </summary>
         /// <param name="pdu">PDU to send (built by DF1Emulator)</param>
         /// <param name="context">Request context containing SenderContext and RequestId</param>
-        public async Task SendResponseAsync(byte[] pdu, EIPRequestContext context)
+        public async Task SendSerializedAsync(byte[] pdu, EIPRequestContext context)
         {
-            if (_disposed || _proto._isDisposing != 0 || !_tcp.Connected) return;
+            if (_disposed || _proto.IsDisposing) return;
 
-            Log($"SendResponseAsync: PDU length={pdu.Length}, connected={_isConnected}");
+            await _sendLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await SendResponseAsync(pdu, context).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _proto.Log($"SendSerializedAsync failed for session 0x{_sessionHandle:X8}: {ex.Message}");
+                _proto._emulator.IncrementUndeliveredPackets();
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Routes to <see cref="SendConnectedResponse"/> or
+        /// <see cref="SendUnconnectedResponse"/> depending on whether a
+        /// Forward Open connection has been established.
+        /// Called exclusively from <see cref="SendSerializedAsync"/> which
+        /// holds _sendLock for the duration of this call.
+        /// </summary>
+        /// <param name="pdu">PDU to send (built by DF1Emulator)</param>
+        /// <param name="context">Request context containing SenderContext and RequestId</param>
+        private async Task SendResponseAsync(byte[] pdu, EIPRequestContext context)
+        {
+            if (_disposed || _proto.IsDisposing) return;
+
+            _proto.Log($"SendResponseAsync: PDU length={pdu.Length}, connected={_isConnected}");
 
             if (_isConnected)
                 await SendConnectedResponse(pdu, context).ConfigureAwait(false);
@@ -1021,7 +1076,7 @@ public sealed partial class EIPProtocol
 
             // Data payload — response PDU layout from DF1Emulator:
             //   [DST, SRC, CMD, STS, TNS_LO, TNS_HI, DATA...]
-            // Data bytes start at offset 6 (no FUNC byte in DF1Emulator responses).
+            // Data bytes start at offset 6 (no FUNC byte in DF1Emulator data responses).
             const int dataOffset = 6;
             if (pdu.Length > dataOffset)
                 w.Write(pdu, dataOffset, pdu.Length - dataOffset);
@@ -1032,7 +1087,6 @@ public sealed partial class EIPProtocol
             ms.Seek(dataEnd, SeekOrigin.Begin);
 
             FixEipLength(ms, w);
-            if (IsLogging) LogHex("TX:", ms.ToArray(), (int)ms.Position);
             await FlushAsync(ms).ConfigureAwait(false);
         }
 
@@ -1060,9 +1114,9 @@ public sealed partial class EIPProtocol
             long lenPos    = ms.Position; w.Write((ushort)0);
             long dataStart = ms.Position;
 
-            // Connection sequence number increments monotonically; used by the
-            // client to detect lost packets.
-            w.Write(++_connSequenceNumber);
+            // Connection sequence number increments monotonically; cast to ushort
+            // so it wraps at 0xFFFF as per EIP spec (intentional truncation).
+            w.Write((ushort)(Interlocked.Increment(ref _connSequenceNumber) & 0xFFFF));
 
             WritePcccReplyHeader(w, pdu, context.RequestId);
 
@@ -1076,7 +1130,6 @@ public sealed partial class EIPProtocol
             ms.Seek(dataEnd, SeekOrigin.Begin);
 
             FixEipLength(ms, w);
-            if (IsLogging) LogHex("TX:", ms.ToArray(), (int)ms.Position);
             await FlushAsync(ms).ConfigureAwait(false);
         }
 
@@ -1119,9 +1172,9 @@ public sealed partial class EIPProtocol
             }
 
             // PCCC response fields (echoed from PDU).
-            w.Write(pdu[2]);                                        // CMD
-            w.Write(pdu[3]);                                        // STS
-            w.Write((ushort)(pdu[4] | (pdu[5] << 8)));             // TNS
+            w.Write(pdu[2]);                                    // CMD
+            w.Write(pdu[3]);                                    // STS
+            w.Write((ushort)(pdu[4] | (pdu[5] << 8)));         // TNS
         }
 
         // ── Error reply ──────────────────────────────────────────────────────
@@ -1151,7 +1204,7 @@ public sealed partial class EIPProtocol
             response[11] = (byte)((errorStatus >> 24) & 0xFF);
             BitConverter.TryWriteBytes(response.AsSpan(12), context.SenderContext);
 
-            await _stream.WriteAsync(response, 0, response.Length).ConfigureAwait(false);
+            await SendRawResponse(response, response.Length).ConfigureAwait(false);
         }
 
         // ── Stream flush helper ───────────────────────────────────────────────
@@ -1160,7 +1213,7 @@ public sealed partial class EIPProtocol
         {
             long end = ms.Position;
             byte[] bytes = ms.GetBuffer();
-            await _stream.WriteAsync(bytes, 0, (int)end).ConfigureAwait(false);
+            await SendRawResponse(bytes, (int)end).ConfigureAwait(false);
         }
 
         // ── IDisposable ───────────────────────────────────────────────────────
@@ -1169,8 +1222,9 @@ public sealed partial class EIPProtocol
         {
             if (_disposed) return;
             _disposed = true;
+            _sendLock.Dispose();
             try { _stream.Close(); } catch { }
-            try { _tcp.Close(); }    catch { }
+            try { _tcp.Close();    } catch { }
         }
     }
 }

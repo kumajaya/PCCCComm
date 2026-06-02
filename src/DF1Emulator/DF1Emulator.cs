@@ -61,7 +61,7 @@ using System.Threading.Tasks;
 ///   - GetStatus byte 0 (mode/status flags) uses bits 6-7 only (edits active);
 ///     mode code is placed in bytes 18-19 as per Chapter 10 table.
 ///   - GetStatus catalog string is "5/03" per specification.
-///   - GetStatus RAM size is 0x20 (16K words = 32 KB for 1747-L532E).
+///   - GetStatus RAM size is 0x20 (32 KB for 1747-L532E).
 ///   - CMD 0x06 FNC 0x01 (read diagnostic counters) reply CMD is 0x46
 ///     (not 0x4A, which is the reply for CMD 0x0A).
 ///   - CMD 0x06 FNC 0x07 (reset diagnostic counters) resets all counters to zero
@@ -100,12 +100,13 @@ public class DF1Emulator : IDisposable
     private bool _isLoggingEnabled = true;
 
     // ─── Response Cache (Thread-safe, reduces recomputation) ─────────────────
+    // Rebuilt whenever processor mode changes via UpdateProcessorMode().
     private byte[] _cachedGetStatusPayload;
     private readonly object _cacheLock = new object();
 
     // ─── Processor Mode Tracking ──────────────────────────────────────────────
     // Full processor mode tracking per Publication 1770-6.5.16 Chapter 10.
-    // Mode code stored in bits 0-4 of byte 19 in GetStatus response.
+    // Mode code is stored in byte 18 of the GetStatus response.
     //   Local:  0x11=PROG, 0x1E=RUN
     //   Remote: 0x01=PROG, 0x06=RUN
     //   Test:   0x17=Cont, 0x18=Single, 0x19=Step
@@ -119,18 +120,23 @@ public class DF1Emulator : IDisposable
         TestSingle  = 0x18,
         TestStep    = 0x19,
     }
+
+    // Stored as int so Interlocked operations can be used for thread-safe access.
     private volatile int _processorModeRaw = (int)ProcessorMode.LocalRun;
+
     private ProcessorMode ProcessorModeValue
     {
         get => (ProcessorMode)_processorModeRaw;
         set => _processorModeRaw = (int)value;
     }
+
     private bool IsRunMode => ProcessorModeValue == ProcessorMode.LocalRun ||
                               ProcessorModeValue == ProcessorMode.RemoteRun;
 
     // ─── Diagnostic Counters ─────────────────────────────────────────────────
     // Layout matches AB Application Note (1995) "DF1 Full-Duplex size <=40 bytes" table.
     // Total 34 bytes: modem status word (2 bytes) + 32 counter bytes.
+    // All fields are int to allow Interlocked.Increment / Interlocked.Exchange.
     private int _totalPacketsSent         = 0;
     private int _totalPacketsReceived     = 0;
     private int _undeliveredPackets       = 0;
@@ -186,29 +192,31 @@ public class DF1Emulator : IDisposable
     /// <param name="parity">Parity mode (None, Odd, Even)</param>
     /// <param name="mode">Protocol mode (DF1, DH485, or EIP)</param>
     /// <param name="eipPort">EIP port number (default 44818, only used for EIP mode)</param>
-    /// <exception cref="NotImplementedException">Thrown for DH485 or EIP modes (planned for future)</exception>
+    /// <exception cref="NotImplementedException">Thrown for DH485 mode (planned for future)</exception>
     public DF1Emulator(string portName, int baudRate, Parity parity, EmulatorMode mode = EmulatorMode.DF1, int eipPort = 44818)
     {
         _memory = new PlcMemory();
         _mode = mode;
 
-        // Build initial GetStatus payload cache
+        // Build initial GetStatus payload cache using the default processor mode.
+        // The cache is dynamically updated via UpdateProcessorMode() whenever the
+        // processor mode changes at runtime (CMD 0x0F FNC 0x80).
         _cachedGetStatusPayload = BuildGetStatusPayload();
 
         // Create the appropriate protocol handler based on mode
         _protocol = mode switch
         {
-            EmulatorMode.DF1 => new DF1Protocol(this, portName, baudRate, parity),
+            EmulatorMode.DF1   => new DF1Protocol(this, portName, baudRate, parity),
             EmulatorMode.DH485 => throw new NotImplementedException("DH485 protocol support is planned for a future release"),
-            EmulatorMode.EIP => new EIPProtocol(this, eipPort),
-            _ => throw new ArgumentException($"Unknown emulator mode: {mode}")
+            EmulatorMode.EIP   => new EIPProtocol(this, eipPort),
+            _                  => throw new ArgumentException($"Unknown emulator mode: {mode}")
         };
 
         // Subscribe to protocol PDU events
         _protocol.PduReceived += OnPduReceived;
 
-        // Start timers (they will be started when Start() is called)
-        _timer = new Timer(_ => UpdateDateTime(), null, Timeout.Infinite, Timeout.Infinite);
+        // Create timers in stopped state; they are armed when Start() is called
+        _timer        = new Timer(_ => UpdateDateTime(), null, Timeout.Infinite, Timeout.Infinite);
         _waveformTimer = new Timer(_ => UpdateWaveform(), null, Timeout.Infinite, Timeout.Infinite);
 
         Console.WriteLine($"[EMU]  DF1Emulator initialized in {mode} mode");
@@ -256,6 +264,8 @@ public class DF1Emulator : IDisposable
         Stop();
         _timer?.Dispose();
         _waveformTimer?.Dispose();
+        // EIPProtocol does not implement IDisposable; Stop() above already drains
+        // in-flight requests and closes all resources via its StopAsync() path.
         (_protocol as IDisposable)?.Dispose();
         GC.SuppressFinalize(this);
     }
@@ -279,18 +289,29 @@ public class DF1Emulator : IDisposable
     // ─── Internal Methods for DF1Protocol to Update Counters ─────────────────
     // These allow DF1Protocol to report protocol-specific events without exposing
     // internal counters directly to external code.
-    internal void IncrementTotalPacketsSent() => Interlocked.Increment(ref _totalPacketsSent);
-    internal void IncrementFramesProcessed() => Interlocked.Increment(ref _framesProcessed);
-    internal void IncrementTotalPacketsReceived() => Interlocked.Increment(ref _totalPacketsReceived);
-    internal void IncrementBadPacketsDetected() => Interlocked.Increment(ref _badPacketsDetected);
-    internal void IncrementUndeliveredPackets() => Interlocked.Increment(ref _undeliveredPackets);
-    internal void IncrementEnqReceived() => Interlocked.Increment(ref _enqReceived);
-    internal void IncrementNakReceived() => Interlocked.Increment(ref _nakReceived);
-    internal void IncrementNoBufferNakd() => Interlocked.Increment(ref _noBufferNakd);
-    internal void IncrementDuplicatePackets() => Interlocked.Increment(ref _duplicatePacketsReceived);
-    internal void IncrementDcdRecovery() => Interlocked.Increment(ref _dcdRecoveryCount);
-    internal void IncrementLostModem() => Interlocked.Increment(ref _lostModemCount);
-    internal void IncrementEnqSent() => Interlocked.Increment(ref _enqSent);
+    internal void IncrementTotalPacketsSent()       => Interlocked.Increment(ref _totalPacketsSent);
+    internal void IncrementFramesProcessed()        => Interlocked.Increment(ref _framesProcessed);
+    internal void IncrementTotalPacketsReceived()   => Interlocked.Increment(ref _totalPacketsReceived);
+    internal void IncrementBadPacketsDetected()     => Interlocked.Increment(ref _badPacketsDetected);
+    internal void IncrementUndeliveredPackets()     => Interlocked.Increment(ref _undeliveredPackets);
+    internal void IncrementEnqReceived()            => Interlocked.Increment(ref _enqReceived);
+    internal void IncrementNakReceived()            => Interlocked.Increment(ref _nakReceived);
+    internal void IncrementNoBufferNakd()           => Interlocked.Increment(ref _noBufferNakd);
+    internal void IncrementDuplicatePackets()       => Interlocked.Increment(ref _duplicatePacketsReceived);
+    internal void IncrementDcdRecovery()            => Interlocked.Increment(ref _dcdRecoveryCount);
+    internal void IncrementLostModem()              => Interlocked.Increment(ref _lostModemCount);
+    internal void IncrementEnqSent()                => Interlocked.Increment(ref _enqSent);
+
+    // ─── Internal Methods Called by DF1Protocol ──────────────────────────────
+    // These provide DF1Protocol with read-only access to diagnostic counters
+    // for health monitoring purposes.
+    // Volatile.Read is used for a clean atomic read without the compare-exchange
+    // idiom, which is semantically equivalent but more explicit in intent.
+    public int GetBadPacketsDetected()    => Volatile.Read(ref _badPacketsDetected);
+    public int GetUndeliveredPackets()    => Volatile.Read(ref _undeliveredPackets);
+    public int GetEnqReceived()           => Volatile.Read(ref _enqReceived);
+    public int GetNakReceived()           => Volatile.Read(ref _nakReceived);
+    public int GetTotalPacketsReceived()  => Volatile.Read(ref _totalPacketsReceived);
 
     /// <summary>
     /// Updates modem status bits based on actual hardware line states.
@@ -325,21 +346,36 @@ public class DF1Emulator : IDisposable
     // ─── Command Dispatcher (Shared Across All Protocols) ────────────────────
     // All command processing routes through here. The PDU format is the same
     // for DF1 and EIP/PCCC (CIP encapsulated PCCC).
+    //
+    // DATA OFFSET RULE:
+    //   Only CMD 0x0F always carries a FUNC byte in the request; all other
+    //   commands place data immediately after the 6-byte header (no FUNC byte).
+    //   Therefore dataOffset = 7 only when cmd == 0x0F; otherwise dataOffset = 6.
+    //   This is distinct from the response convention: some response helpers
+    //   (SendEmptyResponse, SendLoopbackResponse, SendErrorResponse) include
+    //   a FUNC byte (withFunc: true) while data responses omit it (withFunc: false).
     private void DispatchCommand(byte[] pdu, object clientContext)
     {
         if (pdu.Length < 6) return;
 
-        int dst = pdu[0];
-        int src = pdu[1];
-        int cmd = pdu[2];
-        int tns = pdu[4] | (pdu[5] << 8);
-        int func = pdu.Length >= 7 ? pdu[6] : 0;
+        int dst  = pdu[0];
+        int src  = pdu[1];
+        int cmd  = pdu[2];
+        int tns  = pdu[4] | (pdu[5] << 8);
 
         if (_isLoggingEnabled)
-            Console.WriteLine($"[EMU]  DispatchCommand: CMD=0x{cmd:X2}, TNS=0x{tns:X4}, FNC=0x{func:X2}");
+            Console.WriteLine($"[EMU]  DispatchCommand: CMD=0x{cmd:X2}, TNS=0x{tns:X4}");
 
-        // Extract data payload (everything after the 6-byte header + optional func byte)
-        int dataOffset = (func != 0 || pdu.Length > 7) ? 7 : 6;
+        // CMD 0x0F always has a FUNC byte at offset 6; extract it here so the
+        // log and dispatch table can reference it.  For all other commands func
+        // is not present in the request frame and is set to 0 for logging only.
+        int func       = (cmd == 0x0F && pdu.Length >= 7) ? pdu[6] : 0;
+        int dataOffset = (cmd == 0x0F) ? 7 : 6;
+
+        if (_isLoggingEnabled && cmd == 0x0F)
+            Console.WriteLine($"[EMU]  FNC=0x{func:X2}");
+
+        // Extract data payload — everything after the header (+ FUNC byte for 0x0F)
         byte[] data = pdu.Length > dataOffset ? pdu[dataOffset..] : Array.Empty<byte>();
 
         // Dispatch based on command code
@@ -393,7 +429,12 @@ public class DF1Emulator : IDisposable
                 HandleReadFileInfo(src, tns, data, clientContext);
                 break;
 
-            // Change processor mode (CMD=0x80 for SLC 5/03)
+            // Change processor mode (FNC=0x80 for SLC 5/03)
+            // Request data[0] carries the requested mode code:
+            //   0x01 = RemoteProg, 0x06 = RemoteRun
+            //   0x07 = TestCont,   0x08 = TestSingle, 0x09 = TestStep
+            // LocalProg (0x11) and LocalRun (0x1E) are set by the keyswitch
+            // on the physical PLC and are not settable via this command.
             case 0x80:
                 if (data != null && data.Length > 0)
                 {
@@ -412,7 +453,9 @@ public class DF1Emulator : IDisposable
                 SendEmptyResponse(src, tns, 0x4F, func, clientContext);
                 break;
 
-            // Change processor mode (CMD=0x3A for MicroLogix 1000)
+            // Change processor mode (FNC=0x3A for MicroLogix 1000)
+            // Request data[0] carries the requested mode code:
+            //   0x01 = RemoteProg, 0x02 = RemoteRun
             case 0x3A:
                 if (data != null && data.Length > 0)
                 {
@@ -493,14 +536,14 @@ public class DF1Emulator : IDisposable
 
         byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
 
-        // Map status codes to DF1 error codes
-        // status 2 = file not found → 0x50 (bad address)
-        // status 3 = out of range → 0x10 (illegal format/address)
+        // Map status codes to DF1 error codes:
+        //   status 2 = file not found → STS 0x50 (bad address)
+        //   status 3 = out of range   → STS 0x10 (illegal format/address)
         if (status == 2) { SendErrorResponse(src, tns, 0x0F, func, 0x50, clientContext); return; }
         if (status == 3) { SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext); return; }
         if (status != 0) { SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext); return; }
 
-        SendDataResponse(src, tns, 0x4F, func, data, clientContext);
+        SendDataResponse(src, tns, 0x4F, data, clientContext);
     }
 
     /// <summary>
@@ -514,7 +557,7 @@ public class DF1Emulator : IDisposable
     ///     [2] = fileType
     ///     [3] = element (255 = extended: [4..5] = element 16-bit, then subElement)
     ///     [4] = subElement (or element low byte if [3]==255)
-    ///     [5..] = data bytes (word write) or mask + value (bit write)
+    ///     [5..] = data bytes
     /// 
     ///   func 0xAB — bit-masked write:
     ///     [0] = 2 (one word operation)
@@ -580,7 +623,7 @@ public class DF1Emulator : IDisposable
             int mask  = payload[payloadIdx]     | (payload[payloadIdx + 1] << 8);
             int value = payload[payloadIdx + 2] | (payload[payloadIdx + 3] << 8);
 
-            // Atomic read-modify-write - safe for concurrent EIP clients
+            // Atomic read-modify-write — safe for concurrent EIP clients
             bool ok = _memory.ReadModifyWrite(fileType, fileNumber, element, subElement, mask, value);
             if (!ok)
             {
@@ -627,9 +670,9 @@ public class DF1Emulator : IDisposable
     ///   Byte  8   : data type byte (0x84=status, 0x85=bit, 0x86=timer, etc.)
     /// 
     /// Error codes:
-    ///   STS=0x00            success
-    ///   STS=0x10            illegal format (wrong mask or major file type)
-    ///   STS=0x50            bad address / file doesn't exist
+    ///   STS=0x00  success
+    ///   STS=0x10  illegal format (wrong mask or major file type)
+    ///   STS=0x50  bad address / file doesn't exist
     /// </summary>
     private void HandleReadFileInfo(int src, int tns, byte[] payload, object clientContext)
     {
@@ -639,9 +682,9 @@ public class DF1Emulator : IDisposable
             return;
         }
 
-        byte mask        = payload[0];
-        byte majorType   = payload[1];
-        byte fileNumber  = payload[2];
+        byte mask       = payload[0];
+        byte majorType  = payload[1];
+        byte fileNumber = payload[2];
 
         // Validate: mask must be 0x06, major type must be 0x80 (data table)
         if (mask != 0x06 || majorType != 0x80)
@@ -672,12 +715,18 @@ public class DF1Emulator : IDisposable
         // Byte 8: data type code
         reply[8] = (byte)fileType;
 
-        SendDataResponse(src, tns, 0x4F, 0x94, reply, clientContext);
+        SendDataResponse(src, tns, 0x4F, reply, clientContext);
     }
 
     /// <summary>
-    /// Read Modified Data (CMD=0x67) – simplified as normal read.
+    /// Read Modified Data (CMD=0x67) — simplified as normal read.
     /// Used by some Rockwell software for optimized data access.
+    /// 
+    /// Request payload layout (no FUNC byte — data starts immediately at offset 6):
+    ///   [0]   = fileNumber
+    ///   [1]   = fileType
+    ///   [2-3] = word offset (little-endian)
+    ///   [4]   = bytesToRead
     /// </summary>
     private void HandleReadModifiedData(int src, int tns, byte[] payload, object clientContext)
     {
@@ -687,11 +736,11 @@ public class DF1Emulator : IDisposable
             return;
         }
 
-        int fileNumber   = payload[0];
-        int fileType     = payload[1];
-        int offsetWords  = payload[2] | (payload[3] << 8);
-        int bytesToRead  = payload[4];
-        int byteOffset   = offsetWords * 2;
+        int fileNumber  = payload[0];
+        int fileType    = payload[1];
+        int offsetWords = payload[2] | (payload[3] << 8);
+        int bytesToRead = payload[4];
+        int byteOffset  = offsetWords * 2;
 
         int fileSize = _memory.GetFileSize(fileType, fileNumber);
         if (byteOffset + bytesToRead > fileSize)
@@ -707,30 +756,42 @@ public class DF1Emulator : IDisposable
             return;
         }
 
-        SendDataResponse(src, tns, 0xA7, 0x00, data, clientContext);
+        SendDataResponse(src, tns, 0xA7, data, clientContext);
     }
 
     // ─── Response Helpers ────────────────────────────────────────────────────
     // All responses eventually call SendResponse() which delegates to the
     // active protocol's SendResponse() method.
+    //
+    // withFunc convention:
+    //   true  — FUNC byte is included in the response frame (ACK-style responses,
+    //           loopback echoes, error responses, empty acknowledgements).
+    //   false — FUNC byte is omitted; data begins at inner[6] (data responses,
+    //           GetStatus, DiagnosticCounters, ReadModifiedData).
+    //           DF1Comm reads returned data from DataPackets[rTNS][6] = DATA[0].
 
-    /// <summary>Sends an empty response (no data payload).</summary>
+    /// <summary>Sends an empty acknowledgement response (no data payload, FUNC included).</summary>
     private void SendEmptyResponse(int dst, int tns, int cmd, int func, object clientContext)
         => SendResponse(dst, tns, cmd, func, 0x00, Array.Empty<byte>(), withFunc: true, clientContext);
 
-    /// <summary>Sends a response with data payload (without FUNC byte).</summary>
-    private void SendDataResponse(int dst, int tns, int cmd, int func, byte[] data, object clientContext)
-        => SendResponse(dst, tns, cmd, func, 0x00, data, withFunc: false, clientContext);
+    /// <summary>
+    /// Sends a data response (data payload present, FUNC byte omitted).
+    /// DF1Comm reads the returned data starting at inner[6] = DATA[0].
+    /// The func parameter is accepted for call-site symmetry but is not
+    /// written to the frame when withFunc is false.
+    /// </summary>
+    private void SendDataResponse(int dst, int tns, int cmd, byte[] data, object clientContext)
+        => SendResponse(dst, tns, cmd, 0x00, 0x00, data, withFunc: false, clientContext);
 
-    /// <summary>Get Status loopback response (CMD=0x06, FNC=0x00).</summary>
+    /// <summary>Get Status loopback response (CMD=0x06, FNC=0x00) — echoes request data, FUNC included.</summary>
     private void SendGetStatusLoopbackResponse(int dst, int tns, byte[] data, object clientContext)
         => SendResponse(dst, tns, 0x46, 0x00, 0x00, data, withFunc: true, clientContext);
 
-    /// <summary>Diagnostic loopback response (CMD=0x06, FNC=0x02).</summary>
+    /// <summary>Diagnostic loopback response (CMD=0x06, FNC=0x02) — echoes request data, FUNC included.</summary>
     private void SendLoopbackResponse(int dst, int tns, byte[] data, object clientContext)
         => SendResponse(dst, tns, 0x46, 0x02, 0x00, data, withFunc: true, clientContext);
 
-    /// <summary>Sends an error response with the reply bit set (cmd | 0x40).</summary>
+    /// <summary>Sends an error response with the reply bit set (cmd | 0x40), FUNC included.</summary>
     private void SendErrorResponse(int dst, int tns, int cmd, int func, byte status, object clientContext)
         => SendResponse(dst, tns, cmd | 0x40, func, status, Array.Empty<byte>(), withFunc: true, clientContext);
 
@@ -748,12 +809,12 @@ public class DF1Emulator : IDisposable
     ///   Byte  4    : series/revision
     ///   Byte  5–15 : bulletin number "5/03" in ASCII, space-padded to 11 bytes
     ///   Byte 16–17 : major error word (0x0000 = no fault)
-    ///   Byte 18    : processor mode status/control low byte — mode code bits 0-4
+    ///   Byte 18    : processor mode status/control low byte — mode code
     ///                  0x11 = local PROG   0x1E = local RUN
     ///                  0x17 = TEST-cont   0x18 = TEST-single   0x19 = TEST-step
     ///   Byte 19    : processor mode status/control high byte — fault flags
     ///   Byte 20–21 : program ID
-    ///   Byte 22    : RAM size in Kbytes — 0x10 for 1747-L532E (32K)
+    ///   Byte 22    : RAM size in Kbytes — 0x20 = 32 KB (1747-L532E)
     ///   Byte 23    : flags (bits 2-7 = program owner node, 0x3F = no owner)
     /// </summary>
     private void SendGetStatusResponse(int dst, int tns, object clientContext)
@@ -793,18 +854,18 @@ public class DF1Emulator : IDisposable
     {
         UpdateModemStatus();
 
-        // Read all counters atomically via Interlocked
-        int sent        = Interlocked.CompareExchange(ref _totalPacketsSent,         0, 0);
-        int received    = Interlocked.CompareExchange(ref _totalPacketsReceived,     0, 0);
-        int undelivered = Interlocked.CompareExchange(ref _undeliveredPackets,       0, 0);
-        int enqSent     = Interlocked.CompareExchange(ref _enqSent,                 0, 0);
-        int nakRecv     = Interlocked.CompareExchange(ref _nakReceived,              0, 0);
-        int enqRecv     = Interlocked.CompareExchange(ref _enqReceived,             0, 0);
-        int bad         = Interlocked.CompareExchange(ref _badPacketsDetected,       0, 0);
-        int noBuf       = Interlocked.CompareExchange(ref _noBufferNakd,            0, 0);
-        int dup         = Interlocked.CompareExchange(ref _duplicatePacketsReceived, 0, 0);
-        int dcd         = Interlocked.CompareExchange(ref _dcdRecoveryCount,        0, 0);
-        int lost        = Interlocked.CompareExchange(ref _lostModemCount,           0, 0);
+        // Read all counters atomically via Volatile.Read
+        int sent        = Volatile.Read(ref _totalPacketsSent);
+        int received    = Volatile.Read(ref _totalPacketsReceived);
+        int undelivered = Volatile.Read(ref _undeliveredPackets);
+        int enqSent     = Volatile.Read(ref _enqSent);
+        int nakRecv     = Volatile.Read(ref _nakReceived);
+        int enqRecv     = Volatile.Read(ref _enqReceived);
+        int bad         = Volatile.Read(ref _badPacketsDetected);
+        int noBuf       = Volatile.Read(ref _noBufferNakd);
+        int dup         = Volatile.Read(ref _duplicatePacketsReceived);
+        int dcd         = Volatile.Read(ref _dcdRecoveryCount);
+        int lost        = Volatile.Read(ref _lostModemCount);
 
         // 34 bytes total for DF1 full-duplex (AB Application Note page 17)
         byte[] counters = new byte[34];
@@ -863,16 +924,16 @@ public class DF1Emulator : IDisposable
     /// <param name="dst">Destination node address</param>
     /// <param name="tns">Transaction number (echoed from request)</param>
     /// <param name="cmd">Command code (may have reply bit set)</param>
-    /// <param name="func">Function code (0 if not applicable)</param>
+    /// <param name="func">Function code; only written to frame when withFunc is true</param>
     /// <param name="status">Status code (0 for success)</param>
     /// <param name="data">Data payload (may be empty)</param>
     /// <param name="withFunc">True to include FUNC byte in frame, false to omit</param>
     /// <param name="clientContext">Context information for the client</param>
     private void SendResponse(int dst, int tns, int cmd, int func, byte status, byte[] data, bool withFunc, object clientContext)
     {
-        int dataLen = data?.Length ?? 0;
+        int dataLen   = data?.Length ?? 0;
         int headerLen = withFunc ? 7 : 6;
-        byte[] inner = new byte[headerLen + dataLen];
+        byte[] inner  = new byte[headerLen + dataLen];
 
         inner[0] = (byte)dst;
         inner[1] = (byte)_myNode;
@@ -887,15 +948,6 @@ public class DF1Emulator : IDisposable
 
         _protocol?.SendResponse(inner, clientContext);
     }
-
-    // ─── Internal Methods Called by DF1Protocol ──────────────────────────────
-    // These provide DF1Protocol with read-only access to diagnostic counters
-    // for health monitoring purposes.
-    public int GetBadPacketsDetected() => Interlocked.CompareExchange(ref _badPacketsDetected, 0, 0);
-    public int GetUndeliveredPackets() => Interlocked.CompareExchange(ref _undeliveredPackets, 0, 0);
-    public int GetEnqReceived() => Interlocked.CompareExchange(ref _enqReceived, 0, 0);
-    public int GetNakReceived() => Interlocked.CompareExchange(ref _nakReceived, 0, 0);
-    public int GetTotalPacketsReceived() => Interlocked.CompareExchange(ref _totalPacketsReceived, 0, 0);
 
     // ─── Timers ──────────────────────────────────────────────────────────────
     /// <summary>
@@ -917,8 +969,8 @@ public class DF1Emulator : IDisposable
     }
 
     /// <summary>
-    /// Updates processor mode in S2:1 status word when mode changes.
-    /// Also updates the cached GetStatus payload.
+    /// Updates processor mode in S2:1 status word and the cached GetStatus
+    /// payload whenever the mode changes (via CMD 0x0F FNC 0x80 or 0x3A).
     /// </summary>
     private void UpdateProcessorMode()
     {
@@ -945,13 +997,13 @@ public class DF1Emulator : IDisposable
         if (_isDisposing != 0) return;
         if (!IsRunMode) return;
 
-        // F8:0 - Sine wave (amplitude 100, period 2 seconds)
+        // F8:0 — Sine wave (amplitude 100, period 2 seconds)
         double now = DateTime.UtcNow.TimeOfDay.TotalSeconds;
         double sinePhase = (now % 2.0) / 2.0 * (2.0 * Math.PI);
         float sineValue = (float)(100.0 * Math.Sin(sinePhase));
         _memory.Write(0x8A, 8, 0, 0, 4, BitConverter.GetBytes(sineValue));
 
-        // F8:1 - Triangle wave (amplitude 100, period 4 seconds)
+        // F8:1 — Triangle wave (amplitude 100, period 4 seconds)
         double t = now % 4.0;
         float triValue;
         if (t < 2.0)
@@ -962,8 +1014,9 @@ public class DF1Emulator : IDisposable
     }
 
     /// <summary>
-    /// Builds the 24-byte GetStatus payload.
-    /// This is cached and only rebuilt when processor mode changes.
+    /// Builds the 24-byte GetStatus payload for the current processor mode.
+    /// Called once at construction and again implicitly via UpdateProcessorMode()
+    /// which patches byte 18 in-place on the cached copy.
     /// </summary>
     private byte[] BuildGetStatusPayload()
     {
@@ -975,7 +1028,7 @@ public class DF1Emulator : IDisposable
         payload[3] = 0x49;      // Extended processor type (SLC 5/03)
         payload[4] = 0x22;      // Series/revision
 
-        // Bulletin number "5/03" in ASCII, space-padded to 11 bytes
+        // Bulletin number "5/03" in ASCII, space-padded to 11 bytes (bytes 5–15)
         string catalog = "5/03";
         byte[] catBytes = System.Text.Encoding.ASCII.GetBytes(catalog);
         Array.Copy(catBytes, 0, payload, 5, catBytes.Length);
@@ -983,11 +1036,11 @@ public class DF1Emulator : IDisposable
 
         payload[16] = 0x00;     // Major error word (low byte)
         payload[17] = 0x00;     // Major error word (high byte)
-        payload[18] = (byte)ProcessorModeValue;  // Processor mode code
+        payload[18] = (byte)ProcessorModeValue;  // Processor mode code (patched by UpdateProcessorMode)
         payload[19] = 0x00;     // High byte (fault flags)
-        payload[20] = 0x00;     // Program ID
-        payload[21] = 0x00;
-        payload[22] = 0x20;     // RAM size (32 KB for 1747-L532E)
+        payload[20] = 0x00;     // Program ID (low byte)
+        payload[21] = 0x00;     // Program ID (high byte)
+        payload[22] = 0x20;     // RAM size in Kbytes — 0x20 = 32 KB (1747-L532E)
         payload[23] = 0x3F;     // Flags (no program owner, directory not corrupted)
 
         return payload;

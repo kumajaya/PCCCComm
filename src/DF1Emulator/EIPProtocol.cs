@@ -44,7 +44,7 @@ using System.Threading.Tasks;
 ///          → ILinkProtocol.PduReceived event  (raises DF1Emulator.OnPduReceived)
 ///          → DF1Emulator.DispatchCommand()     (reads/writes PlcMemory)
 ///          → ILinkProtocol.SendResponse()      (routes back to originating client)
-///          → EIPClient.SendResponseAsync()
+///          → EIPClient.SendSerializedAsync()   (serialized per-client send queue)
 ///          → SendUnconnectedResponse() or SendConnectedResponse()
 ///          → TCP TX
 ///
@@ -60,7 +60,9 @@ using System.Threading.Tasks;
 ///      for unsupported versions.
 ///   4. A UDP listener on port 44818 answers broadcast ListIdentity so the emulator
 ///      appears in RSLinx "Browse Network" without a manual IP entry.
-///   5. HandleConnectedSend is awaitable so exceptions surface correctly.
+///   5. Response ordering per client is guaranteed by a per-client SemaphoreSlim
+///      inside EIPClient.SendSerializedAsync(), preventing interleaved responses
+///      when two requests arrive in rapid succession.
 ///
 /// References
 /// ──────────
@@ -68,7 +70,7 @@ using System.Threading.Tasks;
 ///   - ODVA EtherNet/IP Specification Volume 1 (Common Industrial Protocol)
 ///   - ODVA EtherNet/IP Specification Volume 2 (Adaptation for EtherNet)
 /// </summary>
-public partial class EIPProtocol : ILinkProtocol
+public partial class EIPProtocol : ILinkProtocol, IDisposable
 {
     // ── External dependencies ────────────────────────────────────────────────
 
@@ -97,9 +99,15 @@ public partial class EIPProtocol : ILinkProtocol
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
     // _isDisposing: 0 = running, 1 = shutting down.
-    // Written with Interlocked.CompareExchange; read with a plain comparison
-    // because int reads are atomic on all .NET-supported architectures.
+    // Written with Interlocked.CompareExchange; read via IsDisposing property
+    // which uses Volatile.Read for a clean atomic read.
     private int _isDisposing = 0;
+
+    /// <summary>
+    /// True once Stop() or Dispose() has been called.
+    /// Used by EIPClient to abort in-flight operations during shutdown.
+    /// </summary>
+    public bool IsDisposing => Volatile.Read(ref _isDisposing) != 0;
 
     private bool                    _isRunning;
     private CancellationTokenSource? _cts;
@@ -109,18 +117,18 @@ public partial class EIPProtocol : ILinkProtocol
 
     // ── Health monitoring ────────────────────────────────────────────────────
 
-    private          Timer?  _healthTimer;
-    private          long    _framesProcessed = 0;
-    private          long    _lastFrameCount  = 0;
-    private          bool    _isLoggingEnabled = true;
+    private Timer? _healthTimer;
+    private long   _framesProcessed = 0;
+    private long   _lastFrameCount  = 0;
+    private bool   _isLoggingEnabled = true;
 
     // ── EIP Encapsulation command codes (CIP Vol 2, Appendix A) ─────────────
 
     // Commands valid both before and after session registration.
-    private const ushort EIP_LIST_SERVICES    = 0x0004; // Discover available services
-    private const ushort EIP_LIST_IDENTITY    = 0x0063; // Read device identity
-    private const ushort EIP_LIST_INTERFACES  = 0x0064; // Read CIP interface objects (optional)
-    private const ushort EIP_REGISTER_SESSION = 0x0065; // Open an EIP session
+    private const ushort EIP_LIST_SERVICES      = 0x0004; // Discover available services
+    private const ushort EIP_LIST_IDENTITY      = 0x0063; // Read device identity
+    private const ushort EIP_LIST_INTERFACES    = 0x0064; // Read CIP interface objects (optional)
+    private const ushort EIP_REGISTER_SESSION   = 0x0065; // Open an EIP session
     private const ushort EIP_UNREGISTER_SESSION = 0x0066; // Close an EIP session
 
     // Commands that require a registered session.
@@ -167,14 +175,15 @@ public partial class EIPProtocol : ILinkProtocol
     //
     // We emulate an SLC 5/05 (the closest EIP-capable member of the SLC 500
     // family to the SLC 5/03).  RSLinx will label the device accordingly.
+    // The Identity Object attributes here are from RSLinx EDS files.
 
     private const ushort EIP_VENDOR_ID    = 0x0001; // Rockwell Automation / Allen-Bradley
     private const ushort EIP_DEVICE_TYPE  = 0x000E; // General-Purpose Discrete I/O Controller
-    private const ushort EIP_PRODUCT_CODE = 0x0058; // SLC 5/05 (1747-L553)
-    private const byte   EIP_REV_MAJOR    = 6;      // Firmware major revision
-    private const byte   EIP_REV_MINOR    = 1;      // Firmware minor revision
+    private const ushort EIP_PRODUCT_CODE = 0x000D; // SLC 5/05 (1747-L551 C)
+    private const byte   EIP_REV_MAJOR    = 19;     // Firmware major revision
+    private const byte   EIP_REV_MINOR    = 6;      // Firmware minor revision
     private const uint   EIP_SERIAL_NUM   = 0x600DCAFE; // Emulator serial number
-    private const string EIP_PRODUCT_NAME = "1747-L553 SLC 5/05";
+    private const string EIP_PRODUCT_NAME = "1747-L551 C SLC 5/05";
 
     // Identity attribute bytes, built once at type initialisation.
     // Shared by List Identity, Get Attributes All, and Get Attribute Single replies.
@@ -185,8 +194,8 @@ public partial class EIPProtocol : ILinkProtocol
     // libplctag uses these values when constructing the Request ID section of
     // every CIP Execute PCCC request (service 0x4B).  We echo them back in
     // our response when the client does not supply its own Request ID bytes.
-    private const ushort VENDOR_ID            = 0xF33D;      // "tres"
-    private const uint   VENDOR_SERIAL_NUMBER = 0x21504345;  // "!PCE" (ASCII)
+    private const ushort VENDOR_ID            = 0xF33D;     // "tres"
+    private const uint   VENDOR_SERIAL_NUMBER = 0x21504345; // "!PCE" (ASCII)
 
     // ── ILinkProtocol ────────────────────────────────────────────────────────
 
@@ -242,7 +251,13 @@ public partial class EIPProtocol : ILinkProtocol
         Console.WriteLine($"[EIP]  EtherNet/IP emulator started on TCP/UDP port {_port}");
     }
 
-    public void Stop()
+    /// <summary>
+    /// Stops the EIP protocol handler asynchronously.
+    /// Drains in-flight requests, disposes all client connections,
+    /// stops the TCP listener and UDP listener, and waits for background
+    /// tasks to complete before returning.
+    /// </summary>
+    public async Task StopAsync()
     {
         // Only one caller proceeds; subsequent calls are no-ops.
         if (Interlocked.CompareExchange(ref _isDisposing, 1, 0) != 0) return;
@@ -258,10 +273,9 @@ public partial class EIPProtocol : ILinkProtocol
         const int stepMs    = 100;
         int elapsed = 0;
         int active;
-        while ((active = Interlocked.CompareExchange(ref _activeRequests, 0, 0)) > 0
-               && elapsed < maxWaitMs)
+        while ((active = Volatile.Read(ref _activeRequests)) > 0 && elapsed < maxWaitMs)
         {
-            Thread.Sleep(stepMs);
+            await Task.Delay(stepMs).ConfigureAwait(false);
             elapsed += stepMs;
         }
         if (active > 0)
@@ -275,16 +289,67 @@ public partial class EIPProtocol : ILinkProtocol
             _clients.Clear();
         }
 
+        // Stop accepting new connections.
         _listener?.Stop();
         _listener = null;
 
         _udpListener?.Close();
         _udpListener = null;
 
+        // Wait for background tasks to complete (with timeout).
+        var tasksToWait = new List<Task>();
         if (_acceptLoopTask != null && !_acceptLoopTask.IsCompleted)
-            try { _acceptLoopTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
+            tasksToWait.Add(_acceptLoopTask);
+        if (_udpTask != null && !_udpTask.IsCompleted)
+            tasksToWait.Add(_udpTask);
+
+        if (tasksToWait.Count > 0)
+        {
+            try
+            {
+                await Task.WhenAll(tasksToWait).WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                Console.WriteLine("[WARN] Background tasks did not complete within timeout");
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected during shutdown.
+            }
+        }
 
         Console.WriteLine("[EIP]  EtherNet/IP emulator stopped");
+    }
+
+    /// <summary>
+    /// Synchronous Stop() for ILinkProtocol compatibility.
+    /// Blocks until all in-flight requests are drained or the 3-second
+    /// timeout expires.
+    /// </summary>
+    public void Stop() => StopAsync().GetAwaiter().GetResult();
+
+    /// <summary>
+    /// Releases all managed resources held by EIPProtocol.
+    /// Calls StopAsync() if not already stopped, then disposes the health
+    /// timer and any remaining network resources as a safety net.
+    /// Safe to call multiple times.
+    /// </summary>
+    public void Dispose()
+    {
+        // StopAsync sets _isDisposing = 1 via CompareExchange, so a second
+        // call to either Stop() or Dispose() is a harmless no-op.
+        Stop();
+
+        // Safety-net disposal for resources that Stop() may not have reached
+        // (e.g. if Start() was never called).
+        _healthTimer?.Dispose();
+        _healthTimer = null;
+
+        try { _udpListener?.Dispose(); } catch { }
+        try { _listener?.Stop();       } catch { }
+
+        GC.SuppressFinalize(this);
     }
 
     // ── ILinkProtocol: SendResponse ──────────────────────────────────────────
@@ -292,16 +357,26 @@ public partial class EIPProtocol : ILinkProtocol
     /// <summary>
     /// Routes a PCCC response PDU back to the client that raised
     /// <see cref="PduReceived"/>.  <paramref name="clientContext"/> must be
-    /// the <see cref="EIPClient"/> instance that was passed as the event
-    /// argument; any other value is silently ignored.
+    /// the <see cref="EIPRequestContext"/> instance that was passed as the
+    /// event argument; any other value is silently ignored.
+    ///
+    /// Response ordering per client is guaranteed by
+    /// <see cref="EIPClient.SendSerializedAsync"/>, which serializes all
+    /// outgoing sends through a per-client SemaphoreSlim.  This prevents
+    /// interleaved or reordered responses when two requests from the same
+    /// client are processed concurrently on the thread pool.
     /// </summary>
     public void SendResponse(byte[] pdu, object clientContext)
     {
-        if (clientContext is EIPRequestContext context && context.Client.IsConnected)
-        {
-            Log($"SendResponse → session {context.Client.SessionHandle}, PDU length={pdu.Length}");
-            _ = context.Client.SendResponseAsync(pdu, context);
-        }
+        if (clientContext is not EIPRequestContext context) return;
+        if (!context.Client.IsConnected) return;
+
+        Log($"SendResponse → session {context.Client.SessionHandle:X8}, PDU length={pdu.Length}");
+
+        // Use SendSerializedAsync to guarantee FIFO ordering of responses
+        // within a single client session.  The discard (_=) is intentional:
+        // exceptions are caught inside SendSerializedAsync and logged there.
+        _ = context.Client.SendSerializedAsync(pdu, context);
     }
 
     // ── Health monitoring ────────────────────────────────────────────────────
@@ -328,14 +403,17 @@ public partial class EIPProtocol : ILinkProtocol
 
     private void LogHealthStats()
     {
-        if (_isDisposing != 0) return;
+        if (IsDisposing) return;
         long cur   = Interlocked.Read(ref _framesProcessed);
         long delta = cur - _lastFrameCount;
         _lastFrameCount = cur;
 
+        int clientCount;
+        lock (_clientLock) clientCount = _clients.Count;
+
         Console.WriteLine(
             $"[MONI] EIP Rate: {delta / 15,6}/s | Total: {cur,10:N0} | " +
-            $"Clients: {_clients.Count,2} | " +
+            $"Clients: {clientCount,2} | " +
             $"Memory: {GC.GetTotalMemory(false) / 1024,6:N0} KB");
 
         if (delta == 0 && cur > 0)
@@ -345,6 +423,13 @@ public partial class EIPProtocol : ILinkProtocol
     private void Log(string msg)
     {
         if (_isLoggingEnabled) Console.WriteLine($"[EIP]  {msg}");
+    }
+
+    private void LogHex(string tag, byte[] data, int len)
+    {
+        if (_isLoggingEnabled && len > 0)
+            Console.WriteLine(
+                $"[EIP]  {tag} {BitConverter.ToString(data, 0, len).Replace("-", " ")}");
     }
 
     // ── Request lifecycle guard ──────────────────────────────────────────────
@@ -367,7 +452,7 @@ public partial class EIPProtocol : ILinkProtocol
 
     internal IDisposable BeginRequest()
     {
-        if (_isDisposing != 0) return NoOpDisposable.Instance;
+        if (IsDisposing) return NoOpDisposable.Instance;
         Interlocked.Increment(ref _activeRequests);
         return new RequestHandle(this);
     }
@@ -438,6 +523,7 @@ public partial class EIPProtocol : ILinkProtocol
             {
                 var result = await _udpListener.ReceiveAsync().ConfigureAwait(false);
                 var data   = result.Buffer;
+                LogHex("RX:", data, data.Length);
 
                 // Minimum EIP header is 24 bytes.
                 if (data.Length < 24) continue;
@@ -449,6 +535,7 @@ public partial class EIPProtocol : ILinkProtocol
                 ulong senderCtx = BitConverter.ToUInt64(data, 12);
 
                 byte[] reply = BuildListIdentityResponse(senderCtx, sessionHandle: 0);
+                LogHex("TX:", reply, reply.Length);
                 await _udpListener.SendAsync(reply, reply.Length, result.RemoteEndPoint)
                                   .ConfigureAwait(false);
 
@@ -457,7 +544,7 @@ public partial class EIPProtocol : ILinkProtocol
             catch (ObjectDisposedException) { break; }
             catch (Exception ex)
             {
-                if (_isRunning) Log($"UDP broadcast handler error: {ex.Message}");
+                if (_isRunning) Console.WriteLine($"[EIP]  UDP broadcast handler error: {ex.Message}");
             }
         }
     }
