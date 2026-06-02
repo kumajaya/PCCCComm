@@ -106,7 +106,7 @@ public class DF1Protocol : ILinkProtocol
     private readonly object _logLock = new object();
 
     // ─── Health Monitoring ──────────────────────────────────────────────────
-    private Timer _healthTimer;
+    private Timer? _healthTimer;
     private long _lastFrameCount = 0;
     private long _framesProcessed = 0;
     private long _lastFrameLog = 0;
@@ -195,9 +195,6 @@ public class DF1Protocol : ILinkProtocol
             AllowSynchronousContinuations = false  // Avoid thread pool starvation
         });
         _processingCts = new CancellationTokenSource();
-
-        // Start health monitoring timer (logs every 15 seconds)
-        _healthTimer = new Timer(_ => LogHealthStats(), null, 15000, 15000);
     }
 
     // ─── ILinkProtocol Implementation ──────────────────────────────────────
@@ -333,15 +330,25 @@ public class DF1Protocol : ILinkProtocol
 
     /// <summary>
     /// Enables or disables verbose logging for this protocol instance.
-    /// Disabling logging eliminates string allocations and improves throughput.
+    /// When logging is enabled, the health monitor is disabled to reduce overhead.
+    /// When logging is disabled, the health monitor is activated for visibility.
     /// </summary>
     /// <param name="enabled">True to enable logging, false for maximum performance</param>
     public void SetLoggingEnabled(bool enabled)
     {
         _isLoggingEnabled = enabled;
-        if (!enabled)
+
+        if (enabled)
         {
-            Console.WriteLine("[PERF] DF1 logging disabled for maximum throughput");
+            // Logging ON → health monitor OFF (reduce overhead)
+            _healthTimer?.Dispose();
+            _healthTimer = null;
+        }
+        else
+        {
+            // Logging OFF → health monitor ON (provide visibility)
+            _healthTimer ??= new Timer(_ => LogHealthStats(), null, 15000, 15000);
+            Console.WriteLine("[PERF] DF1 logging disabled — health monitor active");
         }
     }
 
@@ -359,10 +366,8 @@ public class DF1Protocol : ILinkProtocol
         long delta = currentFrames - _lastFrameCount;
         _lastFrameCount = currentFrames;
 
-        long ratePerSec = delta / 15;
-
-        Console.WriteLine($"[MONI] DF1 Rate: {ratePerSec,4}/s | " +
-            $"Total: {currentFrames,8:N0} | " +
+        Console.WriteLine($"[MONI] DF1 Rate: {delta / 15,6}/s | " +
+            $"Total: {currentFrames,10:N0} | " +
             $"Bad: {_emulator.GetBadPacketsDetected(),4:N0} | " +
             $"Memory: {GC.GetTotalMemory(false) / 1024,6:N0} KB");
 
