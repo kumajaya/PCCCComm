@@ -95,6 +95,8 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
 
     private UdpClient? _udpListener;
     private Task?      _udpTask;
+    // Cached local unicast IP address for ListIdentity responses
+    private IPAddress? _cachedLocalAddress;
 
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -247,6 +249,11 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
             Console.WriteLine($"[EIP]  UDP listener not started (RSLinx auto-browse disabled): {ex.Message}");
             _udpListener = null;
         }
+
+        // Cache local IP address once at startup (avoid repeated enumeration)
+        _cachedLocalAddress = GetLocalUnicastIPv4Address();
+        if (_cachedLocalAddress == null)
+            Console.WriteLine("[WARN] No valid IPv4 unicast address found for ListIdentity");
 
         Console.WriteLine($"[EIP]  EtherNet/IP emulator started on TCP/UDP port {_port}");
     }
@@ -531,10 +538,14 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
                 ushort cmd = (ushort)(data[0] | (data[1] << 8));
                 if (cmd != EIP_LIST_IDENTITY) continue;
 
+                // Use cached local IP address (avoid per-packet enumeration)
+                if (_cachedLocalAddress == null) return;
+                IPEndPoint localEndpoint = new IPEndPoint(_cachedLocalAddress, _port);
+
                 // Echo the Sender Context from the request (bytes 12-19).
                 ulong senderCtx = BitConverter.ToUInt64(data, 12);
 
-                byte[] reply = BuildListIdentityResponse(senderCtx, sessionHandle: 0);
+                byte[] reply = BuildListIdentityResponse(senderCtx, sessionHandle: 0, localEndpoint);
                 LogHex("TX:", reply, reply.Length);
                 await _udpListener.SendAsync(reply, reply.Length, result.RemoteEndPoint)
                                   .ConfigureAwait(false);
@@ -671,38 +682,93 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
 
     // ── Static List Identity response builder (used by both TCP and UDP) ─────
 
+
     /// <summary>
     /// Builds a complete List Identity response packet.
     /// </summary>
-    /// <param name="senderContext">
-    ///   Sender Context bytes from the corresponding request — echoed verbatim.
-    /// </param>
-    /// <param name="sessionHandle">
-    ///   EIP session handle; use 0 for UDP unicast replies (no session).
-    /// </param>
-    private static byte[] BuildListIdentityResponse(ulong senderContext, uint sessionHandle)
+    /// <param name="senderContext">Sender Context bytes from request — echoed verbatim.</param>
+    /// <param name="sessionHandle">EIP session handle; use 0 for UDP replies.</param>
+    /// <param name="localEndpoint">Local endpoint (IP and port) for Socket Address field.</param>
+    private static byte[] BuildListIdentityResponse(ulong senderContext, uint sessionHandle, IPEndPoint localEndpoint)
     {
         using var ms = new MemoryStream();
-        using var w  = new BinaryWriter(ms);
+        using var w = new BinaryWriter(ms);
 
+        // ========================================================================
+        // Part 1: Encapsulation Header (24 bytes)
+        // ========================================================================
         WriteEipHeader(w, EIP_LIST_IDENTITY, sessionHandle, senderContext);
-        WriteListCpfHeader(w, 1); // Item count = 1
 
-        // Identity Item (type code 0x000C — Identity Object reply item)
-        w.Write((ushort)0x000C);
+        // ========================================================================
+        // Part 2: CPF Header
+        // ========================================================================
+        WriteListCpfHeader(w, 1);  // Item count = 1
+
+        // ========================================================================
+        // Part 3: Identity Item
+        // ========================================================================
+        w.Write((ushort)0x000C);   // Item Type = Identity Object
         long itemLenPos = ms.Position;
-        w.Write((ushort)0);       // Item length placeholder
-        long itemStart = ms.Position;
-        w.Write(s_identityData);
-        long itemEnd = ms.Position;
+        w.Write((ushort)0);        // Item Length (placeholder)
 
-        // Fix item length field.
+        // ========================================================================
+        // Part 3a: Encapsulation Protocol Version (MUST be 0x0001)
+        // ========================================================================
+        w.Write((ushort)1);        // Protocol version = 1
+
+        // ========================================================================
+        // Part 3b: Socket Address (16 bytes)
+        // ========================================================================
+        w.Write((ushort)0x0002);   // sin_family = AF_INET
+        // Convert port to network byte order (big-endian) per EIP spec
+        ushort portBE = (ushort)((localEndpoint.Port >> 8) | ((localEndpoint.Port & 0xFF) << 8));
+        w.Write(portBE);          // sin_port = 44818
+        byte[] ipBytes = localEndpoint.Address.GetAddressBytes();
+        w.Write(ipBytes);          // sin_addr
+        w.Write(new byte[8]);      // sin_zero padding
+
+        // ========================================================================
+        // Part 3c: Identity Object Attributes
+        // ========================================================================
+        w.Write(s_identityData);   // Vendor ID, Device Type, Product Code, etc.
+
+        // ========================================================================
+        // Fix lengths
+        // ========================================================================
+        long itemEnd = ms.Position;
         ms.Seek(itemLenPos, SeekOrigin.Begin);
-        w.Write((ushort)(itemEnd - itemStart));
+        w.Write((ushort)(itemEnd - (itemLenPos + 2)));
         ms.Seek(itemEnd, SeekOrigin.Begin);
 
         FixEipLength(ms, w);
         return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Gets the first non-loopback IPv4 unicast address of the local machine.
+    /// </summary>
+    private IPAddress? GetLocalUnicastIPv4Address()
+    {
+        foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+        {
+            // Skip interfaces that are not operational
+            if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up)
+                continue;
+            
+            // Skip loopback interfaces
+            if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback)
+                continue;
+            
+            foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+            {
+                if (ua.Address.AddressFamily == AddressFamily.InterNetwork &&
+                    !IPAddress.IsLoopback(ua.Address))
+                {
+                    return ua.Address;
+                }
+            }
+        }
+        return null;
     }
 
     // ── Binary read helpers ──────────────────────────────────────────────────

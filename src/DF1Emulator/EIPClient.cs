@@ -20,6 +20,7 @@
 
 using System;
 using System.IO;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -264,9 +265,6 @@ public sealed partial class EIPProtocol
                         _proto.LogHex("RX:", buf, 24 + length);
                     }
 
-                    // Discard any unexpected extra bytes so subsequent packets parse correctly.
-                    await DiscardExcessAsync().ConfigureAwait(false);
-
                     // Dispatch command with the request context.
                     await DispatchCommand(command, buf, length, context).ConfigureAwait(false);
                 }
@@ -304,33 +302,6 @@ public sealed partial class EIPProtocol
             return total;
         }
 
-        /// <summary>
-        /// Discards bytes currently queued in the OS receive buffer beyond
-        /// the declared EIP frame length. Keeps the stream synchronised in
-        /// the presence of misbehaving clients.
-        /// </summary>
-        private async Task DiscardExcessAsync()
-        {
-            if (!_stream.DataAvailable) return;  // fast-path: nothing to discard
-            var tmp   = new byte[4096];
-            int total = 0;
-            try
-            {
-                // Read once without looping — DataAvailable already confirmed data is
-                // present; a single ReadAsync drains what is buffered right now without
-                // the DataAvailable-vs-ReadAsync race that a while loop would introduce.
-                total = await _stream.ReadAsync(tmp, 0, tmp.Length).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _proto.Log($"DiscardExcessAsync error: {ex.Message}");
-            }
-            if (total > 0)
-            {
-                _proto.Log($"Discarded {total} excess byte(s) — possible protocol framing error");
-                _proto._emulator.IncrementBadPacketsDetected();
-            }
-        }
 
         // ── Command dispatch ─────────────────────────────────────────────────
 
@@ -505,7 +476,15 @@ public sealed partial class EIPProtocol
         /// <param name="context">Request context (contains Sender Context for echo)</param>
         private async Task HandleListIdentity(EIPRequestContext context)
         {
-            byte[] reply = BuildListIdentityResponse(context.SenderContext, _sessionHandle);
+            // Use cached local IP address (avoid per-packet enumeration)
+            if (_proto._cachedLocalAddress == null)
+            {
+                _proto.Log("[WARN] HandleListIdentity: no valid IPv4 unicast address found");
+                return;
+            }
+            
+            IPEndPoint localEndpoint = new IPEndPoint(_proto._cachedLocalAddress, _proto._port);
+            byte[] reply = BuildListIdentityResponse(context.SenderContext, _sessionHandle, localEndpoint);
             await SendRawResponse(reply, reply.Length).ConfigureAwait(false);
             _proto.Log($"ListIdentity response sent ({EIP_PRODUCT_NAME})");
         }
