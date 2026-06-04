@@ -101,7 +101,51 @@ public sealed partial class EIPProtocol
             Command       = command;
         }
 
+        /// <summary>
+        /// Whether the connection was established at the time the request was received.
+        /// Captured to prevent race conditions between receive and send time.
+        /// </summary>
         public bool IsConnectedAtReceive { get; set; }
+
+        /// <summary>
+        /// The CIP connection associated with this request (for Connected Send).
+        /// </summary>
+        public CipConnection? Connection { get; set; }
+    }
+
+    /// <summary>
+    /// Represents a single CIP connection established via Forward Open.
+    /// Multiple connections can exist per TCP session.
+    /// </summary>
+    private sealed class CipConnection
+    {
+        /// <summary>
+        /// T→O connection ID proposed by the client. Echoed in Connected Send responses.
+        /// </summary>
+        public uint OrigConnectionId { get; set; }
+
+        /// <summary>
+        /// Server-assigned connection ID. Used as key in the connections dictionary
+        /// and sent to client as orig_to_targ_conn_id in Forward Open response.
+        /// </summary>
+        public uint AssignedId { get; set; }
+
+        /// <summary>
+        /// Connection serial number from the Forward Open request.
+        /// Used to identify the connection in Forward Close.
+        /// </summary>
+        public ushort SerialNumber { get; set; }
+
+        /// <summary>
+        /// Sequence number for outgoing Connected Send responses.
+        /// Increments per message per connection.
+        /// </summary>
+        public int SequenceNumber;
+
+        /// <summary>
+        /// Whether this connection is active.
+        /// </summary>
+        public bool IsActive { get; set; }
     }
 
     /// <summary>
@@ -151,29 +195,14 @@ public sealed partial class EIPProtocol
 
         // ── Connected messaging state (established by Forward Open) ──────────
 
-        // Connection ID that the client must include in every Connected Send
-        // packet it sends to us. We generate this value in HandleForwardOpen
-        // and return it in the Forward Open response as orig_to_targ_conn_id.
-        private uint _targConnectionId;
-
-        // Connection ID we echo in the CPF Connected Address item of every
-        // Connected Send response. Taken from the toConnId field of the client's
-        // Forward Open request (its targ_to_orig_conn_id proposal).
-        private uint _origConnectionId;
-
         // Shared counter for assigning unique connection IDs. Static so that
         // IDs do not repeat even across different client sessions.
         private static int s_nextConnectionId = 0;
 
-        // Connection serial number and sequence counter for connected messaging.
-        // _connSequenceNumber is stored as int to allow Interlocked.Increment;
-        // cast to ushort on write so it wraps at 0xFFFF as per EIP spec.
-        private ushort _connSerialNumber;
-        private int    _connSequenceNumber;
-
-        // True after a successful Forward Open; controls which response path
-        // is used in SendResponseAsync().
-        private bool _isConnected;
+        // Dictionary of active CIP connections keyed by AssignedId (server-assigned ID).
+        // Supports multiple concurrent connections per TCP session.
+        private readonly Dictionary<uint, CipConnection> _connections = new();
+        private readonly object _connLock = new object();
 
         // NOTE: Per-request state (Sender Context, Request ID) is NOT stored here.
         // Instead, it is encapsulated in EIPRequestContext and passed through
@@ -190,6 +219,18 @@ public sealed partial class EIPProtocol
         /// to guard against sending to already-disconnected clients.
         /// </summary>
         public bool IsConnected => !_disposed && _tcp.Connected;
+
+        /// <summary>
+        /// Number of active CIP connections.
+        /// </summary>
+        private int ActiveConnectionCount
+        {
+            get
+            {
+                lock (_connLock)
+                    return _connections.Count;
+            }
+        }
 
         // ── Logging helpers ──────────────────────────────────────────────────
 
@@ -220,9 +261,6 @@ public sealed partial class EIPProtocol
             _tcp           = tcp;
             _stream        = tcp.GetStream();
             _sessionHandle = sessionHandle;
-            // Use the lower 16 bits of the session handle as a deterministic
-            // starting value for the connection serial number.
-            _connSerialNumber = (ushort)(sessionHandle & 0xFFFF);
         }
 
         // ── Main receive loop ────────────────────────────────────────────────
@@ -278,9 +316,6 @@ public sealed partial class EIPProtocol
                     break;
                 }
             }
-
-            // Server never initiates Forward Close — simply reset connection state.
-            _isConnected = false;
         }
 
         // ── Low-level I/O helpers ────────────────────────────────────────────
@@ -628,8 +663,6 @@ public sealed partial class EIPProtocol
         /// <param name="context">Request context (carries per-request state)</param>
         private async Task HandleConnectedSend(byte[] buf, ushort length, EIPRequestContext context)
         {
-            context.IsConnectedAtReceive = _isConnected;
-
             int offset = 24 + 6; // EIP header + Interface Handle(4) + Timeout(2)
 
             if (offset + 2 > buf.Length) return;
@@ -648,18 +681,27 @@ public sealed partial class EIPProtocol
                 {
                     uint connId = (uint)(buf[offset]     | (buf[offset + 1] << 8) |
                                         (buf[offset + 2] << 16) | (buf[offset + 3] << 24));
-                    if (connId != _targConnectionId)
+
+                    CipConnection? conn;
+                    lock (_connLock)
+                        _connections.TryGetValue(connId, out conn);
+
+                    if (conn == null)
                     {
-                        _proto.Log($"Connected Send: bad connection ID 0x{connId:X8} " +
-                            $"(expected 0x{_targConnectionId:X8}) — packet dropped");
+                        _proto.Log($"Connected Send: bad connection ID 0x{connId:X8} — packet dropped");
                         return;
                     }
+
+                    // Store connection in context for response
+                    context.Connection = conn;
+                    context.IsConnectedAtReceive = true;
                     offset = itemStart + itemLength;
                 }
                 else if (itemType == CPF_ITEM_CONNECTED_DATA && itemLength >= 2)
                 {
-                    // First two bytes are the connection sequence number.
-                    _ = (ushort)(buf[offset] | (buf[offset + 1] << 8));
+                    // Read incoming sequence number (can be used for validation)
+                    ushort incomingSeq = (ushort)(buf[offset] | (buf[offset + 1] << 8));
+                    _ = incomingSeq;
                     ExtractAndDispatchPCCC(buf, offset + 2, (ushort)(itemLength - 2), context);
                     break;
                 }
@@ -681,14 +723,10 @@ public sealed partial class EIPProtocol
         /// sends the appropriate Forward Open response.
         ///
         /// Connection ID semantics (from libplctag session.h / defs.h):
-        ///   otConnId  — O→T connection ID proposed by the client (used by us to
-        ///               validate incoming Connected Send packets when the client
-        ///               echoes it in CPF Connected Address items).
-        ///   toConnId  — T→O connection ID proposed by the client (echoed in our
-        ///               response and in Connected Send reply CPF address items).
+        ///   otConnId  — O→T connection ID proposed by the client
+        ///   toConnId  — T→O connection ID proposed by the client
         ///   newId     — Fresh connection ID we assign for this connection.
-        ///               Returned as orig_to_targ_conn_id in our response so the
-        ///               client knows what value to put in CPF Connected Address.
+        ///               Returned as orig_to_targ_conn_id in our response.
         /// </summary>
         /// <param name="buf">Raw packet buffer</param>
         /// <param name="offset">Starting offset of the CIP request</param>
@@ -726,16 +764,23 @@ public sealed partial class EIPProtocol
             // distinguishes server-generated IDs from client-generated ones.
             uint newId = ((uint)Interlocked.Increment(ref s_nextConnectionId) << 1) | 0x80000000;
 
-            _targConnectionId   = newId;     // Client must send this in Connected Send packets
-            _origConnectionId   = toConnId;  // We echo this in our Connected Send replies
-            _connSerialNumber   = connSerial;
-            _connSequenceNumber = 0;
-            _isConnected        = true;
+            var conn = new CipConnection
+            {
+                OrigConnectionId = toConnId,
+                AssignedId = newId,
+                SerialNumber = connSerial,
+                SequenceNumber = 0,
+                IsActive = true
+            };
+
+            lock (_connLock)
+                _connections[newId] = conn;
 
             _proto.Log($"ForwardOpen{(isExtended ? "Ex" : "")}: " +
-                $"OT=0x{otConnId:X8} TO=0x{toConnId:X8} → assigned TargID=0x{newId:X8}");
+                $"OT=0x{otConnId:X8} TO=0x{toConnId:X8} → assigned TargID=0x{newId:X8}, " +
+                $"Active connections={_connections.Count}");
 
-            await SendForwardOpenResponse(otConnId, toConnId, connSerial, vendorId, serialNum, isExtended, context)
+            await SendForwardOpenResponse(newId, toConnId, connSerial, vendorId, serialNum, isExtended, context)
                   .ConfigureAwait(false);
         }
 
@@ -758,8 +803,20 @@ public sealed partial class EIPProtocol
             ushort vendorId   = ReadU16(buf, ref offset);
             uint   serialNum  = ReadU32(buf, ref offset);
 
-            _isConnected = false;
-            _proto.Log($"ForwardClose: connection 0x{_origConnectionId:X8} closed");
+            // Find connection by serial number
+            CipConnection? conn = null;
+            lock (_connLock)
+            {
+                conn = _connections.Values.FirstOrDefault(c => c.SerialNumber == connSerial);
+                if (conn != null)
+                    _connections.Remove(conn.AssignedId);
+            }
+
+            if (conn != null)
+                _proto.Log($"ForwardClose: connection 0x{conn.AssignedId:X8} closed, " +
+                           $"remaining connections={_connections.Count}");
+            else
+                _proto.Log($"ForwardClose: connection serial 0x{connSerial:X4} not found");
 
             await SendForwardCloseResponse(connSerial, vendorId, serialNum, context).ConfigureAwait(false);
         }
@@ -801,7 +858,7 @@ public sealed partial class EIPProtocol
 
         // ── Forward Open / Close response builders ───────────────────────────
 
-        private async Task SendForwardOpenResponse(uint otConnId, uint toConnId,
+        private async Task SendForwardOpenResponse(uint assignedId, uint toConnId,
             ushort connSerial, ushort vendorId, uint serialNum, bool isExtended, EIPRequestContext context)
         {
             byte replySvc = isExtended ? (byte)0xDB : (byte)0xD4;
@@ -822,8 +879,8 @@ public sealed partial class EIPProtocol
             w.Write((byte)0x00);        // Reserved
             w.Write(CIP_STATUS_OK);     // General status
             w.Write((byte)0x00);        // Additional status size = 0
-            w.Write(_targConnectionId); // orig_to_targ_conn_id — client uses this in Connected Send
-            w.Write(_origConnectionId); // targ_to_orig_conn_id — echoed in our Connected Send replies
+            w.Write(assignedId);        // orig_to_targ_conn_id — client uses this in Connected Send
+            w.Write(toConnId);          // targ_to_orig_conn_id — echoed in our Connected Send replies
             w.Write(connSerial);        // Connection serial number (echoed)
             w.Write(vendorId);          // Originator vendor ID (echoed)
             w.Write(serialNum);         // Originator serial number (echoed)
@@ -840,8 +897,7 @@ public sealed partial class EIPProtocol
             FixEipLength(ms, w);
             await FlushAsync(ms).ConfigureAwait(false);
 
-            _proto.Log($"ForwardOpen{(isExtended ? "Ex" : "")}: " +
-                $"OT=0x{otConnId:X8} TO=0x{toConnId:X8} → assigned TargID=0x{_targConnectionId:X8}");
+            _proto.Log($"ForwardOpen response: replySvc=0x{replySvc:X2}, AssignedID=0x{assignedId:X8}");
         }
 
         private async Task SendForwardCloseResponse(ushort connSerial, ushort vendorId, uint serialNum, EIPRequestContext context)
@@ -1031,7 +1087,7 @@ public sealed partial class EIPProtocol
         {
             if (_disposed || _proto.IsDisposing) return;
 
-            _proto.Log($"SendResponseAsync: PDU length={pdu.Length}, connected={_isConnected}");
+            _proto.Log($"SendResponseAsync: PDU length={pdu.Length}");
 
             if (context.IsConnectedAtReceive)
                 await SendConnectedResponse(pdu, context).ConfigureAwait(false);
@@ -1084,6 +1140,9 @@ public sealed partial class EIPProtocol
         /// <param name="context">Request context (contains SenderContext and RequestId)</param>
         private async Task SendConnectedResponse(byte[] pdu, EIPRequestContext context)
         {
+            var conn = context.Connection;
+            if (conn == null) return;
+
             using var ms = new MemoryStream();
             using var w  = new BinaryWriter(ms);
 
@@ -1093,7 +1152,7 @@ public sealed partial class EIPProtocol
             // Connected Address Item carries the T→O connection ID.
             w.Write(CPF_ITEM_CONNECTED_ADDRESS);
             w.Write((ushort)4);
-            w.Write(_origConnectionId);
+            w.Write(conn.OrigConnectionId);
 
             // Connected Data Item.
             w.Write(CPF_ITEM_CONNECTED_DATA);
@@ -1102,11 +1161,11 @@ public sealed partial class EIPProtocol
 
             // Connection sequence number increments monotonically; cast to ushort
             // so it wraps at 0xFFFF as per EIP spec (intentional truncation).
-            w.Write((ushort)(Interlocked.Increment(ref _connSequenceNumber) & 0xFFFF));
+            w.Write((ushort)(Interlocked.Increment(ref conn.SequenceNumber) & 0xFFFF));
 
             WritePcccReplyHeader(w, pdu, context.RequestId);
 
-            const int dataOffset = 6;
+                        const int dataOffset = 6;
             if (pdu.Length > dataOffset)
                 w.Write(pdu, dataOffset, pdu.Length - dataOffset);
 
