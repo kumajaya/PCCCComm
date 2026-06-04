@@ -610,6 +610,25 @@ public class DF1Emulator : IDisposable
             payloadIdx += 2;
         }
 
+        // Validate file exists and write operation is within bounds
+        int fileSize = _memory.GetFileSize(fileType, fileNumber);
+        if (fileSize == 0)
+        {
+            // File not found
+            SendErrorResponse(src, tns, 0x0F, func, 0x50, clientContext);
+            return;
+        }
+
+        int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
+        int byteOffset = element * bpe + subElement * 2;
+        
+        if (byteOffset < 0 || byteOffset + bytesToWrite > fileSize)
+        {
+            // Write operation would exceed file bounds
+            SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext);
+            return;
+        }
+
         // Bit-masked write (0xAB)
         if (func == 0xAB)
         {
@@ -743,14 +762,27 @@ public class DF1Emulator : IDisposable
         int byteOffset  = offsetWords * 2;
 
         int fileSize = _memory.GetFileSize(fileType, fileNumber);
+        if (fileSize == 0)
+        {
+            // File not found
+            SendErrorResponse(src, tns, 0x67, 0x00, 0x50, clientContext);
+            return;
+        }
+
         if (byteOffset + bytesToRead > fileSize)
         {
+            // Offset out of range
             SendErrorResponse(src, tns, 0x67, 0x00, 0x10, clientContext);
             return;
         }
 
         byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
-        if (status != 0)
+        if (status == 2)  // File not found
+        {
+            SendErrorResponse(src, tns, 0x67, 0x00, 0x50, clientContext);
+            return;
+        }
+        if (status != 0)  // Other error (out of range, etc.)
         {
             SendErrorResponse(src, tns, 0x67, 0x00, 0x10, clientContext);
             return;

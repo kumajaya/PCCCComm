@@ -164,7 +164,7 @@ sudo usermod -a -G dialout $USER
 ### EtherNet/IP (EIP) Mode
 - Create an **EtherNet/IP** driver in RSLinx Classic.
 - Add the emulator's IP address (e.g., `127.0.0.1` or `192.168.x.x`).
-- The emulator will appear as **"1747-L553 SLC 5/05"** in RSWho.
+- The emulator will appear as **"1747-L551 C SLC 5/05"** in RSWho.
 - **Auto-browse:** The emulator answers UDP broadcast ListIdentity on port 44818, so it appears automatically when browsing the network.
 
 **Firewall note:** UDP port 44818 must be open for RSLinx auto-browse (broadcast ListIdentity). TCP port 44818 is required for connected sessions.

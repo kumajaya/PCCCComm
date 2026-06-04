@@ -85,6 +85,7 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
     // Thread-safe client registry: session handle → EIPClient.
     private readonly Dictionary<uint, EIPClient> _clients    = new();
     private readonly object                       _clientLock = new object();
+    private const int MAX_CLIENTS = 32;
 
     // Session handle generator. Stored as int so Interlocked.Increment can be
     // used; cast to uint when assigned because EIP session handles are 32-bit
@@ -111,7 +112,7 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
     /// </summary>
     public bool IsDisposing => Volatile.Read(ref _isDisposing) != 0;
 
-    private bool                    _isRunning;
+    private volatile bool _isRunning;
     private CancellationTokenSource? _cts;
 
     // Counts in-flight requests to allow graceful drain on Stop().
@@ -468,11 +469,15 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
 
     private async Task AcceptClientsAsync()
     {
+        int errorCount = 0;
+        const int maxErrors = 10;
+        
         while (_isRunning && _listener != null)
         {
             try
             {
                 var tcp = await _listener.AcceptTcpClientAsync().ConfigureAwait(false);
+                errorCount = 0; // Reset on success
                 if (_isRunning)
                     _ = Task.Run(() => HandleClientAsync(tcp), _cts!.Token);
                 else
@@ -481,14 +486,34 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
             catch (ObjectDisposedException) { break; }
             catch (Exception ex)
             {
-                if (_isRunning) Console.WriteLine($"[EIP]  Accept error: {ex.Message}");
-                break;
+                errorCount++;
+                if (_isRunning)
+                    Console.WriteLine($"[EIP]  Accept error ({errorCount}/{maxErrors}): {ex.Message}");
+                
+                if (errorCount >= maxErrors)
+                {
+                    Console.WriteLine($"[EIP]  Too many accept errors, stopping listener");
+                    break;
+                }
+                
+                await Task.Delay(100).ConfigureAwait(false);
             }
         }
     }
 
     private async Task HandleClientAsync(TcpClient tcp)
     {
+        int clientCount;
+        lock (_clientLock)
+            clientCount = _clients.Count;
+        
+        if (clientCount >= MAX_CLIENTS)
+        {
+            Console.WriteLine($"[EIP]  Max clients reached ({MAX_CLIENTS}), rejecting connection");
+            tcp.Close();
+            return;
+        }
+
         uint handle = (uint)Interlocked.Increment(ref _nextSessionHandleInt);
         var  client = new EIPClient(this, tcp, handle);
 

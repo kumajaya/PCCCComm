@@ -223,7 +223,11 @@ public class DF1Protocol : ILinkProtocol
             // Linux: normalize port name (add /dev/ prefix if needed)
             string baseName = _port.PortName.Replace("/dev/", "");
             string fullPath = $"/dev/{baseName}";
-            var ports = Directory.GetFiles("/dev", "tty*");
+            var ports = Directory.GetFiles("/dev", "tty*")
+                .Concat(Directory.Exists("/dev/pts") 
+                    ? Directory.GetFiles("/dev/pts") 
+                    : Array.Empty<string>())
+                .ToArray();
             if (ports.Contains(fullPath))
             {
                 _port.PortName = fullPath;
@@ -296,7 +300,7 @@ public class DF1Protocol : ILinkProtocol
 
         // Step 6: Wait for any active DataReceived callbacks to complete
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (Interlocked.CompareExchange(ref _activeCallbacks, 0, 0) > 0 && sw.ElapsedMilliseconds < 2000)
+        while (Volatile.Read(ref _activeCallbacks) > 0 && sw.ElapsedMilliseconds < 2000)
         {
             Thread.Sleep(10);
         }
@@ -765,16 +769,12 @@ public class DF1Protocol : ILinkProtocol
             int tns = unstuffed[4] | (unstuffed[5] << 8);
             int func = unstuffedLen >= 7 ? unstuffed[6] : 0;
 
-            // Extract data payload (everything after the 6/7-byte header)
-            byte[] data = unstuffedLen > 7
-                ? unstuffed[7..].ToArray()
-                : Array.Empty<byte>();
-
             if (_isLoggingEnabled)
             {
+                int dataLen = Math.Max(0, unstuffedLen - 7);
                 LogDelta($"\n    RX: ");
                 Console.WriteLine(BitConverter.ToString(rawFrame).Replace("-", " "));
-                Console.WriteLine($"    dst={dst} src={src} cmd=0x{cmd:X2} tns={tns} func=0x{func:X2} dataLen={data.Length}");
+                Console.WriteLine($"    dst={dst} src={src} cmd=0x{cmd:X2} tns={tns} func=0x{func:X2} dataLen={dataLen}");
             }
 
             // Only respond if this frame is addressed to us (or broadcast)
@@ -886,9 +886,14 @@ public class DF1Protocol : ILinkProtocol
             lock (_txLock)
             {
                 _port.Write(frameBuf, 0, pos);
-                if (_isLoggingEnabled)
+                if (_isLoggingEnabled && innerArray.Length > 2)
                 {
                     LogDelta($"cmd=0x{innerArray[2]:X2} → \n    TX: ");
+                    Console.WriteLine(BitConverter.ToString(frameBuf, 0, pos).Replace("-", " "));
+                }
+                else if (_isLoggingEnabled)
+                {
+                    LogDelta($"cmd=0x?? → \n    TX: ");
                     Console.WriteLine(BitConverter.ToString(frameBuf, 0, pos).Replace("-", " "));
                 }
             }
