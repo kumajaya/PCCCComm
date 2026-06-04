@@ -100,6 +100,8 @@ public sealed partial class EIPProtocol
             SenderContext = senderContext;
             Command       = command;
         }
+
+        public bool IsConnectedAtReceive { get; set; }
     }
 
     /// <summary>
@@ -531,6 +533,8 @@ public sealed partial class EIPProtocol
         /// <param name="context">Request context (carries per-request state)</param>
         private async Task HandleUnconnectedSend(byte[] buf, ushort length, EIPRequestContext context)
         {
+            context.IsConnectedAtReceive = false;
+
             // Body starts immediately after the 24-byte EIP header.
             int offset = 24;
 
@@ -624,6 +628,8 @@ public sealed partial class EIPProtocol
         /// <param name="context">Request context (carries per-request state)</param>
         private async Task HandleConnectedSend(byte[] buf, ushort length, EIPRequestContext context)
         {
+            context.IsConnectedAtReceive = _isConnected;
+
             int offset = 24 + 6; // EIP header + Interface Handle(4) + Timeout(2)
 
             if (offset + 2 > buf.Length) return;
@@ -653,7 +659,7 @@ public sealed partial class EIPProtocol
                 else if (itemType == CPF_ITEM_CONNECTED_DATA && itemLength >= 2)
                 {
                     // First two bytes are the connection sequence number.
-                    _connSequenceNumber = (ushort)(buf[offset] | (buf[offset + 1] << 8));
+                    _ = (ushort)(buf[offset] | (buf[offset + 1] << 8));
                     ExtractAndDispatchPCCC(buf, offset + 2, (ushort)(itemLength - 2), context);
                     break;
                 }
@@ -834,7 +840,8 @@ public sealed partial class EIPProtocol
             FixEipLength(ms, w);
             await FlushAsync(ms).ConfigureAwait(false);
 
-            _proto.Log($"ForwardOpen response: replySvc=0x{replySvc:X2}, TargID=0x{_targConnectionId:X8}");
+            _proto.Log($"ForwardOpen{(isExtended ? "Ex" : "")}: " +
+                $"OT=0x{otConnId:X8} TO=0x{toConnId:X8} → assigned TargID=0x{_targConnectionId:X8}");
         }
 
         private async Task SendForwardCloseResponse(ushort connSerial, ushort vendorId, uint serialNum, EIPRequestContext context)
@@ -1026,7 +1033,7 @@ public sealed partial class EIPProtocol
 
             _proto.Log($"SendResponseAsync: PDU length={pdu.Length}, connected={_isConnected}");
 
-            if (_isConnected)
+            if (context.IsConnectedAtReceive)
                 await SendConnectedResponse(pdu, context).ConfigureAwait(false);
             else
                 await SendUnconnectedResponse(pdu, context).ConfigureAwait(false);
