@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCEmulator - PCCC Engine and Transports for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 // 
-// Based on original DF1Comm.vb by Archie Jacobs (Manufacturing Automation LLC)
+// Initial reference: DF1Comm.vb (Archie Jacobs); implementation substantially modified.
 // which was released under GPLv2-or-later.
 // 
 // This program is free software: you can redistribute it and/or modify
@@ -27,19 +27,19 @@ using System.Threading;
 using System.Threading.Tasks;
 
 /// <summary>
-/// DF1 Full-Duplex SLC 5/03 emulator coordinator.
+/// PCCC emulator coordinator.
 /// 
 /// This class is the main coordinator that:
 ///   1. Manages shared resources (PlcMemory, mode, cache, timers)
 ///   2. Dispatches PCCC commands to PlcMemory
-///   3. Delegates protocol-specific I/O to ILinkProtocol implementations
+///   3. Delegates transport-specific I/O to ILinkTransport implementations
 /// 
-/// Supported protocols:
-///   - DF1 (serial) via DF1Protocol (default, fully implemented)
+/// Supported transports:
+///   - DF1 (serial) via DF1Transport (default, fully implemented)
 ///   - DH485 via serial (planned for future release)
 ///   - EtherNet/IP (EIP/PCCC) via TCP (fully implemented)
 /// 
-/// FRAME FORMAT (DF1 mode only - other protocols use different framing):
+/// FRAME FORMAT (DF1 mode only - other transports use different framing):
 ///   DLE STX | DST SRC CMD STS TNS_LO TNS_HI [FUNC] [DATA...] | DLE ETX | CHK
 /// 
 /// RSLinx auto-configure sequence:
@@ -78,21 +78,21 @@ using System.Threading.Tasks;
 ///   - Extended element addressing (element >= 255) is decoded correctly
 ///     using 0xFF followed by two-byte value.
 /// </summary>
-public class DF1Emulator : IDisposable
+public class PCCCEmulator : IDisposable
 {
     // ─── Core Components ──────────────────────────────────────────────────────
     private readonly PlcMemory _memory;
-    private ILinkProtocol? _protocol;
+    private ILinkTransport? _transport;
 
-    // ─── Emulator Mode ───────────────────────────────────────────────────────
-    public enum EmulatorMode
+    // ─── Transport Mode ───────────────────────────────────────────────────────
+    public enum TransportMode
     {
         DF1,      // Serial DF1 full-duplex (default, fully implemented)
         DH485,    // DH485 via serial (planned for future release)
         EIP       // EtherNet/IP (EIP/PCCC) via TCP (fully implemented)
     }
 
-    private readonly EmulatorMode _mode;
+    private readonly TransportMode _mode;
 
     // ─── Shared Configuration ─────────────────────────────────────────────────
     private CheckSumOptions _checkSum = CheckSumOptions.Crc;
@@ -156,7 +156,7 @@ public class DF1Emulator : IDisposable
 
     // ─── Shutdown ────────────────────────────────────────────────────────────
     private int _isDisposing = 0;
-    private long _framesProcessed = 0;  // Total frames processed across all protocols
+    private long _framesProcessed = 0;  // Total frames processed across all transports
 
     // ─── Properties ──────────────────────────────────────────────────────────
     public CheckSumOptions CheckSum
@@ -165,8 +165,8 @@ public class DF1Emulator : IDisposable
         set
         {
             _checkSum = value;
-            if (_protocol is DF1Protocol df1Proto)
-                df1Proto.CheckSum = value;
+            if (_transport is DF1Transport df1Transport)
+                df1Transport.CheckSum = value;
         }
     }
 
@@ -176,24 +176,24 @@ public class DF1Emulator : IDisposable
         set
         {
             _myNode = value;
-            if (_protocol is DF1Protocol df1Proto)
-                df1Proto.MyNode = value;
+            if (_transport is DF1Transport df1Transport)
+                df1Transport.MyNode = value;
         }
     }
 
-    public EmulatorMode Mode => _mode;
+    public TransportMode Mode => _mode;
 
     // ─── Constructor ─────────────────────────────────────────────────────────
     /// <summary>
-    /// Initializes the emulator with the specified protocol mode.
+    /// Initializes the emulator with the specified transport mode.
     /// </summary>
     /// <param name="portName">Serial port name (e.g., "COM2" or "/dev/ttyUSB0")</param>
     /// <param name="baudRate">Baud rate (e.g., 19200, 9600)</param>
     /// <param name="parity">Parity mode (None, Odd, Even)</param>
-    /// <param name="mode">Protocol mode (DF1, DH485, or EIP)</param>
+    /// <param name="mode">Transport mode (DF1, DH485, or EIP)</param>
     /// <param name="eipPort">EIP port number (default 44818, only used for EIP mode)</param>
     /// <exception cref="NotImplementedException">Thrown for DH485 mode (planned for future)</exception>
-    public DF1Emulator(string portName, int baudRate, Parity parity, EmulatorMode mode = EmulatorMode.DF1, int eipPort = 44818)
+    public PCCCEmulator(string portName, int baudRate, Parity parity, TransportMode mode = TransportMode.DF1, int eipPort = 44818)
     {
         _memory = new PlcMemory();
         _mode = mode;
@@ -203,30 +203,30 @@ public class DF1Emulator : IDisposable
         // processor mode changes at runtime (CMD 0x0F FNC 0x80).
         _cachedGetStatusPayload = BuildGetStatusPayload();
 
-        // Create the appropriate protocol handler based on mode
-        _protocol = mode switch
+        // Create the appropriate transport handler based on mode
+        _transport = mode switch
         {
-            EmulatorMode.DF1   => new DF1Protocol(this, portName, baudRate, parity),
-            EmulatorMode.DH485 => throw new NotImplementedException("DH485 protocol support is planned for a future release"),
-            EmulatorMode.EIP   => new EIPProtocol(this, eipPort),
-            _                  => throw new ArgumentException($"Unknown emulator mode: {mode}")
+            TransportMode.DF1   => new DF1Transport(this, portName, baudRate, parity),
+            TransportMode.DH485 => throw new NotImplementedException("DH485 transport support is planned for a future release"),
+            TransportMode.EIP   => new EIPTransport(this, eipPort),
+            _                   => throw new ArgumentException($"Unknown emulator mode: {mode}")
         };
 
-        // Subscribe to protocol PDU events
-        _protocol.PduReceived += OnPduReceived;
+        // Subscribe to transport PDU events
+        _transport.PduReceived += OnPduReceived;
 
         // Create timers in stopped state; they are armed when Start() is called
         _timer        = new Timer(_ => UpdateDateTime(), null, Timeout.Infinite, Timeout.Infinite);
         _waveformTimer = new Timer(_ => UpdateWaveform(), null, Timeout.Infinite, Timeout.Infinite);
 
-        Console.WriteLine($"[EMU]  DF1Emulator initialized in {mode} mode");
+        Console.WriteLine($"[EMU]  PCCC emulator initialized in {mode} mode");
     }
 
     /// <summary>
-    /// Convenience constructor for DF1 mode (default protocol).
+    /// Convenience constructor for DF1 mode (default transport).
     /// </summary>
-    public DF1Emulator(string portName, int baudRate, Parity parity)
-        : this(portName, baudRate, parity, EmulatorMode.DF1)
+    public PCCCEmulator(string portName, int baudRate, Parity parity)
+        : this(portName, baudRate, parity, TransportMode.DF1)
     {
     }
 
@@ -238,10 +238,10 @@ public class DF1Emulator : IDisposable
     /// <exception cref="InvalidOperationException">Thrown when the port is not found or access is denied</exception>
     public void Start()
     {
-        _protocol?.Start();
+        _transport?.Start();
         _timer?.Change(0, 1000);
         _waveformTimer?.Change(0, 500);
-        Console.WriteLine($"[EMU]  DF1 Emulator started in {_mode} mode");
+        Console.WriteLine($"[EMU]  PCCC emulator started in {_mode} mode");
     }
 
     /// <summary>
@@ -252,11 +252,11 @@ public class DF1Emulator : IDisposable
     {
         if (Interlocked.CompareExchange(ref _isDisposing, 1, 0) != 0) return;
 
-        _protocol?.Stop();
+        _transport?.Stop();
         _timer?.Change(Timeout.Infinite, Timeout.Infinite);
         _waveformTimer?.Change(Timeout.Infinite, Timeout.Infinite);
 
-        Console.WriteLine($"[EMU]  DF1 Emulator stopped. Total frames processed: {_framesProcessed:N0}");
+        Console.WriteLine($"[EMU]  PCCC emulator stopped. Total frames processed: {_framesProcessed:N0}");
     }
 
     public void Dispose()
@@ -264,9 +264,9 @@ public class DF1Emulator : IDisposable
         Stop();
         _timer?.Dispose();
         _waveformTimer?.Dispose();
-        // EIPProtocol does not implement IDisposable; Stop() above already drains
+        // EIPTransport does not implement IDisposable; Stop() above already drains
         // in-flight requests and closes all resources via its StopAsync() path.
-        (_protocol as IDisposable)?.Dispose();
+        (_transport as IDisposable)?.Dispose();
         GC.SuppressFinalize(this);
     }
 
@@ -278,16 +278,16 @@ public class DF1Emulator : IDisposable
     public void SetLoggingEnabled(bool enabled)
     {
         _isLoggingEnabled = enabled;
-        if (_protocol is DF1Protocol df1Proto)
-            df1Proto.SetLoggingEnabled(enabled);
-        if (_protocol is EIPProtocol eipProto)
-            eipProto.SetLoggingEnabled(enabled);
+        if (_transport is DF1Transport df1Transport)
+            df1Transport.SetLoggingEnabled(enabled);
+        if (_transport is EIPTransport eipTransport)
+            eipTransport.SetLoggingEnabled(enabled);
         if (!enabled)
             Console.WriteLine("[PERF] Logging disabled for maximum throughput");
     }
 
-    // ─── Internal Methods for DF1Protocol to Update Counters ─────────────────
-    // These allow DF1Protocol to report protocol-specific events without exposing
+    // ─── Internal Methods for DF1Transport to Update Counters ─────────────────
+    // These allow DF1Transport to report transport-specific events without exposing
     // internal counters directly to external code.
     internal void IncrementTotalPacketsSent()       => Interlocked.Increment(ref _totalPacketsSent);
     internal void IncrementFramesProcessed()        => Interlocked.Increment(ref _framesProcessed);
@@ -302,8 +302,8 @@ public class DF1Emulator : IDisposable
     internal void IncrementLostModem()              => Interlocked.Increment(ref _lostModemCount);
     internal void IncrementEnqSent()                => Interlocked.Increment(ref _enqSent);
 
-    // ─── Internal Methods Called by DF1Protocol ──────────────────────────────
-    // These provide DF1Protocol with read-only access to diagnostic counters
+    // ─── Internal Methods Called by DF1Transport ──────────────────────────────
+    // These provide DF1Transport with read-only access to diagnostic counters
     // for health monitoring purposes.
     // Volatile.Read is used for a clean atomic read without the compare-exchange
     // idiom, which is semantically equivalent but more explicit in intent.
@@ -315,26 +315,26 @@ public class DF1Emulator : IDisposable
 
     /// <summary>
     /// Updates modem status bits based on actual hardware line states.
-    /// Called by DF1Protocol when pin change events occur.
+    /// Called by DF1Transport when pin change events occur.
     /// </summary>
     internal void UpdateModemStatus()
     {
-        if (_protocol is DF1Protocol df1Proto)
+        if (_transport is DF1Transport df1Transport)
         {
             ushort status = 0;
-            if (df1Proto.GetCtsHolding()) status |= 0x0001;  // CTS
-            if (df1Proto.GetRtsEnable())  status |= 0x0002;  // RTS
-            if (df1Proto.GetDsrHolding()) status |= 0x0004;  // DSR
-            if (df1Proto.GetCdHolding())  status |= 0x0008;  // DCD
-            if (df1Proto.GetDtrEnable())  status |= 0x0010;  // DTR
+            if (df1Transport.GetCtsHolding()) status |= 0x0001;  // CTS
+            if (df1Transport.GetRtsEnable())  status |= 0x0002;  // RTS
+            if (df1Transport.GetDsrHolding()) status |= 0x0004;  // DSR
+            if (df1Transport.GetCdHolding())  status |= 0x0008;  // DCD
+            if (df1Transport.GetDtrEnable())  status |= 0x0010;  // DTR
             _modemStatus = status;
         }
     }
 
-    // ─── PDU Event Handler (Called by protocol layer) ────────────────────────
+    // ─── PDU Event Handler (Called by transport layer) ────────────────────────
     /// <summary>
-    /// Called when a complete PDU (Protocol Data Unit) has been received.
-    /// The PDU is the inner frame without protocol-specific framing.
+    /// Called when a complete PDU (Transport Data Unit) has been received.
+    /// The PDU is the inner frame without transport-specific framing.
     /// Format: [DST, SRC, CMD, STS, TNS_LO, TNS_HI, FUNC?, DATA...]
     /// </summary>
     private void OnPduReceived(object? sender, (byte[] pdu, object ClientContext) args)
@@ -343,7 +343,7 @@ public class DF1Emulator : IDisposable
         DispatchCommand(args.pdu, args.ClientContext);
     }
 
-    // ─── Command Dispatcher (Shared Across All Protocols) ────────────────────
+    // ─── Command Dispatcher (Shared Across All Transports) ────────────────────
     // All command processing routes through here. The PDU format is the same
     // for DF1 and EIP/PCCC (CIP encapsulated PCCC).
     //
@@ -793,7 +793,7 @@ public class DF1Emulator : IDisposable
 
     // ─── Response Helpers ────────────────────────────────────────────────────
     // All responses eventually call SendResponse() which delegates to the
-    // active protocol's SendResponse() method.
+    // active transport's SendResponse() method.
     //
     // withFunc convention:
     //   true  — FUNC byte is included in the response frame (ACK-style responses,
@@ -951,7 +951,7 @@ public class DF1Emulator : IDisposable
 
     /// <summary>
     /// Core response sender. Builds the inner frame PDU and delegates to the
-    /// active protocol's SendResponse() method for protocol-specific framing.
+    /// active transport's SendResponse() method for transport-specific framing.
     /// </summary>
     /// <param name="dst">Destination node address</param>
     /// <param name="tns">Transaction number (echoed from request)</param>
@@ -978,7 +978,7 @@ public class DF1Emulator : IDisposable
         if (dataLen > 0)
             data?.CopyTo(inner, headerLen);
 
-        _protocol?.SendResponse(inner, clientContext);
+        _transport?.SendResponse(inner, clientContext);
     }
 
     // ─── Timers ──────────────────────────────────────────────────────────────

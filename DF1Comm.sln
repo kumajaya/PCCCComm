@@ -5,7 +5,7 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{B961BB1A-129B-43D4-8C40-E8CA5FD28F3D}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DF1Emulator", "src\DF1Emulator\DF1Emulator.csproj", "{011901A3-4B16-471D-960E-19FE8302E3EB}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PCCCEmulator", "src\PCCCEmulator\PCCCEmulator.csproj", "{011901A3-4B16-471D-960E-19FE8302E3EB}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DF1Comm", "src\DF1Comm\DF1Comm.csproj", "{3E89A556-D232-4165-84C1-2641FFB1B324}"
 EndProject
@@ -17,9 +17,6 @@ Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
 		Release|Any CPU = Release|Any CPU
-	EndGlobalSection
-	GlobalSection(SolutionProperties) = preSolution
-		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{011901A3-4B16-471D-960E-19FE8302E3EB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
@@ -38,6 +35,9 @@ Global
 		{E102C9AA-A430-4B5A-A53A-02E1BF754B51}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{E102C9AA-A430-4B5A-A53A-02E1BF754B51}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{E102C9AA-A430-4B5A-A53A-02E1BF754B51}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{011901A3-4B16-471D-960E-19FE8302E3EB} = {B961BB1A-129B-43D4-8C40-E8CA5FD28F3D}

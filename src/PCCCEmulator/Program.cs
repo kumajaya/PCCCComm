@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCEmulator - PCCC Engine and Transports for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 // 
-// Based on original DF1Comm.vb by Archie Jacobs (Manufacturing Automation LLC)
+// Initial reference: DF1Comm.vb (Archie Jacobs); implementation substantially modified.
 // which was released under GPLv2-or-later.
 // 
 // This program is free software: you can redistribute it and/or modify
@@ -31,7 +31,7 @@ using System.IO.Ports;
 ///   --parity <none|odd|even> : parity mode (default none)
 ///   --node <n>               : emulator node id (default 1)
 ///   --checksum <crc|bcc>     : checksum mode (default crc)
-///   --mode <df1|dh485|eip>   : protocol mode (default df1)
+///   --mode <df1|dh485|eip>   : transport mode (default df1)
 ///   --quiet, -q              : disable logging for maximum performance
 ///   --help, -h               : show usage
 ///
@@ -109,20 +109,20 @@ class Program
         // Validate mode
         var emulatorMode = mode switch
         {
-            "df1" => DF1Emulator.EmulatorMode.DF1,
-            "dh485" => DF1Emulator.EmulatorMode.DH485,
-            "eip" => DF1Emulator.EmulatorMode.EIP,
-            _ => DF1Emulator.EmulatorMode.DF1
+            "df1" => PCCCEmulator.TransportMode.DF1,
+            "dh485" => PCCCEmulator.TransportMode.DH485,
+            "eip" => PCCCEmulator.TransportMode.EIP,
+            _ => PCCCEmulator.TransportMode.DF1
         };
 
         // Warning for serial parameters when using EIP mode
-        if (emulatorMode == DF1Emulator.EmulatorMode.EIP && portName != "COM2")
+        if (emulatorMode == PCCCEmulator.TransportMode.EIP && portName != "COM2")
         {
             Console.WriteLine($"[WARN] EIP mode ignores serial port '{portName}'. Using Ethernet only.");
         }
 
         // Create and start emulator
-        using var emulator = new DF1Emulator(portName, baud, parity, emulatorMode, eipPort)
+        using var emulator = new PCCCEmulator(portName, baud, parity, emulatorMode, eipPort)
         {
             MyNode = node,
             CheckSum = checksum == "crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc
@@ -137,10 +137,10 @@ class Program
         try
         {
             emulator.Start();
-            Console.WriteLine($"DF1 Emulator running");
+            Console.WriteLine($"PCCC emulator running");
             Console.WriteLine($"  Mode      : {mode.ToUpper()}");
             
-            if (emulatorMode == DF1Emulator.EmulatorMode.DF1)
+            if (emulatorMode == PCCCEmulator.TransportMode.DF1)
             {
                 Console.WriteLine($"  Port      : {portName}");
                 Console.WriteLine($"  Baud rate : {baud}");
@@ -148,14 +148,14 @@ class Program
                 Console.WriteLine($"  Node ID   : {node}");
                 Console.WriteLine($"  Checksum  : {emulator.CheckSum}");
             }
-            else if (emulatorMode == DF1Emulator.EmulatorMode.DH485)
+            else if (emulatorMode == PCCCEmulator.TransportMode.DH485)
             {
                 Console.WriteLine($"  Port      : {portName}");
                 Console.WriteLine($"  Baud rate : 19200 (fixed for DH485)");
                 Console.WriteLine($"  Node ID   : {node}");
                 Console.WriteLine($"  Status    : Not yet implemented");
             }
-            else if (emulatorMode == DF1Emulator.EmulatorMode.EIP)
+            else if (emulatorMode == PCCCEmulator.TransportMode.EIP)
             {
                 Console.WriteLine($"  EIP Port  : {eipPort}");
                 Console.WriteLine($"  Node ID   : {node}");
@@ -174,7 +174,7 @@ class Program
 
     static void PrintUsage()
     {
-        Console.WriteLine("DF1 Emulator - SLC 5/03 Full-Duplex Emulator");
+        Console.WriteLine("PCCC Emulator - PCCC Engine and Transports for .NET");
         Console.WriteLine();
         Console.WriteLine("Usage:");
         Console.WriteLine("  dotnet run -- [port] [options]");
@@ -184,7 +184,7 @@ class Program
         Console.WriteLine("  --parity <none|odd|even>  Parity mode (default none)");
         Console.WriteLine("  --node <n>           Emulator node ID (default 1)");
         Console.WriteLine("  --checksum <crc|bcc> Checksum mode (default crc)");
-        Console.WriteLine("  --mode <df1|dh485|eip> Protocol mode (default df1)");
+        Console.WriteLine("  --mode <df1|dh485|eip> Transport mode (default df1)");
         Console.WriteLine("  --port <n>           EIP port number (default 44818)");
         Console.WriteLine("  --quiet, -q          Disable logging for maximum performance");
         Console.WriteLine("  --help, -h           Show this help");
@@ -198,7 +198,7 @@ class Program
         Console.WriteLine("Note: Disabling logging eliminates string allocations and");
         Console.WriteLine("      significantly improves throughput under high load.");
         Console.WriteLine();
-        Console.WriteLine("Protocol Modes:");
+        Console.WriteLine("Transport Modes:");
         Console.WriteLine("  df1    - Serial DF1 full-duplex (default, fully implemented)");
         Console.WriteLine("  dh485  - DH485 via serial (future)");
         Console.WriteLine("  eip    - EtherNet/IP (EIP/PCCC) via TCP (implemented)");

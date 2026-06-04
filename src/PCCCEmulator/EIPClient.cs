@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCEmulator - PCCC Engine and Transports for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 //
-// Based on libplctag by Kyle Hayes (https://github.com/libplctag/libplctag)
+// EIP implementation references libplctag by
+// Kyle Hayes (https://github.com/libplctag/libplctag)
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -27,7 +28,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 /// <summary>
-/// EtherNet/IP (EIP) protocol implementation for SLC 5/03 emulator.
+/// EtherNet/IP (EIP) transport implementation for PCCC emulator.
 /// Handles TCP connections, session management, and CIP messaging.
 ///
 /// This file contains the EIPClient nested class which manages individual
@@ -46,7 +47,7 @@ using System.Threading.Tasks;
 /// _pendingSenderContext before response A is sent, resulting in context
 /// mismatch and client timeout.
 /// </summary>
-public sealed partial class EIPProtocol
+public sealed partial class EIPTransport
 {
     /// <summary>
     /// Encapsulates per-request state for EIP messaging.
@@ -149,7 +150,7 @@ public sealed partial class EIPProtocol
     }
 
     /// <summary>
-    /// Represents one TCP client connection in the EIP protocol.
+    /// Represents one TCP client connection in the EIP transport.
     ///
     /// This class handles:
     ///   - Per-connection session state (session handle, registration status)
@@ -169,8 +170,8 @@ public sealed partial class EIPProtocol
     /// </summary>
     private sealed class EIPClient : IDisposable
     {
-        // ── Back-reference to protocol (access to shared state) ──────────────
-        private readonly EIPProtocol _proto;
+        // ── Back-reference to transport (access to shared state) ──────────────
+        private readonly EIPTransport _transport;
 
         // ── TCP plumbing ─────────────────────────────────────────────────────
         private readonly TcpClient     _tcp;
@@ -215,7 +216,7 @@ public sealed partial class EIPProtocol
 
         /// <summary>
         /// True while the underlying TCP socket is connected and this object
-        /// has not been disposed. Used by <see cref="EIPProtocol.SendResponse"/>
+        /// has not been disposed. Used by <see cref="EIPTransport.SendResponse"/>
         /// to guard against sending to already-disconnected clients.
         /// </summary>
         public bool IsConnected => !_disposed && _tcp.Connected;
@@ -234,7 +235,7 @@ public sealed partial class EIPProtocol
 
         // ── Logging helpers ──────────────────────────────────────────────────
 
-        private bool IsLogging => _proto._isLoggingEnabled;
+        private bool IsLogging => _transport._isLoggingEnabled;
 
         /// <summary>
         /// Sends a raw EIP response packet to the client. The data buffer must
@@ -243,7 +244,7 @@ public sealed partial class EIPProtocol
         /// </summary>
         private async Task SendRawResponse(byte[] data, int length)
         {
-            _proto.LogHex("TX:", data, length);
+            _transport.LogHex("TX:", data, length);
             await _stream.WriteAsync(data, 0, length).ConfigureAwait(false);
         }
 
@@ -252,12 +253,12 @@ public sealed partial class EIPProtocol
         /// <summary>
         /// Creates a new EIP client connection handler.
         /// </summary>
-        /// <param name="proto">Parent EIPProtocol instance</param>
+        /// <param name="transport">Parent EIPTransport instance</param>
         /// <param name="tcp">Accepted TCP client connection</param>
         /// <param name="sessionHandle">Unique session handle for this connection</param>
-        public EIPClient(EIPProtocol proto, TcpClient tcp, uint sessionHandle)
+        public EIPClient(EIPTransport transport, TcpClient tcp, uint sessionHandle)
         {
-            _proto         = proto;
+            _transport     = transport;
             _tcp           = tcp;
             _stream        = tcp.GetStream();
             _sessionHandle = sessionHandle;
@@ -267,7 +268,7 @@ public sealed partial class EIPProtocol
 
         /// <summary>
         /// Reads and dispatches EIP packets until the TCP connection closes
-        /// or the protocol is stopped.
+        /// or the transport is stopped.
         ///
         /// IMPORTANT: For each received packet, an EIPRequestContext is created
         /// to hold per-request state. This context flows through all processing
@@ -279,7 +280,7 @@ public sealed partial class EIPProtocol
             // MAX_PACKET_SIZE_EX from libplctag session.h = 44 + 4002 bytes.
             var buf = new byte[65536];
 
-            while (!_proto.IsDisposing)
+            while (!_transport.IsDisposing)
             {
                 try
                 {
@@ -302,7 +303,7 @@ public sealed partial class EIPProtocol
                     {
                         if (await ReadExactAsync(buf, 24, length).ConfigureAwait(false) < length)
                             break;
-                        _proto.LogHex("RX:", buf, 24 + length);
+                        _transport.LogHex("RX:", buf, 24 + length);
                     }
 
                     // Dispatch command with the request context.
@@ -312,7 +313,7 @@ public sealed partial class EIPProtocol
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
                 {
-                    _proto.Log($"ProcessAsync error (session 0x{_sessionHandle:X8}): {ex.Message}");
+                    _transport.Log($"ProcessAsync error (session 0x{_sessionHandle:X8}): {ex.Message}");
                     break;
                 }
             }
@@ -356,7 +357,7 @@ public sealed partial class EIPProtocol
         /// <param name="context">Request context containing per-request state</param>
         private async Task DispatchCommand(ushort command, byte[] buf, ushort length, EIPRequestContext context)
         {
-            using var guard = _proto.BeginRequest();
+            using var guard = _transport.BeginRequest();
 
             switch (command)
             {
@@ -381,17 +382,17 @@ public sealed partial class EIPProtocol
                     break;
 
                 case EIP_UNCONNECTED_SEND:
-                    if (!_isRegistered) { _proto.Log("Unconnected Send rejected — no session"); return; }
+                    if (!_isRegistered) { _transport.Log("Unconnected Send rejected — no session"); return; }
                     await HandleUnconnectedSend(buf, length, context).ConfigureAwait(false);
                     break;
 
                 case EIP_CONNECTED_SEND:
-                    if (!_isRegistered) { _proto.Log("Connected Send rejected — no session"); return; }
+                    if (!_isRegistered) { _transport.Log("Connected Send rejected — no session"); return; }
                     await HandleConnectedSend(buf, length, context).ConfigureAwait(false);
                     break;
 
                 default:
-                    _proto.Log($"Unknown command 0x{command:X4} — sending error reply");
+                    _transport.Log($"Unknown command 0x{command:X4} — sending error reply");
                     await SendErrorReply(command, EIP_STATUS_INVALID_CMD, context).ConfigureAwait(false);
                     break;
             }
@@ -401,7 +402,7 @@ public sealed partial class EIPProtocol
 
         /// <summary>
         /// Handles RegisterSession (0x0065).
-        /// Validates the requested protocol version and assigns a session handle.
+        /// Validates the requested transport version and assigns a session handle.
         /// Responds with error status 0x0069 if the version is not supported.
         /// </summary>
         /// <param name="buf">Raw packet buffer with payload</param>
@@ -409,13 +410,13 @@ public sealed partial class EIPProtocol
         private async Task HandleRegisterSession(byte[] buf, EIPRequestContext context)
         {
             // The RegisterSession data payload is 4 bytes:
-            //   bytes 24-25: Protocol Version (UINT, LE)
+            //   bytes 24-25: Transport Version (UINT, LE)
             //   bytes 26-27: Options          (UINT, LE) — must be 0
             ushort requestedVersion = (ushort)(buf[24] | (buf[25] << 8));
 
-            if (requestedVersion != EIP_PROTOCOL_VERSION)
+            if (requestedVersion != EIP_TRANSPORT_VERSION)
             {
-                _proto.Log($"RegisterSession: unsupported protocol version {requestedVersion} (expected {EIP_PROTOCOL_VERSION})");
+                _transport.Log($"RegisterSession: unsupported transport version {requestedVersion} (expected {EIP_TRANSPORT_VERSION})");
                 await SendErrorReply(EIP_REGISTER_SESSION, EIP_STATUS_UNSUPPORTED_VERSION, context)
                     .ConfigureAwait(false);
                 return;
@@ -437,13 +438,13 @@ public sealed partial class EIPProtocol
             // Bytes 20-23: Options = 0
 
             // Payload (4 bytes)
-            response[24] = 0x01; response[25] = 0x00;  // Protocol Version = 1
+            response[24] = 0x01; response[25] = 0x00;  // Transport Version = 1
             response[26] = 0x00; response[27] = 0x00;  // Options = 0
 
             await SendRawResponse(response, response.Length).ConfigureAwait(false);
             _isRegistered = true;
 
-            _proto.Log($"RegisterSession: session 0x{_sessionHandle:X8} registered");
+            _transport.Log($"RegisterSession: session 0x{_sessionHandle:X8} registered");
         }
 
         /// <summary>
@@ -467,7 +468,7 @@ public sealed partial class EIPProtocol
             await SendRawResponse(response, response.Length).ConfigureAwait(false);
             _isRegistered = false;
 
-            _proto.Log($"UnregisterSession: session 0x{_sessionHandle:X8} released");
+            _transport.Log($"UnregisterSession: session 0x{_sessionHandle:X8} released");
         }
 
         // ── List commands ────────────────────────────────────────────────────
@@ -502,7 +503,7 @@ public sealed partial class EIPProtocol
 
             FixEipLength(ms, w);
             await FlushAsync(ms).ConfigureAwait(false);
-            _proto.Log("ListServices response sent");
+            _transport.Log("ListServices response sent");
         }
 
         /// <summary>
@@ -514,16 +515,16 @@ public sealed partial class EIPProtocol
         private async Task HandleListIdentity(EIPRequestContext context)
         {
             // Use cached local IP address (avoid per-packet enumeration)
-            if (_proto._cachedLocalAddress == null)
+            if (_transport._cachedLocalAddress == null)
             {
-                _proto.Log("[WARN] HandleListIdentity: no valid IPv4 unicast address found");
+                _transport.Log("[WARN] HandleListIdentity: no valid IPv4 unicast address found");
                 return;
             }
             
-            IPEndPoint localEndpoint = new IPEndPoint(_proto._cachedLocalAddress, _proto._port);
+            IPEndPoint localEndpoint = new IPEndPoint(_transport._cachedLocalAddress, _transport._port);
             byte[] reply = BuildListIdentityResponse(context.SenderContext, _sessionHandle, localEndpoint);
             await SendRawResponse(reply, reply.Length).ConfigureAwait(false);
-            _proto.Log($"ListIdentity response sent ({EIP_PRODUCT_NAME})");
+            _transport.Log($"ListIdentity response sent ({EIP_PRODUCT_NAME})");
         }
 
         /// <summary>
@@ -547,7 +548,7 @@ public sealed partial class EIPProtocol
             // Bytes 24-25: item count = 0
 
             await SendRawResponse(response, response.Length).ConfigureAwait(false);
-            _proto.Log("ListInterfaces response sent (empty)");
+            _transport.Log("ListInterfaces response sent (empty)");
         }
 
         // ── Unconnected Send (0x006F) ────────────────────────────────────────
@@ -688,7 +689,7 @@ public sealed partial class EIPProtocol
 
                     if (conn == null)
                     {
-                        _proto.Log($"Connected Send: bad connection ID 0x{connId:X8} — packet dropped");
+                        _transport.Log($"Connected Send: bad connection ID 0x{connId:X8} — packet dropped");
                         return;
                     }
 
@@ -776,7 +777,7 @@ public sealed partial class EIPProtocol
             lock (_connLock)
                 _connections[newId] = conn;
 
-            _proto.Log($"ForwardOpen{(isExtended ? "Ex" : "")}: " +
+            _transport.Log($"ForwardOpen{(isExtended ? "Ex" : "")}: " +
                 $"OT=0x{otConnId:X8} TO=0x{toConnId:X8} → assigned TargID=0x{newId:X8}, " +
                 $"Active connections={_connections.Count}");
 
@@ -813,10 +814,10 @@ public sealed partial class EIPProtocol
             }
 
             if (conn != null)
-                _proto.Log($"ForwardClose: connection 0x{conn.AssignedId:X8} closed, " +
+                _transport.Log($"ForwardClose: connection 0x{conn.AssignedId:X8} closed, " +
                            $"remaining connections={_connections.Count}");
             else
-                _proto.Log($"ForwardClose: connection serial 0x{connSerial:X4} not found");
+                _transport.Log($"ForwardClose: connection serial 0x{connSerial:X4} not found");
 
             await SendForwardCloseResponse(connSerial, vendorId, serialNum, context).ConfigureAwait(false);
         }
@@ -897,7 +898,7 @@ public sealed partial class EIPProtocol
             FixEipLength(ms, w);
             await FlushAsync(ms).ConfigureAwait(false);
 
-            _proto.Log($"ForwardOpen response: replySvc=0x{replySvc:X2}, AssignedID=0x{assignedId:X8}");
+            _transport.Log($"ForwardOpen response: replySvc=0x{replySvc:X2}, AssignedID=0x{assignedId:X8}");
         }
 
         private async Task SendForwardCloseResponse(ushort connSerial, ushort vendorId, uint serialNum, EIPRequestContext context)
@@ -938,10 +939,10 @@ public sealed partial class EIPProtocol
         /// <summary>
         /// Parses a CIP Execute PCCC request (service 0x4B) out of
         /// <paramref name="buf"/> starting at <paramref name="startOffset"/>,
-        /// builds a DF1-style PDU, saves the Request ID bytes into the context
+        /// builds a PCCC-style PDU, saves the Request ID bytes into the context
         /// for response echoing, and raises <see cref="PduReceived"/>.
         /// <para>
-        /// PDU layout expected by <c>DF1Emulator.DispatchCommand</c>:
+        /// PDU layout expected by <c>PCCCEngine.DispatchCommand</c>:
         ///   [DST, SRC, CMD, STS, TNS_LO, TNS_HI, FUNC?, DATA...]
         /// </para>
         /// <para>
@@ -967,7 +968,7 @@ public sealed partial class EIPProtocol
             byte svc = buf[offset++];
             if (svc != CIP_SERVICE_EXECUTE_PCCC)
             {
-                _proto.Log($"ExtractAndDispatchPCCC: unexpected service 0x{svc:X2} (expected 0x4B)");
+                _transport.Log($"ExtractAndDispatchPCCC: unexpected service 0x{svc:X2} (expected 0x4B)");
                 return;
             }
 
@@ -998,7 +999,7 @@ public sealed partial class EIPProtocol
             // Minimum: CMD(1) STS(1) TNS(2) FUNC(1) = 5 bytes.
             if (offset + 5 > buf.Length || offset + 5 > itemEnd)
             {
-                _proto.Log($"ExtractAndDispatchPCCC: truncated PCCC header at offset {offset}");
+                _transport.Log($"ExtractAndDispatchPCCC: truncated PCCC header at offset {offset}");
                 return;
             }
 
@@ -1009,7 +1010,7 @@ public sealed partial class EIPProtocol
 
             int remaining = Math.Max(0, itemEnd - offset);
 
-            // ── Build DF1-style PDU ──────────────────────────────────────────
+            // ── Build PCCC-style PDU ──────────────────────────────────────────
             bool hasFunc = pcccFunc != 0 || remaining > 0;
             int  pduLen  = 6 + (hasFunc ? 1 : 0) + remaining;
             var  pdu     = new byte[pduLen];
@@ -1026,22 +1027,22 @@ public sealed partial class EIPProtocol
             if (remaining > 0)
                 Array.Copy(buf, offset, pdu, pduOff, Math.Min(remaining, buf.Length - offset));
 
-            _proto.Log($"PCCC dispatch: CMD=0x{pcccCmd:X2} TNS=0x{pcccTns:X4} FNC=0x{pcccFunc:X2} data={remaining}B");
+            _transport.Log($"PCCC dispatch: CMD=0x{pcccCmd:X2} TNS=0x{pcccTns:X4} FNC=0x{pcccFunc:X2} data={remaining}B");
 
-            _proto.IncrementFramesProcessed();
-            _proto._emulator.IncrementTotalPacketsReceived();
+            _transport.IncrementFramesProcessed();
+            _transport._emulator.IncrementTotalPacketsReceived();
 
             // Raise PduReceived with the context object as clientContext.
-            // DF1Emulator will process the command and call SendResponse(pdu, context)
+            // PCCCEngine will process the command and call SendResponse(pdu, context)
             // when the reply is ready. The context contains SenderContext and RequestId
             // needed to build the response.
-            _proto.PduReceived?.Invoke(this, (pdu, context));
+            _transport.PduReceived?.Invoke(this, (pdu, context));
         }
 
         // ── Response senders ─────────────────────────────────────────────────
 
         /// <summary>
-        /// Serialized entry point called by <see cref="EIPProtocol.SendResponse"/>.
+        /// Serialized entry point called by <see cref="EIPTransport.SendResponse"/>.
         /// Acquires _sendLock before delegating to SendResponseAsync() to guarantee
         /// FIFO ordering of outgoing responses within a single client session.
         ///
@@ -1050,13 +1051,13 @@ public sealed partial class EIPProtocol
         /// in the order they were queued, not interleaved.
         ///
         /// Exceptions from the send path are caught and logged here so the caller
-        /// (EIPProtocol.SendResponse) can safely fire-and-forget this task.
+        /// (EIPTransport.SendResponse) can safely fire-and-forget this task.
         /// </summary>
-        /// <param name="pdu">PDU to send (built by DF1Emulator)</param>
+        /// <param name="pdu">PDU to send (built by PCCCEngine)</param>
         /// <param name="context">Request context containing SenderContext and RequestId</param>
         public async Task SendSerializedAsync(byte[] pdu, EIPRequestContext context)
         {
-            if (_disposed || _proto.IsDisposing) return;
+            if (_disposed || _transport.IsDisposing) return;
 
             await _sendLock.WaitAsync().ConfigureAwait(false);
             try
@@ -1065,8 +1066,8 @@ public sealed partial class EIPProtocol
             }
             catch (Exception ex)
             {
-                _proto.Log($"SendSerializedAsync failed for session 0x{_sessionHandle:X8}: {ex.Message}");
-                _proto._emulator.IncrementUndeliveredPackets();
+                _transport.Log($"SendSerializedAsync failed for session 0x{_sessionHandle:X8}: {ex.Message}");
+                _transport._emulator.IncrementUndeliveredPackets();
             }
             finally
             {
@@ -1081,13 +1082,13 @@ public sealed partial class EIPProtocol
         /// Called exclusively from <see cref="SendSerializedAsync"/> which
         /// holds _sendLock for the duration of this call.
         /// </summary>
-        /// <param name="pdu">PDU to send (built by DF1Emulator)</param>
+        /// <param name="pdu">PDU to send (built by PCCCEngine)</param>
         /// <param name="context">Request context containing SenderContext and RequestId</param>
         private async Task SendResponseAsync(byte[] pdu, EIPRequestContext context)
         {
-            if (_disposed || _proto.IsDisposing) return;
+            if (_disposed || _transport.IsDisposing) return;
 
-            _proto.Log($"SendResponseAsync: PDU length={pdu.Length}");
+            _transport.Log($"SendResponseAsync: PDU length={pdu.Length}");
 
             if (context.IsConnectedAtReceive)
                 await SendConnectedResponse(pdu, context).ConfigureAwait(false);
@@ -1116,9 +1117,9 @@ public sealed partial class EIPProtocol
 
             WritePcccReplyHeader(w, pdu, context.RequestId);
 
-            // Data payload — response PDU layout from DF1Emulator:
+            // Data payload — response PDU layout from PCCCEngine:
             //   [DST, SRC, CMD, STS, TNS_LO, TNS_HI, DATA...]
-            // Data bytes start at offset 6 (no FUNC byte in DF1Emulator data responses).
+            // Data bytes start at offset 6 (no FUNC byte in PCCCEngine data responses).
             const int dataOffset = 6;
             if (pdu.Length > dataOffset)
                 w.Write(pdu, dataOffset, pdu.Length - dataOffset);

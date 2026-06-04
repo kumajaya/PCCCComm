@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCEmulator - PCCC Engine and Transports for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 //
-// Based on libplctag by Kyle Hayes (https://github.com/libplctag/libplctag)
+// EIP implementation references libplctag by
+// Kyle Hayes (https://github.com/libplctag/libplctag)
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -27,11 +28,11 @@ using System.Threading;
 using System.Threading.Tasks;
 
 /// <summary>
-/// EtherNet/IP (EIP/PCCC) protocol implementation targeting SLC 500 and MicroLogix PLCs.
+/// EtherNet/IP (EIP/PCCC) transport implementation targeting SLC 500 and MicroLogix PLCs.
 ///
 /// Architecture overview
 /// ─────────────────────
-/// EIPProtocol implements ILinkProtocol and acts as the TCP transport layer.
+/// EIPTransport implements ILinkTransport and acts as the TCP transport layer.
 /// Each accepted TCP connection runs in its own EIPClient instance which owns
 /// the per-connection state (session handle, Forward Open / connected-messaging
 /// state, pending Sender Context echo, pending Request ID echo).
@@ -41,9 +42,9 @@ using System.Threading.Tasks;
 ///          → HandleCommand()
 ///          → HandleUnconnectedSend() or HandleConnectedSend()
 ///          → ExtractAndDispatchPCCC()
-///          → ILinkProtocol.PduReceived event  (raises DF1Emulator.OnPduReceived)
-///          → DF1Emulator.DispatchCommand()     (reads/writes PlcMemory)
-///          → ILinkProtocol.SendResponse()      (routes back to originating client)
+///          → ILinkTransport.PduReceived event  (raises PCCCEngine.OnPduReceived)
+///          → PCCCEngine.DispatchCommand()     (reads/writes PlcMemory)
+///          → ILinkTransport.SendResponse()      (routes back to originating client)
 ///          → EIPClient.SendSerializedAsync()   (serialized per-client send queue)
 ///          → SendUnconnectedResponse() or SendConnectedResponse()
 ///          → TCP TX
@@ -56,7 +57,7 @@ using System.Threading.Tasks;
 ///      (item count + items only, no Interface Handle / Timeout prefix). All other
 ///      responses (Unconnected Send, Connected Send, Forward Open/Close) use the
 ///      full six-field CPF layout.
-///   3. RegisterSession must validate Protocol Version; return status 0x00000001
+///   3. RegisterSession must validate Transport Version; return status 0x00000001
 ///      for unsupported versions.
 ///   4. A UDP listener on port 44818 answers broadcast ListIdentity so the emulator
 ///      appears in RSLinx "Browse Network" without a manual IP entry.
@@ -70,11 +71,11 @@ using System.Threading.Tasks;
 ///   - ODVA EtherNet/IP Specification Volume 1 (Common Industrial Protocol)
 ///   - ODVA EtherNet/IP Specification Volume 2 (Adaptation for EtherNet)
 /// </summary>
-public partial class EIPProtocol : ILinkProtocol, IDisposable
+public partial class EIPTransport : ILinkTransport, IDisposable
 {
     // ── External dependencies ────────────────────────────────────────────────
 
-    private readonly DF1Emulator _emulator;
+    private readonly PCCCEmulator _emulator;
     private readonly int _port;
 
     // ── TCP server ───────────────────────────────────────────────────────────
@@ -141,10 +142,10 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
     // EIP encapsulation status codes (CIP Vol 2, §2-3.2).
     private const uint EIP_STATUS_OK                  = 0x00000000;
     private const uint EIP_STATUS_INVALID_CMD         = 0x00000001; // Unsupported command
-    private const uint EIP_STATUS_UNSUPPORTED_VERSION = 0x00000069; // Protocol version mismatch
+    private const uint EIP_STATUS_UNSUPPORTED_VERSION = 0x00000069; // Transport version mismatch
 
-    // Supported EIP protocol version.
-    private const ushort EIP_PROTOCOL_VERSION = 1;
+    // Supported EIP transport version.
+    private const ushort EIP_TRANSPORT_VERSION = 1;
 
     // ── CIP Common Services (CIP Vol 1, §3-5.2) ─────────────────────────────
 
@@ -200,7 +201,7 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
     private const ushort VENDOR_ID            = 0xF33D;     // "tres"
     private const uint   VENDOR_SERIAL_NUMBER = 0x21504345; // "!PCE" (ASCII)
 
-    // ── ILinkProtocol ────────────────────────────────────────────────────────
+    // ── ILinkTransport ────────────────────────────────────────────────────────
 
     public string Name => "EIP";
 
@@ -214,7 +215,7 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
 
     // ── Construction ─────────────────────────────────────────────────────────
 
-    public EIPProtocol(DF1Emulator emulator, int port = EIP_DEFAULT_PORT)
+    public EIPTransport(PCCCEmulator emulator, int port = EIP_DEFAULT_PORT)
     {
         _emulator = emulator ?? throw new ArgumentNullException(nameof(emulator));
         _port     = port;
@@ -222,7 +223,7 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
 
     public const int EIP_DEFAULT_PORT = 44818;
 
-    // ── ILinkProtocol: Start / Stop ──────────────────────────────────────────
+    // ── ILinkTransport: Start / Stop ──────────────────────────────────────────
 
     public void Start()
     {
@@ -256,11 +257,11 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
         if (_cachedLocalAddress == null)
             Console.WriteLine("[WARN] No valid IPv4 unicast address found for ListIdentity");
 
-        Console.WriteLine($"[EIP]  EtherNet/IP emulator started on TCP/UDP port {_port}");
+        Console.WriteLine($"[EIP]  EtherNet/IP transport started on TCP/UDP port {_port}");
     }
 
     /// <summary>
-    /// Stops the EIP protocol handler asynchronously.
+    /// Stops the EIP transport handler asynchronously.
     /// Drains in-flight requests, disposes all client connections,
     /// stops the TCP listener and UDP listener, and waits for background
     /// tasks to complete before returning.
@@ -327,18 +328,18 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
             }
         }
 
-        Console.WriteLine("[EIP]  EtherNet/IP emulator stopped");
+        Console.WriteLine("[EIP]  EtherNet/IP transport stopped");
     }
 
     /// <summary>
-    /// Synchronous Stop() for ILinkProtocol compatibility.
+    /// Synchronous Stop() for ILinkTransport compatibility.
     /// Blocks until all in-flight requests are drained or the 3-second
     /// timeout expires.
     /// </summary>
     public void Stop() => StopAsync().GetAwaiter().GetResult();
 
     /// <summary>
-    /// Releases all managed resources held by EIPProtocol.
+    /// Releases all managed resources held by EIPTransport.
     /// Calls StopAsync() if not already stopped, then disposes the health
     /// timer and any remaining network resources as a safety net.
     /// Safe to call multiple times.
@@ -360,7 +361,7 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
         GC.SuppressFinalize(this);
     }
 
-    // ── ILinkProtocol: SendResponse ──────────────────────────────────────────
+    // ── ILinkTransport: SendResponse ──────────────────────────────────────────
 
     /// <summary>
     /// Routes a PCCC response PDU back to the client that raised
@@ -446,8 +447,8 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
     // knows when all in-flight operations have completed.
     private sealed class RequestHandle : IDisposable
     {
-        private readonly EIPProtocol _p;
-        public RequestHandle(EIPProtocol p) => _p = p;
+        private readonly EIPTransport _p;
+        public RequestHandle(EIPTransport p) => _p = p;
         public void Dispose()               => Interlocked.Decrement(ref _p._activeRequests);
     }
 
@@ -737,9 +738,9 @@ public partial class EIPProtocol : ILinkProtocol, IDisposable
         w.Write((ushort)0);        // Item Length (placeholder)
 
         // ========================================================================
-        // Part 3a: Encapsulation Protocol Version (MUST be 0x0001)
+        // Part 3a: Encapsulation Transport Version (MUST be 0x0001)
         // ========================================================================
-        w.Write((ushort)1);        // Protocol version = 1
+        w.Write((ushort)1);        // Transport version = 1
 
         // ========================================================================
         // Part 3b: Socket Address (16 bytes)

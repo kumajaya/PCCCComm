@@ -1,4 +1,4 @@
-# DF1 SLC 5/03 Emulator
+# PCCC Emulator with DF1 / EtherNet/IP transport
 
 **Purpose**  
 Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an SLC 5/03 PLC for testing DF1/EIP clients and RSLinx. This emulator does **not** depend on any external DF1 library – all DF1 framing, checksum (BCC/CRC), DLE stuffing, EIP/CIP encapsulation, and memory simulation are self‑contained.
@@ -11,7 +11,7 @@ Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an
 - Reads from File 0 (directory) and any data file listed in the directory
 - In‑memory PLC file store with pre‑defined files (O, I, S, B, N, F, T, C, R)
 - Configurable serial settings via command line
-- Configurable EIP protocol mode with TCP/UDP support
+- Configurable EIP transport mode with TCP/UDP support
 - Console logging of RX/TX hex for debugging
 - Independent – no external dependencies except `System.IO.Ports`
 - **Loads real SLC 5/03 program** from embedded .bin resource (converted from APS .ACH archive)
@@ -25,7 +25,7 @@ Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an
 
 ## Build
 ```bash
-dotnet build -c Release DF1Emulator.csproj
+dotnet build -c Release PCCCEmulator.csproj
 ```
 
 ## Run
@@ -33,17 +33,17 @@ dotnet build -c Release DF1Emulator.csproj
 ### DF1 Serial Mode (Default)
 **Default** (COM2, 19200, no parity, node 1, CRC checksum):
 ```bash
-dotnet run --project DF1Emulator.csproj -- COM2
+dotnet run --project PCCCEmulator.csproj -- COM2
 ```
 
 Output:
 ```
-[BIN] DF1Emulator.Resources.DBU550.bin
+[MEM] PCCCEmulator.Resources.DBU550.bin
       Size=9921 Magic=0xDF1A Ver=1 Type=0x49 SLC 5/03
       Files=33 TS=2026-05-31 01:59:11
       Loaded: 21 data files, 10 program files
-DF1 PLC memory initialized with embedded program.
-DF1 Emulator running
+PCCC PLC memory initialized with embedded program.
+PCCC emulator running
   Mode      : DF1
   Port      : COM2
   Baud rate : 19200
@@ -56,28 +56,28 @@ Press Enter to stop.
 **Examples:**
 ```bash
 # Use BCC checksum, node 2
-dotnet run --project DF1Emulator.csproj -- COM2 --checksum bcc --node 2
+dotnet run --project PCCCEmulator.csproj -- COM2 --checksum bcc --node 2
 
 # Change baud rate and parity
-dotnet run --project DF1Emulator.csproj -- COM3 --baud 9600 --parity even
+dotnet run --project PCCCEmulator.csproj -- COM3 --baud 9600 --parity even
 
 # Quiet mode (high performance, no logging)
-dotnet run --project DF1Emulator.csproj -- COM2 --quiet
+dotnet run --project PCCCEmulator.csproj -- COM2 --quiet
 ```
 
 ### EtherNet/IP (EIP) Mode
 ```bash
 # Start emulator in EIP mode on default port 44818
-dotnet run --project DF1Emulator.csproj -- --mode eip
+dotnet run --project PCCCEmulator.csproj -- --mode eip
 
 # Custom EIP port
-dotnet run --project DF1Emulator.csproj -- --mode eip --port 44819
+dotnet run --project PCCCEmulator.csproj -- --mode eip --port 44819
 ```
 
 Output:
 ```
 [EIP]  EtherNet/IP emulator started on TCP/UDP port 44818
-DF1 Emulator running
+PCCC emulator running
   Mode      : EIP
   EIP Port  : 44818
   Node ID   : 1
@@ -92,7 +92,7 @@ Press Enter to stop.
 | `--parity <none/odd/even>` | Parity mode (DF1/DH485 mode only) | `none` |
 | `--node <n>` | Emulator node ID | `1` |
 | `--checksum <crc/bcc>` | Checksum mode (DF1 mode only) | `crc` |
-| `--mode <df1\|dh485\|eip>` | Protocol mode | `df1` |
+| `--mode <df1\|dh485\|eip>` | Transport mode | `df1` |
 | `--port <n>` | EIP port number (EIP mode only) | `44818` |
 | `--quiet, -q` | Disable logging for maximum performance | `false` |
 | `--help, -h` | Show usage | – |
@@ -105,8 +105,8 @@ The emulator accepts both formats: with or without the `/dev/` prefix.
 
 ```bash
 # Both work:
-dotnet run --project DF1Emulator.csproj -- ttyUSB0
-dotnet run --project DF1Emulator.csproj -- /dev/ttyUSB0
+dotnet run --project PCCCEmulator.csproj -- ttyUSB0
+dotnet run --project PCCCEmulator.csproj -- /dev/ttyUSB0
 ```
 
 ### Virtual serial pair on Linux
@@ -120,7 +120,7 @@ Then run the emulator on one end and your DF1 client on the other:
 
 ```bash
 # Terminal 1 – emulator
-dotnet run --project DF1Emulator.csproj -- ttyV0
+dotnet run --project PCCCEmulator.csproj -- ttyV0
 
 # Terminal 2 – client (e.g., DF1Comm example or RSLinx) connected to ttyV1
 ```
@@ -139,7 +139,7 @@ sudo usermod -a -G dialout $USER
 1. Create a virtual COM pair (e.g., `COM1` ↔ `COM2`).
 2. Start the emulator on `COM2`:
    ```bash
-   dotnet run --project DF1Emulator.csproj -- COM2
+   dotnet run --project PCCCEmulator.csproj -- COM2
    ```
 3. Start your DF1 client on `COM1`.
 
@@ -150,7 +150,7 @@ sudo usermod -a -G dialout $USER
    ```
 2. Start the emulator on `ttyV0`:
    ```bash
-   dotnet run --project DF1Emulator.csproj -- ttyV0
+   dotnet run --project PCCCEmulator.csproj -- ttyV0
    ```
 3. Connect your DF1 client to `ttyV1`.
 
@@ -169,9 +169,9 @@ sudo usermod -a -G dialout $USER
 
 **Firewall note:** UDP port 44818 must be open for RSLinx auto-browse (broadcast ListIdentity). TCP port 44818 is required for connected sessions.
 
-![RSLinx](Assets/Screenshots/RSLinx.png)
+![RSLinx](Images/Screenshots/RSLinx.png)
 
-*RSLinx OPC Server accessing DF1Emulator memory in the background*
+*RSLinx OPC Server accessing PCCCEmulator memory in the background*
 
 ## Emulated SLC 5/03 Memory Layout
 
@@ -237,19 +237,19 @@ The emulator simulates a specific SLC 5/03 configuration with the following data
 | 6    | 1746-NI4    | Analog Input   | 4 channels × 2 bytes = 8 bytes  |
 
 ## Project structure
-| File | Description |
-|------|-------------|
-| `Program.cs` | CLI entry point, argument parsing, usage help |
-| `DF1Emulator.cs` | Protocol factory, PDU dispatcher, command handlers, timers |
-| `DF1Protocol.cs` | DF1 serial framing, DLE stuffing, CRC/BCC, circular buffer |
-| `EIPProtocol.cs` | EtherNet/IP server, session management, CPF/CIP framing |
-| `EIPClient.cs` | Per-connection EIP state, Forward Open/Close, PCCC dispatch |
-| `ILinkProtocol.cs` | Protocol abstraction interface |
+| File              | Description |
+|-------------------|-------------|
+| `Program.cs`      | CLI entry point, argument parsing, usage help |
+| `PCCCEmulator.cs` | Transport factory, PDU dispatcher, command handlers, timers |
+| `DF1Transport.cs` | DF1 serial framing, DLE stuffing, CRC/BCC, circular buffer |
+| `EIPTransport.cs` | EtherNet/IP server, session management, CPF/CIP framing |
+| `EIPClient.cs`    | Per-connection EIP state, Forward Open/Close, PCCC dispatch |
+| `ILinkTransport.cs` | Transport abstraction interface |
 | `MessageDecoder.cs` | DLE stuffing/unstuffing, BCC/CRC checksum calculation |
-| `PlcMemory.cs` | In‑memory file directory (File 0) and data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, etc.) |
+| `PlcMemory.cs`      | In‑memory file directory (File 0) and data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, etc.) |
 
 ## Extending the emulator
-- **Add new DF1/PCCC commands** – extend the dispatch logic in `DF1Emulator.DispatchCommand()` or `DispatchFunctionCode()`
+- **Add new DF1/PCCC commands** – extend the dispatch logic in `PCCCEmulator.DispatchCommand()` or `DispatchFunctionCode()`
 - **Add new EIP services** – extend `EIPClient.DispatchCommand()` switch in `EIPClient.cs`
 - **Add new data files** – modify `PlcMemory` constructor and the file directory inside `File 0`
 - **Change element sizes** – update `_bytesPerElement` dictionary and file size arrays

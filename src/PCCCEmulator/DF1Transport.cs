@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCEmulator - PCCC Engine and Transports for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 // 
-// Based on original DF1Comm.vb by Archie Jacobs (Manufacturing Automation LLC)
+// Initial reference: DF1Comm.vb (Archie Jacobs); implementation substantially modified.
 // which was released under GPLv2-or-later.
 // 
 // This program is free software: you can redistribute it and/or modify
@@ -27,10 +27,10 @@ using System.Threading.Channels;
 using System.Runtime.InteropServices;
 
 /// <summary>
-/// DF1 Full-Duplex protocol implementation for SLC 5/03 emulator.
+/// DF1 Full-Duplex transport implementation for PCCC emulator.
 /// Handles DLE stuffing, ACK/NAK, CRC/BCC checksums, and ENQ polling.
 /// 
-/// This class implements the ILinkProtocol interface and provides the
+/// This class implements the ILinkTransport interface and provides the
 /// low-level DF1 framing over RS-232 serial communication.
 /// 
 /// FRAME FORMAT (both directions):
@@ -39,7 +39,7 @@ using System.Runtime.InteropServices;
 /// INNER PAYLOAD FORMAT:
 ///   DST (1 byte) | SRC (1 byte) | CMD (1 byte) | STS (1 byte) | TNS_LO (1 byte) | TNS_HI (1 byte) | [FUNC (1 byte)] | [DATA...]
 /// 
-/// PROTOCOL BEHAVIOR:
+/// TANSPORT BEHAVIOR:
 ///   - Every valid frame must be acknowledged with ACK (DLE 0x06) before processing
 ///   - Invalid frames (checksum mismatch, malformed) trigger NAK (DLE 0x15)
 ///   - Standalone ENQ (DLE 0x05) is used for node presence detection (auto-configure)
@@ -68,12 +68,12 @@ using System.Runtime.InteropServices;
 ///   - Checksum mismatches increment diagnostic counters and send NAK
 ///   - Frame parsing errors skip single bytes to maintain synchronization
 /// </summary>
-public class DF1Protocol : ILinkProtocol
+public class DF1Transport : ILinkTransport
 {
-    private readonly DF1Emulator _emulator;
+    private readonly PCCCEmulator _emulator;
     private readonly SerialPort _port;
 
-    // Protocol configuration (mirrored from DF1Emulator for performance)
+    // Transport configuration (mirrored from PCCCEngine for performance)
     private CheckSumOptions _checkSum;
     private int _myNode;
 
@@ -124,7 +124,7 @@ public class DF1Protocol : ILinkProtocol
     private static readonly byte[] ACK_FRAME = new byte[] { 0x10, 0x06 };
     private static readonly byte[] NAK_FRAME = new byte[] { 0x10, 0x15 };
 
-    // ─── Events (ILinkProtocol implementation) ──────────────────────────────
+    // ─── Events (ILinkTransport implementation) ──────────────────────────────
     /// <summary>
     /// Raised when a complete PDU (inner frame) has been received and parsed.
     /// The PDU is the unstuffed inner payload without DLE framing.
@@ -133,7 +133,7 @@ public class DF1Protocol : ILinkProtocol
     public event EventHandler<(byte[] pdu, object ClientContext)>? PduReceived;
     
     /// <summary>
-    /// Human-readable name of this protocol for logging.
+    /// Human-readable name of this transport for logging.
     /// </summary>
     public string Name => "DF1";
 
@@ -150,7 +150,7 @@ public class DF1Protocol : ILinkProtocol
         set => _myNode = value;
     }
 
-    // ─── Internal Methods for DF1Emulator to Access Serial Port Status ─────
+    // ─── Internal Methods for PCCCEngine to Access Serial Port Status ─────
     // These allow the emulator to read modem line states for diagnostic counters
     // without exposing the entire SerialPort object.
     internal bool GetCtsHolding() => _port.IsOpen && _port.CtsHolding;
@@ -161,17 +161,17 @@ public class DF1Protocol : ILinkProtocol
 
     // ─── Constructor ────────────────────────────────────────────────────────
     /// <summary>
-    /// Initializes the DF1 protocol handler.
+    /// Initializes the DF1 transport handler.
     /// </summary>
     /// <param name="emulator">Parent emulator instance (provides counters and logging)</param>
     /// <param name="portName">Serial port name (e.g., "COM2" or "/dev/ttyUSB0")</param>
     /// <param name="baudRate">Baud rate (e.g., 19200, 9600, 38400)</param>
     /// <param name="parity">Parity mode (None, Odd, Even)</param>
-    public DF1Protocol(DF1Emulator emulator, string portName, int baudRate, Parity parity)
+    public DF1Transport(PCCCEmulator emulator, string portName, int baudRate, Parity parity)
     {
         _emulator = emulator ?? throw new ArgumentNullException(nameof(emulator));
         _checkSum = _emulator.CheckSum;
-        _myNode = _emulator.MyNode;
+        _myNode   = _emulator.MyNode;
 
         // Configure SerialPort with conservative timeouts (DF1 is half-duplex with ACK)
         _port = new SerialPort(portName, baudRate, parity, 8, StopBits.One)
@@ -197,9 +197,9 @@ public class DF1Protocol : ILinkProtocol
         _processingCts = new CancellationTokenSource();
     }
 
-    // ─── ILinkProtocol Implementation ──────────────────────────────────────
+    // ─── ILinkTransport Implementation ──────────────────────────────────────
     /// <summary>
-    /// Starts the DF1 protocol handler.
+    /// Starts the DF1 transport handler.
     /// Opens the serial port, discards any stale data, and starts the
     /// background processing task.
     /// </summary>
@@ -261,7 +261,7 @@ public class DF1Protocol : ILinkProtocol
     }
 
     /// <summary>
-    /// Stops the DF1 protocol handler gracefully.
+    /// Stops the DF1 transport handler gracefully.
     /// Waits for pending operations to complete before closing the port.
     /// Thread-safe and prevents data loss during shutdown.
     /// </summary>
@@ -333,7 +333,7 @@ public class DF1Protocol : ILinkProtocol
     }
 
     /// <summary>
-    /// Enables or disables verbose logging for this protocol instance.
+    /// Enables or disables verbose logging for this transport instance.
     /// When logging is enabled, the health monitor is disabled to reduce overhead.
     /// When logging is disabled, the health monitor is activated for visibility.
     /// </summary>
@@ -698,7 +698,7 @@ public class DF1Protocol : ILinkProtocol
     ///   2. Locate DLE ETX while handling stuffed DLE pairs
     ///   3. Unstuff the payload (remove duplicate 0x10 bytes)
     ///   4. Verify checksum matches calculated value
-    ///   5. Send ACK before processing (required by DF1 full-duplex protocol)
+    ///   5. Send ACK before processing (required by DF1 full-duplex transport)
     ///   6. Raise PduReceived event for emulator to dispatch the command
     /// </summary>
     /// <param name="rawFrame">Complete DF1 frame including DLE STX, stuffed payload, DLE ETX, and checksum</param>
@@ -780,13 +780,13 @@ public class DF1Protocol : ILinkProtocol
             // Only respond if this frame is addressed to us (or broadcast)
             if (dst != _myNode && dst != 0xFF) return;
 
-            // ACK before responding — required by DF1 full-duplex protocol
+            // ACK before responding — required by DF1 full-duplex transport
             SendAck();
 
             // Build PDU and raise event for emulator to dispatch
             byte[] pdu = new byte[unstuffedLen];
             unstuffed.CopyTo(pdu);
-            // DF1 is a single-client protocol, pass 'this' as client context (ignored by emulator)
+            // DF1 is a single-client transport, pass 'this' as client context (ignored by emulator)
             PduReceived?.Invoke(this, (pdu, this));
         }
         catch (Exception ex) { if (_isLoggingEnabled) Console.WriteLine("ProcessFrame error: " + ex.Message); }

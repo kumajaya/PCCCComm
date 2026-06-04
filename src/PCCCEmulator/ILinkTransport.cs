@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCEmulator - PCCC Engine and Transports for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 // 
-// Based on original DF1Comm.vb by Archie Jacobs (Manufacturing Automation LLC)
+// Initial reference: DF1Comm.vb (Archie Jacobs); implementation substantially modified.
 // which was released under GPLv2-or-later.
 // 
 // This program is free software: you can redistribute it and/or modify
@@ -20,28 +20,28 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 /// <summary>
-/// Protocol abstraction for DF1 emulator link layer implementations.
+/// Transport abstraction for PCCC emulator link layer implementations.
 /// Supports DF1 Full-Duplex (serial), EtherNet/IP (EIP/PCCC), and future DH485.
 /// </summary>
-public interface ILinkProtocol
+public interface ILinkTransport
 {
     /// <summary>
-    /// Starts the protocol handler (opens serial port, starts listener, etc.)
+    /// Starts the transport handler (opens serial port, starts listener, etc.)
     /// </summary>
     void Start();
 
     /// <summary>
-    /// Stops the protocol handler gracefully.
+    /// Stops the transport handler gracefully.
     /// </summary>
     void Stop();
 
     /// <summary>
-    /// Sends a response PDU back to the client using this protocol's framing.
+    /// Sends a response PDU back to the client using this transport's framing.
     /// The PDU is the inner frame (DST, SRC, CMD, STS, TNS, FUNC, DATA...)
     /// </summary>
     /// <param name="pdu">Inner frame PDU to send</param>
     /// <param name="clientContext">Client context object (e.g., EIPClient instance) for routing response to correct client.
-    /// For single-client protocols like DF1 serial, this parameter is ignored.</param>
+    /// For single-client transports like DF1 serial, this parameter is ignored.</param>
     void SendResponse(byte[] pdu, object clientContext);
 
     /// <summary>
@@ -51,7 +51,7 @@ public interface ILinkProtocol
     event EventHandler<(byte[] pdu, object ClientContext)> PduReceived;
 
     /// <summary>
-    /// Human-readable name of the protocol for logging.
+    /// Human-readable name of the transport for logging.
     /// </summary>
     string Name { get; }
 }

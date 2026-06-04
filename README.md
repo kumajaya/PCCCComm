@@ -8,7 +8,7 @@
 It is a **port** of the original **DF1Comm.vb** written by **Archie Jacobs of Manufacturing Automation LLC** – a proven, widely used DF1 implementation. This C# version preserves the original logic while adding:
 
 - A reusable **DF1 communication library** (`DF1Comm`)
-- A **standalone SLC 5/03 emulator** (`DF1Emulator`) for testing without real PLC hardware
+- A **standalone PCCC emulator** (`PCCCEmulator`) for testing without real PLC hardware
 - An **example client** that demonstrates all major library features
 - A **desktop GUI tool** (`DF1ProgramTool`) for upload/download/compare PLC programs
 
@@ -36,12 +36,16 @@ DF1Comm/
 │   │   │   ├── SerialPortWrapper.cs
 │   │   │   └── StringConverter.cs
 │   │   └── DF1Comm.csproj
-│   ├── DF1Emulator/                # SLC 5/03 emulator (standalone)
-│   │   ├── DF1Emulator.cs
+│   ├── PCCCEmulator/                # PCCC emulator (standalone)
+│   │   ├── DF1Transport.cs
 │   │   ├── MessageDecoder.cs
+│   │   ├── EIPTransport.cs
+│   │   ├── EIPClient.cs
+│   │   ├── ILinkTransport.cs
 │   │   ├── PlcMemory.cs
+│   │   ├── PCCCEmulator.cs
 │   │   ├── Program.cs
-│   │   ├── DF1Emulator.csproj
+│   │   ├── PCCCEmulator.csproj
 │   │   └── README.md
 │   ├── DF1ProgramTool/               # Desktop GUI for upload/download
 │   │   ├── Views/
@@ -72,10 +76,11 @@ DF1Comm/
 - Upload/download complete program files (SLC style)
 - Support for **SLC 5/03**, **MicroLogix 1500**, and many other DF1‑compatible PLCs
 
-### DF1Emulator (Standalone Tool)
+### PCCCEmulator (Standalone Tool)
 - Emulates an **SLC 5/03** DF1 port (processor type `0x49`)
 - **Loads real PLC program** from embedded .bin resource (converted from APS .ACH archive)
 - Implements the full DF1 link layer: ACK/NAK, ENQ handling, checksum validation
+- Implements EtherNet/IP support: TCP port 44818, UDP broadcast ListIdentity
 - In‑memory file system with pre‑defined data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, and additional B/N files up to file 31)
 - Responds to **Get Status** (CMD 0x06 FNC 0x03) with realistic 24‑byte payload
 - Handles **Protected Typed Logical Read/Write** (0xA1, 0xA2, 0xAA, 0xAB)
@@ -87,7 +92,7 @@ DF1Comm/
 - **Interactive CLI** (`DF1>` prompt) with read, write, writestring, sendhex, mode, stats, and more
 - **Communication statistics** – total requests, successes, timeouts, NAKs, other errors, error rate
 - **Stress test mode** – continuous read loop with configurable iteration count (`--stress-test [n]`)
-- Can be used with **real PLC** or **DF1Emulator** over a virtual serial pair
+- Can be used with **real PLC** or **PCCCEmulator** over a virtual serial pair or ethernet
 
 ### DF1ProgramTool (Desktop GUI)
 - Cross‑platform GUI built with Avalonia UI
@@ -114,7 +119,7 @@ We thank Archie Jacobs for providing a robust, well‑tested DF1 implementation 
 
 - **.NET 8 SDK** or later
 - Windows / Linux / macOS (serial port support required)
-- For testing without hardware: a **virtual serial port emulator** (e.g. com0com on Windows, `socat` on Linux)
+- For testing without hardware: a **virtual serial port or ethernet emulator** (e.g. com0com on Windows, `socat` on Linux)
 
 ---
 
@@ -132,7 +137,7 @@ Individual projects can also be built separately:
 
 ```bash
 dotnet build -c Release src/DF1Comm/DF1Comm.csproj
-dotnet build -c Release src/DF1Emulator/DF1Emulator.csproj
+dotnet build -c Release src/PCCCEmulator/PCCCEmulator.csproj
 dotnet build -c Release src/Example/Example.csproj
 ```
 
@@ -174,10 +179,10 @@ df1.CloseComms();
 ### 2. Running the Emulator
 
 ```bash
-dotnet run --project src/DF1Emulator -- COM2 --baud 19200 --checksum crc
+dotnet run --project src/PCCCEmulator -- COM2 --baud 19200 --checksum crc
 ```
 
-See `src/DF1Emulator/README.md` for full emulator documentation.
+See `src/PCCCEmulator/README.md` for full emulator documentation.
 
 ### 3. Running the Example Client
 
@@ -194,7 +199,7 @@ See `src/Example/README.md` for full client documentation.
 1. Create a virtual serial pair (e.g. `COM1` ↔ `COM2`).
 2. Start emulator on `COM2`:
    ```bash
-   dotnet run --project src/DF1Emulator -- COM2 --checksum crc
+   dotnet run --project src/PCCCEmulator -- COM2 --checksum crc
    ```
 3. In another terminal, start the example client on `COM1`:
    ```bash
@@ -215,7 +220,7 @@ See `src/DF1ProgramTool/README.md` for full documentation.
 1. Create a virtual serial pair (e.g. `COM1` ↔ `COM2`).
 2. Start emulator on `COM2`:
    ```bash
-   dotnet run --project src/DF1Emulator -- COM2 --checksum crc
+   dotnet run --project src/PCCCEmulator -- COM2 --checksum crc
    ```
 3. Start DF1ProgramTool and connect to `COM1`.
 4. Upload from the emulator, then download – the emulator will respond correctly.
@@ -275,7 +280,7 @@ Copyright (c) 2026 Ketut Kumajaya
 The original **DF1Comm.vb** (by Archie Jacobs, Manufacturing Automation LLC) was released under the  
 **GNU General Public License, version 2 or any later version**.
 
-This C# port, the DF1Emulator, and the Example Client are **derived works** of the original VB code.  
+This C# port and the Example Client are **derived works** of the original VB code.  
 Therefore, they are also licensed under the **GNU General Public License v3.0 or any later version**.
 
 ```
@@ -315,6 +320,6 @@ See the [GNU license compatibility FAQ](https://www.gnu.org/licenses/license-com
 
 ## Related Projects
 
-- [DF1Emulator](src/DF1Emulator/README.md) – standalone emulator
+- [PCCCEmulator](src/PCCCEmulator/README.md) – standalone emulator
 - [Example Client](src/Example/README.md) – usage demonstration
 - [DF1ProgramTool](src/DF1ProgramTool/README.md) – desktop GUI for upload/download

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCEmulator - PCCC Engine and Transports for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 // 
-// Based on original DF1Comm.vb by Archie Jacobs (Manufacturing Automation LLC)
+// Initial reference: DF1Comm.vb (Archie Jacobs); implementation substantially modified.
 // which was released under GPLv2-or-later.
 // 
 // This program is free software: you can redistribute it and/or modify

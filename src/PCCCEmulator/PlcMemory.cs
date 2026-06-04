@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCEmulator - PCCC Engine and Transports for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 // 
-// Based on original DF1Comm.vb by Archie Jacobs (Manufacturing Automation LLC)
+// Initial reference: DF1Comm.vb (Archie Jacobs); implementation substantially modified.
 // which was released under GPLv2-or-later.
 // 
 // This program is free software: you can redistribute it and/or modify
@@ -146,8 +146,8 @@ public class PlcMemory
         InitializeHotCache();
         
         Console.WriteLine(_programLoaded
-            ? "DF1 PLC memory initialized with embedded program."
-            : "DF1 PLC memory initialized with default data.");
+            ? "PCCC PLC memory initialized with embedded program."
+            : "PCCC PLC memory initialized with default data.");
         Console.WriteLine($"Hot cache initialized with {_hotCache.Count} files");
     }
     
@@ -246,8 +246,8 @@ public class PlcMemory
         /// <summary>
         /// Registers a single data file entry in the directory.
         /// </summary>
-        /// <param name="type">DF1 file type code (e.g., 0x8B for O, 0x8C for I, 0x85 for B)</param>
-        /// <param name="sizeBytes">File size in BYTES (matches DF1 "Byte Size" specification)</param>
+        /// <param name="type">PCCC file type code (e.g., 0x8B for O, 0x8C for I, 0x85 for B)</param>
+        /// <param name="sizeBytes">File size in BYTES (matches PCCC "Byte Size" specification)</param>
         /// <param name="fileNum">File number (0-255)</param>
         /// <param name="elemSize">Size of each element in bytes (default 2)</param>
         void Register(byte type, int sizeBytes, byte fileNum, int elemSize = 2)
@@ -892,7 +892,7 @@ public class PlcMemory
         long timestamp = br.ReadInt64();
         int fileCount = br.ReadInt32();
         
-        Console.WriteLine($"[BIN]  {resourceName}");
+        Console.WriteLine($"[MEM]  {resourceName}");
         Console.WriteLine($"       Size={data.Length} Magic=0x{magic:X4} Ver={version} Type=0x{procType:X2} {family} {bulletin}");
         Console.WriteLine($"       Files={fileCount} TS={DateTime.FromBinary(timestamp):yyyy-MM-dd HH:mm:ss}");
         
