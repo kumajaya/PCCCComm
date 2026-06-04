@@ -145,10 +145,10 @@ public class PlcMemory
         
         InitializeHotCache();
         
-        Console.WriteLine(_programLoaded
+        Logger.Always(this, _programLoaded
             ? "PCCC PLC memory initialized with embedded program."
             : "PCCC PLC memory initialized with default data.");
-        Console.WriteLine($"Hot cache initialized with {_hotCache.Count} files");
+        Logger.Always(this, $"Hot cache initialized with {_hotCache.Count} files");
     }
     
     // ─── Hot Cache Initialization ─────────────────────────────────────────────
@@ -864,14 +864,14 @@ public class PlcMemory
         
         if (resourceName == null)
         {
-            Console.WriteLine("[INFO] No embedded program found. Using default data.");
+            Logger.Always(this, "No embedded program found. Using default data.");
             return;
         }
         
         using var stream = assembly.GetManifestResourceStream(resourceName);
         if (stream == null)
         {
-            Console.WriteLine("[ERROR] Failed to load embedded resource.");
+            Logger.Always(this, "Failed to load embedded resource.");
             return;
         }
         
@@ -892,9 +892,9 @@ public class PlcMemory
         long timestamp = br.ReadInt64();
         int fileCount = br.ReadInt32();
         
-        Console.WriteLine($"[MEM]  {resourceName}");
-        Console.WriteLine($"       Size={data.Length} Magic=0x{magic:X4} Ver={version} Type=0x{procType:X2} {family} {bulletin}");
-        Console.WriteLine($"       Files={fileCount} TS={DateTime.FromBinary(timestamp):yyyy-MM-dd HH:mm:ss}");
+        Logger.Always(this, $"{resourceName}");
+        Console.WriteLine($"      Size={data.Length} Magic=0x{magic:X4} Ver={version} Type=0x{procType:X2} {family} {bulletin}");
+        Console.WriteLine($"      Files={fileCount} TS={DateTime.FromBinary(timestamp):yyyy-MM-dd HH:mm:ss}");
         
         int dataLoaded = 0, progLoaded = 0;
         
@@ -935,21 +935,21 @@ public class PlcMemory
                 var dest = _files[(fileType, fileNumber)];
                 if (dest.Length != numberOfBytes)
                 {
-                    Console.WriteLine($"[WARN] File (0x{fileType:X2},{fileNumber}) size mismatch: " +
+                    Logger.Always(this, $"File (0x{fileType:X2},{fileNumber}) size mismatch: " +
                         $"binary={numberOfBytes}, allocated={dest.Length}");
                 }
                 
                 int copyLen = Math.Min(fileData.Length, dest.Length);
                 if (copyLen < numberOfBytes)
                 {
-                    Console.WriteLine($"[WARN] File (0x{fileType:X2},{fileNumber}) truncated: " +
+                    Logger.Always(this, $"File (0x{fileType:X2},{fileNumber}) truncated: " +
                         $"binary wants {numberOfBytes} bytes, destination has {dest.Length} bytes");
                 }
                 Array.Copy(fileData, 0, dest, 0, copyLen);
             }
         }
         
-        Console.WriteLine($"       Loaded: {dataLoaded} data files, {progLoaded} program files");
+        Console.WriteLine($"      Loaded: {dataLoaded} data files, {progLoaded} program files");
         _programLoaded = true;
     }
 }

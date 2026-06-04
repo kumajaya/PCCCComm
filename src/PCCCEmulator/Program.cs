@@ -23,7 +23,7 @@ using System;
 using System.IO.Ports;
 
 /// <summary>
-/// DF1 Full-Duplex SLC 5/03 Emulator Launcher.
+/// PCCC Engine and Transports for .NET Launcher.
 /// 
 /// Command line arguments:
 ///   <port>                   : serial port name (default COM2)
@@ -118,7 +118,7 @@ class Program
         // Warning for serial parameters when using EIP mode
         if (emulatorMode == PCCCEmulator.TransportMode.EIP && portName != "COM2")
         {
-            Console.WriteLine($"[WARN] EIP mode ignores serial port '{portName}'. Using Ethernet only.");
+            Logger.Always(null, $"EIP mode ignores serial port '{portName}'. Using Ethernet only.");
         }
 
         // Create and start emulator
@@ -130,45 +130,43 @@ class Program
 
         // Disable logging if quiet mode is enabled
         if (quietMode)
-        {
             emulator.SetLoggingEnabled(false);
-        }
 
         try
         {
             emulator.Start();
-            Console.WriteLine($"PCCC emulator running");
-            Console.WriteLine($"  Mode      : {mode.ToUpper()}");
+            Logger.Always(null, $"PCCC emulator running");
+            Console.WriteLine($"      Mode      : {mode.ToUpper()}");
             
             if (emulatorMode == PCCCEmulator.TransportMode.DF1)
             {
-                Console.WriteLine($"  Port      : {portName}");
-                Console.WriteLine($"  Baud rate : {baud}");
-                Console.WriteLine($"  Parity    : {parity}");
-                Console.WriteLine($"  Node ID   : {node}");
-                Console.WriteLine($"  Checksum  : {emulator.CheckSum}");
+                Console.WriteLine($"      Port      : {portName}");
+                Console.WriteLine($"      Baud rate : {baud}");
+                Console.WriteLine($"      Parity    : {parity}");
+                Console.WriteLine($"      Node ID   : {node}");
+                Console.WriteLine($"      Checksum  : {emulator.CheckSum}");
             }
             else if (emulatorMode == PCCCEmulator.TransportMode.DH485)
             {
-                Console.WriteLine($"  Port      : {portName}");
-                Console.WriteLine($"  Baud rate : 19200 (fixed for DH485)");
-                Console.WriteLine($"  Node ID   : {node}");
-                Console.WriteLine($"  Status    : Not yet implemented");
+                Console.WriteLine($"      Port      : {portName}");
+                Console.WriteLine($"      Baud rate : 19200 (fixed for DH485)");
+                Console.WriteLine($"      Node ID   : {node}");
+                Console.WriteLine($"      Status    : Not yet implemented");
             }
             else if (emulatorMode == PCCCEmulator.TransportMode.EIP)
             {
-                Console.WriteLine($"  EIP Port  : {eipPort}");
-                Console.WriteLine($"  Node ID   : {node}");
+                Console.WriteLine($"      EIP Port  : {eipPort}");
+                Console.WriteLine($"      Node ID   : {node}");
             }
             
-            Console.WriteLine($"  Logging   : {(quietMode ? "Disabled (High Performance)" : "Enabled")}");
-            Console.WriteLine("Press Enter to stop.");
+            Console.WriteLine($"      Logging   : {(quietMode ? "Disabled (High Performance)" : "Enabled")}");
+            Logger.Always(null, "Press Enter to stop.");
             Console.ReadLine();
             emulator.Stop();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error: {ex.Message}");
+            Logger.Always(null, $"Error: {ex.Message}");
         }
     }
 

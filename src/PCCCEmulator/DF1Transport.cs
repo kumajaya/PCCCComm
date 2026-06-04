@@ -99,17 +99,9 @@ public class DF1Transport : ILinkTransport
     // Lock ordering: always acquire _txLock before _rxLock to avoid deadlock.
     private readonly object _txLock = new object();
 
-    // ─── Conditional Logging ────────────────────────────────────────────────
-    // Eliminates string allocations when logging is disabled (high performance mode)
-    private bool _isLoggingEnabled = true;
-    private DateTime _lastLog = DateTime.Now;
-    private readonly object _logLock = new object();
-
     // ─── Health Monitoring ──────────────────────────────────────────────────
     private Timer? _healthTimer;
     private long _lastFrameCount = 0;
-    private long _framesProcessed = 0;
-    private long _lastFrameLog = 0;
 
     // ─── Edge Case Handling ─────────────────────────────────────────────────
     // Prevents log spam during sustained error conditions
@@ -258,6 +250,11 @@ public class DF1Transport : ILinkTransport
         {
             throw new Exception($"Failed to open port {_port.PortName}: {ex.Message}");
         }
+        finally
+        {
+            // The health monitor is activated when logging disabled 
+            SetHealthStatsEnabled(!Logger.Enabled);
+        }
     }
 
     /// <summary>
@@ -273,7 +270,7 @@ public class DF1Transport : ILinkTransport
         _port.DataReceived -= Port_DataReceived;
 
         // Step 2: Stop health monitoring timer
-        _healthTimer?.Dispose();
+        SetHealthStatsEnabled(false);
 
         // Step 3: Cancel the consumer task
         _processingCts?.Cancel();
@@ -291,11 +288,11 @@ public class DF1Transport : ILinkTransport
         }
         catch (AggregateException ex)
         {
-            Console.WriteLine($"[STOP] Consumer task shutdown warning: {ex.InnerException?.Message}");
+            Logger.Warn(this, $"Consumer task shutdown warning: {ex.InnerException?.Message}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[STOP] Error during task shutdown: {ex.Message}");
+            Logger.Warn(this, $"[STOP] Error during task shutdown: {ex.Message}");
         }
 
         // Step 6: Wait for any active DataReceived callbacks to complete
@@ -317,7 +314,7 @@ public class DF1Transport : ILinkTransport
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[STOP] Error closing port: {ex.Message}");
+            Logger.Warn(this, $"[STOP] Error closing port: {ex.Message}");
         }
     }
 
@@ -332,31 +329,30 @@ public class DF1Transport : ILinkTransport
         SendRawFrame(pdu);
     }
 
+    // ─── Health Monitoring ─────────────────────────────────────────────────
+
     /// <summary>
-    /// Enables or disables verbose logging for this transport instance.
-    /// When logging is enabled, the health monitor is disabled to reduce overhead.
-    /// When logging is disabled, the health monitor is activated for visibility.
+    /// Enables or disables the health monitor for this transport instance.
+    /// When enabled, the health monitor is activated for visibility.
+    /// When disabled, the health monitor is disabled to reduce overhead.
     /// </summary>
     /// <param name="enabled">True to enable logging, false for maximum performance</param>
-    public void SetLoggingEnabled(bool enabled)
+    public void SetHealthStatsEnabled(bool enabled)
     {
-        _isLoggingEnabled = enabled;
-
         if (enabled)
         {
-            // Logging ON → health monitor OFF (reduce overhead)
-            _healthTimer?.Dispose();
-            _healthTimer = null;
+            // Health monitor ON (provide visibility)
+            _healthTimer ??= new Timer(_ => LogHealthStats(), null, 15000, 15000);
+            Logger.Always(this, "Logging disabled — health monitor active");
         }
         else
         {
-            // Logging OFF → health monitor ON (provide visibility)
-            _healthTimer ??= new Timer(_ => LogHealthStats(), null, 15000, 15000);
-            Console.WriteLine("[PERF] DF1 logging disabled — health monitor active");
+            // Health monitor OFF (reduce overhead)
+            _healthTimer?.Dispose();
+            _healthTimer = null;
         }
     }
 
-    // ─── Health Monitoring ─────────────────────────────────────────────────
     /// <summary>
     /// Logs health statistics every 15 seconds for monitoring purposes.
     /// Shows frames per second, total frame count, bad packet count, and memory usage.
@@ -366,18 +362,18 @@ public class DF1Transport : ILinkTransport
     {
         if (_isDisposing != 0) return;
 
-        long currentFrames = Interlocked.Read(ref _framesProcessed);
+        long currentFrames = _emulator.GetFramesProcessed();
         long delta = currentFrames - _lastFrameCount;
         _lastFrameCount = currentFrames;
 
-        Console.WriteLine($"[MONI] DF1 Rate: {delta / 15,6}/s | " +
+        Logger.Always(this, $"DF1 Rate: {delta / 15,6}/s | " +
             $"Total: {currentFrames,10:N0} | " +
             $"Bad: {_emulator.GetBadPacketsDetected(),4:N0} | " +
             $"Memory: {GC.GetTotalMemory(false) / 1024,6:N0} KB");
 
         if (delta == 0 && currentFrames > 0)
         {
-            Console.WriteLine($"[WARN] No DF1 communication detected in last 15 seconds. Check client connection.");
+            Logger.Always(this, "No frames in last 15 s — check client connection");
         }
     }
 
@@ -422,7 +418,7 @@ public class DF1Transport : ILinkTransport
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Port_DataReceived error: {ex.Message}");
+            Logger.Warn(this, $"Port_DataReceived error: {ex.Message}");
         }
         finally
         {
@@ -444,7 +440,7 @@ public class DF1Transport : ILinkTransport
             return;
         _lastErrorTime = DateTime.Now;
 
-        Console.WriteLine($"[ERR] Serial port error: {e.EventType}");
+        Logger.Always(this, $"Serial port error: {e.EventType}");
 
         // Signal consumer to reset circular buffer (lock-free)
         Interlocked.Exchange(ref _rxResetRequested, 1);
@@ -459,7 +455,7 @@ public class DF1Transport : ILinkTransport
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[ERR] Discard buffer failed: {ex.Message}");
+            Logger.Warn(this, $"Discard buffer failed: {ex.Message}");
         }
 
         _emulator.IncrementBadPacketsDetected();
@@ -473,10 +469,7 @@ public class DF1Transport : ILinkTransport
     {
         if (_isDisposing != 0) return;
 
-        if (_isLoggingEnabled)
-        {
-            Console.WriteLine($"[PIN] {e.EventType} - DCD: {_port.CDHolding}, CTS: {_port.CtsHolding}, DSR: {_port.DsrHolding}");
-        }
+        Logger.Info(this, $"[PIN] {e.EventType} - DCD: {_port.CDHolding}, CTS: {_port.CtsHolding}, DSR: {_port.DsrHolding}");
 
         _emulator.UpdateModemStatus();
     }
@@ -505,16 +498,7 @@ public class DF1Transport : ILinkTransport
                     _rxHead = 0;
                     _rxTail = 0;
                     _rxCount = 0;
-                    if (_isLoggingEnabled)
-                        Console.WriteLine("[INFO] Circular buffer reset due to error");
-                }
-
-                // Optional periodic performance logging (every 10000 frames)
-                long frames = _framesProcessed;
-                if (_isLoggingEnabled && frames - _lastFrameLog >= 10000)
-                {
-                    _lastFrameLog = frames;
-                    Console.WriteLine($"[PERF] Processed {frames} DF1 frames, GC.GetTotalMemory: {GC.GetTotalMemory(false) / 1024:N0} KB");
+                    Logger.Info(this, "Circular buffer reset due to error");
                 }
 
                 // Add data to circular buffer
@@ -568,7 +552,7 @@ public class DF1Transport : ILinkTransport
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"ProcessReceiveChannelAsync error: {ex.Message}");
+            Logger.Warn(this, $"ProcessReceiveChannelAsync error: {ex.Message}");
         }
     }
 
@@ -731,8 +715,7 @@ public class DF1Transport : ILinkTransport
             // Using 512 as safe upper bound
             if (payloadLen > 512)
             {
-                if (_isLoggingEnabled)
-                    Console.WriteLine($"[WARN] Oversized DF1 frame rejected: payloadLen={payloadLen}");
+                Logger.Info(this, $"Oversized DF1 frame rejected: payloadLen={payloadLen}");
                 _emulator.IncrementBadPacketsDetected();
                 _emulator.IncrementUndeliveredPackets();
                 _emulator.IncrementNoBufferNakd();
@@ -751,8 +734,7 @@ public class DF1Transport : ILinkTransport
             ushort calc = MessageDecoder.CalculateChecksum(unstuffed, _checkSum);
             if (calc != receivedChk)
             {
-                if (_isLoggingEnabled)
-                    Console.WriteLine($"Checksum mismatch: calc=0x{calc:X4} recv=0x{receivedChk:X4} ({_checkSum})");
+                Logger.Info(this, $"Checksum mismatch: calc=0x{calc:X4} recv=0x{receivedChk:X4} ({_checkSum})");
                 _emulator.IncrementBadPacketsDetected();
                 _emulator.IncrementUndeliveredPackets();
                 _emulator.IncrementNoBufferNakd();
@@ -769,12 +751,11 @@ public class DF1Transport : ILinkTransport
             int tns = unstuffed[4] | (unstuffed[5] << 8);
             int func = unstuffedLen >= 7 ? unstuffed[6] : 0;
 
-            if (_isLoggingEnabled)
+            if (Logger.Enabled)
             {
                 int dataLen = Math.Max(0, unstuffedLen - 7);
-                LogDelta($"\n    RX: ");
-                Console.WriteLine(BitConverter.ToString(rawFrame).Replace("-", " "));
-                Console.WriteLine($"    dst={dst} src={src} cmd=0x{cmd:X2} tns={tns} func=0x{func:X2} dataLen={dataLen}");
+                Logger.Hex(this, "RX:", rawFrame, rawFrame.Length);
+                Logger.Info(this, $"dst={dst} src={src} cmd=0x{cmd:X2} tns={tns:X4} func=0x{func:X2} dataLen={dataLen}");
             }
 
             // Only respond if this frame is addressed to us (or broadcast)
@@ -789,7 +770,7 @@ public class DF1Transport : ILinkTransport
             // DF1 is a single-client transport, pass 'this' as client context (ignored by emulator)
             PduReceived?.Invoke(this, (pdu, this));
         }
-        catch (Exception ex) { if (_isLoggingEnabled) Console.WriteLine("ProcessFrame error: " + ex.Message); }
+        catch (Exception ex) { Logger.Warn(this, "ProcessFrame error: " + ex.Message); }
     }
 
     // ─── Optimized ACK/NAK (zero allocation per call) ──────────────────────
@@ -804,16 +785,14 @@ public class DF1Transport : ILinkTransport
             lock (_txLock)
             {
                 _port.Write(ACK_FRAME, 0, ACK_FRAME.Length);
-                if (_isLoggingEnabled)
-                    LogDelta("type=ACK → \n    TX: 10 06\n");
+                Logger.Info(this, "type=ACK → TX: 10 06");
             }
         }
         catch (Exception ex) 
         { 
             // Client may have disconnected - just log if debugging needed
             // No need to increment counters as this is a normal disconnect scenario
-            if (_isLoggingEnabled)
-                Console.WriteLine($"[WARN] Failed to send ACK: {ex.Message}");
+            Logger.Warn(this, $"Failed to send ACK: {ex.Message}");
         }
     }
 
@@ -830,14 +809,11 @@ public class DF1Transport : ILinkTransport
             lock (_txLock)
             {
                 _port.Write(NAK_FRAME, 0, NAK_FRAME.Length);
-                if (_isLoggingEnabled)
-                    LogDelta("type=NAK → \n    TX: 10 15\n");
+                Logger.Info(this, "type=NAK → TX: 10 15");
             }
         }
-        catch (Exception ex)
-        {
-            if (_isLoggingEnabled)
-                Console.WriteLine($"[WARN] Failed to send NAK: {ex.Message}");
+        catch (Exception ex) {
+            Logger.Warn(this, $"Failed to send NAK: {ex.Message}");
         }
     }
 
@@ -886,41 +862,29 @@ public class DF1Transport : ILinkTransport
             lock (_txLock)
             {
                 _port.Write(frameBuf, 0, pos);
-                if (_isLoggingEnabled && innerArray.Length > 2)
+                if (Logger.Enabled && innerArray.Length >= 6)
                 {
-                    LogDelta($"cmd=0x{innerArray[2]:X2} → \n    TX: ");
-                    Console.WriteLine(BitConverter.ToString(frameBuf, 0, pos).Replace("-", " "));
+                    int dst = innerArray[0];
+                    int src = innerArray[1];
+                    int cmd = innerArray[2];
+                    int tns = innerArray[4] | (innerArray[5] << 8);
+                    bool hasFunc = (innerArray.Length >= 7) && 
+                                (cmd == 0x0F || cmd == 0x06 || cmd == 0x01);
+                    int headerLen = hasFunc ? 7 : 6;
+                    int dataLen = Math.Max(0, innerArray.Length - headerLen);
+                    Logger.Hex(this, "TX:", frameBuf, pos);
+                    string funcStr = hasFunc ? $"0x{innerArray[6]:X2}" : "none";
+                    Logger.Info(this, $"dst={dst} src={src} cmd=0x{cmd:X2} tns={tns:X4} func={funcStr} dataLen={dataLen}");
                 }
-                else if (_isLoggingEnabled)
+                else
                 {
-                    LogDelta($"cmd=0x?? → \n    TX: ");
-                    Console.WriteLine(BitConverter.ToString(frameBuf, 0, pos).Replace("-", " "));
+                    Logger.Hex(this, "TX:", frameBuf, pos);
                 }
             }
         }
         catch (Exception ex)
         {
-            if (_isLoggingEnabled) Console.WriteLine("Write error: " + ex.Message);
-        }
-    }
-
-    // ─── Conditional Logging ───────────────────────────────────────────────
-    /// <summary>
-    /// Logs a message with timestamp and delta from previous log.
-    /// Only allocates strings when logging is enabled (conditional).
-    /// Thread-safe with lock to prevent interleaved log lines.
-    /// </summary>
-    /// <param name="msg">Message to log (prefixed with timestamp and delta)</param>
-    private void LogDelta(string msg)
-    {
-        if (!_isLoggingEnabled) return;
-
-        lock (_logLock)
-        {
-            var now = DateTime.Now;
-            var dt = (now - _lastLog).TotalMilliseconds;
-            _lastLog = now;
-            Console.Write($"{now:HH:mm:ss.fff} (+{dt:0000} ms) {msg}");
+            Logger.Warn(this, "Write error: " + ex.Message);
         }
     }
 }

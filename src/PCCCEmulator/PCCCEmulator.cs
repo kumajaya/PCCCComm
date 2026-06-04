@@ -97,7 +97,6 @@ public class PCCCEmulator : IDisposable
     // ─── Shared Configuration ─────────────────────────────────────────────────
     private CheckSumOptions _checkSum = CheckSumOptions.Crc;
     private int _myNode = 1;
-    private bool _isLoggingEnabled = true;
 
     // ─── Response Cache (Thread-safe, reduces recomputation) ─────────────────
     // Rebuilt whenever processor mode changes via UpdateProcessorMode().
@@ -219,7 +218,7 @@ public class PCCCEmulator : IDisposable
         _timer        = new Timer(_ => UpdateDateTime(), null, Timeout.Infinite, Timeout.Infinite);
         _waveformTimer = new Timer(_ => UpdateWaveform(), null, Timeout.Infinite, Timeout.Infinite);
 
-        Console.WriteLine($"[EMU]  PCCC emulator initialized in {mode} mode");
+        Logger.Always(this, $"PCCC emulator initialized in {mode} mode");
     }
 
     /// <summary>
@@ -241,7 +240,7 @@ public class PCCCEmulator : IDisposable
         _transport?.Start();
         _timer?.Change(0, 1000);
         _waveformTimer?.Change(0, 500);
-        Console.WriteLine($"[EMU]  PCCC emulator started in {_mode} mode");
+        Logger.Always(this, $"PCCC emulator started in {_mode} mode");
     }
 
     /// <summary>
@@ -256,7 +255,7 @@ public class PCCCEmulator : IDisposable
         _timer?.Change(Timeout.Infinite, Timeout.Infinite);
         _waveformTimer?.Change(Timeout.Infinite, Timeout.Infinite);
 
-        Console.WriteLine($"[EMU]  PCCC emulator stopped. Total frames processed: {_framesProcessed:N0}");
+        Logger.Always(this, $"PCCC emulator stopped. Total frames processed: {_framesProcessed:N0}");
     }
 
     public void Dispose()
@@ -277,13 +276,10 @@ public class PCCCEmulator : IDisposable
     /// <param name="enabled">True to enable logging, false for maximum performance</param>
     public void SetLoggingEnabled(bool enabled)
     {
-        _isLoggingEnabled = enabled;
-        if (_transport is DF1Transport df1Transport)
-            df1Transport.SetLoggingEnabled(enabled);
-        if (_transport is EIPTransport eipTransport)
-            eipTransport.SetLoggingEnabled(enabled);
         if (!enabled)
-            Console.WriteLine("[PERF] Logging disabled for maximum throughput");
+            Logger.Info(this, "Logging disabled for maximum throughput");
+
+        Logger.Enabled = enabled;
     }
 
     // ─── Internal Methods for DF1Transport to Update Counters ─────────────────
@@ -312,6 +308,7 @@ public class PCCCEmulator : IDisposable
     public int GetEnqReceived()           => Volatile.Read(ref _enqReceived);
     public int GetNakReceived()           => Volatile.Read(ref _nakReceived);
     public int GetTotalPacketsReceived()  => Volatile.Read(ref _totalPacketsReceived);
+    public long GetFramesProcessed()      => Volatile.Read(ref _framesProcessed);
 
     /// <summary>
     /// Updates modem status bits based on actual hardware line states.
@@ -363,17 +360,15 @@ public class PCCCEmulator : IDisposable
         int cmd  = pdu[2];
         int tns  = pdu[4] | (pdu[5] << 8);
 
-        if (_isLoggingEnabled)
-            Console.WriteLine($"[EMU]  DispatchCommand: CMD=0x{cmd:X2}, TNS=0x{tns:X4}");
+        // Determine if command includes a FUNC byte per AB Publication 1770-6.5.16
+        // Commands with FUNC byte: 0x06 (Get Status, Diagnostic Counters, etc.),
+        //                          0x0F (Protected Logical Read/Write),
+        //                          0x0A (Read Diagnostic Counters)
+        bool hasFuncByte = (cmd == 0x06 || cmd == 0x0F || cmd == 0x0A) && pdu.Length >= 7;
+        int func         = hasFuncByte ? pdu[6] : 0;
+        int dataOffset   = hasFuncByte ? 7 : 6;
 
-        // CMD 0x0F always has a FUNC byte at offset 6; extract it here so the
-        // log and dispatch table can reference it.  For all other commands func
-        // is not present in the request frame and is set to 0 for logging only.
-        int func       = (cmd == 0x0F && pdu.Length >= 7) ? pdu[6] : 0;
-        int dataOffset = (cmd == 0x0F) ? 7 : 6;
-
-        if (_isLoggingEnabled && cmd == 0x0F)
-            Console.WriteLine($"[EMU]  FNC=0x{func:X2}");
+        Logger.Info(this, $"dst={dst} src={src} cmd=0x{cmd:X2} tns={tns:X4} func=0x{func:X2}");
 
         // Extract data payload — everything after the header (+ FUNC byte for 0x0F)
         byte[] data = pdu.Length > dataOffset ? pdu[dataOffset..] : Array.Empty<byte>();
@@ -946,7 +941,7 @@ public class PCCCEmulator : IDisposable
         Interlocked.Exchange(ref _duplicatePacketsReceived, 0);
         Interlocked.Exchange(ref _dcdRecoveryCount,         0);
         Interlocked.Exchange(ref _lostModemCount,           0);
-        Console.WriteLine("[EMU]  Diagnostic counters reset to zero.");
+        Logger.Always(this, "Diagnostic counters reset to zero.");
     }
 
     /// <summary>

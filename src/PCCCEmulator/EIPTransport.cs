@@ -124,7 +124,6 @@ public partial class EIPTransport : ILinkTransport, IDisposable
     private Timer? _healthTimer;
     private long   _framesProcessed = 0;
     private long   _lastFrameCount  = 0;
-    private bool   _isLoggingEnabled = true;
 
     // ── EIP Encapsulation command codes (CIP Vol 2, Appendix A) ─────────────
 
@@ -248,16 +247,21 @@ public partial class EIPTransport : ILinkTransport, IDisposable
         {
             // UDP bind failure (e.g. port already in use) is non-fatal.
             // RSLinx manual-connect still works via TCP.
-            Console.WriteLine($"[EIP]  UDP listener not started (RSLinx auto-browse disabled): {ex.Message}");
+            Logger.Warn(this, $"UDP listener not started (RSLinx auto-browse disabled): {ex.Message}");
             _udpListener = null;
         }
+        finally
+        {
+            // The health monitor is activated when logging disabled 
+            SetHealthStatsEnabled(!Logger.Enabled);
 
-        // Cache local IP address once at startup (avoid repeated enumeration)
-        _cachedLocalAddress = GetLocalUnicastIPv4Address();
-        if (_cachedLocalAddress == null)
-            Console.WriteLine("[WARN] No valid IPv4 unicast address found for ListIdentity");
+            // Cache local IP address once at startup (avoid repeated enumeration)
+            _cachedLocalAddress = GetLocalUnicastIPv4Address();
+            if (_cachedLocalAddress == null)
+                Logger.Info(this, "No valid IPv4 unicast address found for ListIdentity");
 
-        Console.WriteLine($"[EIP]  EtherNet/IP transport started on TCP/UDP port {_port}");
+            Logger.Info(this, $"EtherNet/IP transport started on TCP/UDP port {_port}");            
+        }
     }
 
     /// <summary>
@@ -274,8 +278,8 @@ public partial class EIPTransport : ILinkTransport, IDisposable
         _isRunning = false;
         _cts?.Cancel();
 
-        _healthTimer?.Dispose();
-        _healthTimer = null;
+        // Step 2: Stop health monitoring timer
+        SetHealthStatsEnabled(false);
 
         // Drain in-flight requests (max 3 s).
         const int maxWaitMs = 3000;
@@ -288,7 +292,7 @@ public partial class EIPTransport : ILinkTransport, IDisposable
             elapsed += stepMs;
         }
         if (active > 0)
-            Console.WriteLine($"[WARN] EIP Stop: {active} request(s) still active after {maxWaitMs} ms — forcing shutdown");
+            Logger.Info(this, $"Stop: {active} request(s) still active after {maxWaitMs} ms — forcing shutdown");
 
         // Dispose all client connections.
         lock (_clientLock)
@@ -320,7 +324,7 @@ public partial class EIPTransport : ILinkTransport, IDisposable
             }
             catch (TimeoutException)
             {
-                Console.WriteLine("[WARN] Background tasks did not complete within timeout");
+                Logger.Warn(this, "Background tasks did not complete within timeout");
             }
             catch (OperationCanceledException)
             {
@@ -328,7 +332,7 @@ public partial class EIPTransport : ILinkTransport, IDisposable
             }
         }
 
-        Console.WriteLine("[EIP]  EtherNet/IP transport stopped");
+       Logger.Info(this, "EtherNet/IP transport stopped");
     }
 
     /// <summary>
@@ -380,7 +384,7 @@ public partial class EIPTransport : ILinkTransport, IDisposable
         if (clientContext is not EIPRequestContext context) return;
         if (!context.Client.IsConnected) return;
 
-        Log($"SendResponse → session {context.Client.SessionHandle:X8}, PDU length={pdu.Length}");
+        Logger.Info(this, $"SendResponse → session {context.Client.SessionHandle:X8}, PDU length={pdu.Length}");
 
         // Use SendSerializedAsync to guarantee FIFO ordering of responses
         // within a single client session.  The discard (_=) is intentional:
@@ -390,20 +394,24 @@ public partial class EIPTransport : ILinkTransport, IDisposable
 
     // ── Health monitoring ────────────────────────────────────────────────────
 
-    public void SetLoggingEnabled(bool enabled)
+    /// <summary>
+    /// Enables or disables the health monitor for this transport instance.
+    /// When enabled, the health monitor is activated for visibility.
+    /// When disabled, the health monitor is disabled to reduce overhead.
+    /// </summary>
+    /// <param name="enabled">True to enable logging, false for maximum performance</param>
+    public void SetHealthStatsEnabled(bool enabled)
     {
-        _isLoggingEnabled = enabled;
-
         if (enabled)
-        {
-            _healthTimer?.Dispose();
-            _healthTimer = null;
-        }
-        else
         {
             // Activate periodic health stats when verbose logging is off.
             _healthTimer ??= new Timer(_ => LogHealthStats(), null, 15_000, 15_000);
-            Console.WriteLine("[PERF] EIP logging disabled — health monitor active");
+            Logger.Always(this, "Logging disabled — health monitor active");
+        }
+        else
+        {
+            _healthTimer?.Dispose();
+            _healthTimer = null;
         }
     }
 
@@ -420,25 +428,13 @@ public partial class EIPTransport : ILinkTransport, IDisposable
         int clientCount;
         lock (_clientLock) clientCount = _clients.Count;
 
-        Console.WriteLine(
-            $"[MONI] EIP Rate: {delta / 15,6}/s | Total: {cur,10:N0} | " +
+        Logger.Always(this,
+            $"EIP Rate: {delta / 15,6}/s | Total: {cur,10:N0} | " +
             $"Clients: {clientCount,2} | " +
             $"Memory: {GC.GetTotalMemory(false) / 1024,6:N0} KB");
 
         if (delta == 0 && cur > 0)
-            Console.WriteLine("[WARN] EIP: no frames in last 15 s — check client connection");
-    }
-
-    private void Log(string msg)
-    {
-        if (_isLoggingEnabled) Console.WriteLine($"[EIP]  {msg}");
-    }
-
-    private void LogHex(string tag, byte[] data, int len)
-    {
-        if (_isLoggingEnabled && len > 0)
-            Console.WriteLine(
-                $"[EIP]  {tag} {BitConverter.ToString(data, 0, len).Replace("-", " ")}");
+            Logger.Always(this, "No frames in last 15 s — check client connection");
     }
 
     // ── Request lifecycle guard ──────────────────────────────────────────────
@@ -489,11 +485,11 @@ public partial class EIPTransport : ILinkTransport, IDisposable
             {
                 errorCount++;
                 if (_isRunning)
-                    Console.WriteLine($"[EIP]  Accept error ({errorCount}/{maxErrors}): {ex.Message}");
+                    Logger.Warn(this, $"Accept error ({errorCount}/{maxErrors}): {ex.Message}");
                 
                 if (errorCount >= maxErrors)
                 {
-                    Console.WriteLine($"[EIP]  Too many accept errors, stopping listener");
+                    Logger.Warn(this, $"Too many accept errors, stopping listener");
                     break;
                 }
                 
@@ -510,7 +506,7 @@ public partial class EIPTransport : ILinkTransport, IDisposable
         
         if (clientCount >= MAX_CLIENTS)
         {
-            Console.WriteLine($"[EIP]  Max clients reached ({MAX_CLIENTS}), rejecting connection");
+            Logger.Warn(this, $"Max clients reached ({MAX_CLIENTS}), rejecting connection");
             tcp.Close();
             return;
         }
@@ -521,7 +517,7 @@ public partial class EIPTransport : ILinkTransport, IDisposable
         lock (_clientLock)
             _clients[handle] = client;
 
-        Log($"Client connected, session handle=0x{handle:X8}");
+        Logger.Info(this, $"Client connected, session handle=0x{handle:X8}");
 
         try
         {
@@ -529,14 +525,14 @@ public partial class EIPTransport : ILinkTransport, IDisposable
         }
         catch (Exception ex)
         {
-            Log($"Client 0x{handle:X8} unhandled exception: {ex.Message}");
+            Logger.Warn(this, $"Client 0x{handle:X8} unhandled exception: {ex.Message}");
         }
         finally
         {
             lock (_clientLock)
                 _clients.Remove(handle);
             client.Dispose();
-            Log($"Client disconnected, session handle=0x{handle:X8}");
+            Logger.Info(this, $"Client disconnected, session handle=0x{handle:X8}");
         }
     }
 
@@ -556,7 +552,7 @@ public partial class EIPTransport : ILinkTransport, IDisposable
             {
                 var result = await _udpListener.ReceiveAsync().ConfigureAwait(false);
                 var data   = result.Buffer;
-                LogHex("RX:", data, data.Length);
+                Logger.Hex(this, "RX:", data, data.Length);
 
                 // Minimum EIP header is 24 bytes.
                 if (data.Length < 24) continue;
@@ -572,16 +568,16 @@ public partial class EIPTransport : ILinkTransport, IDisposable
                 ulong senderCtx = BitConverter.ToUInt64(data, 12);
 
                 byte[] reply = BuildListIdentityResponse(senderCtx, sessionHandle: 0, localEndpoint);
-                LogHex("TX:", reply, reply.Length);
+                Logger.Hex(this, "TX:", reply, reply.Length);
                 await _udpListener.SendAsync(reply, reply.Length, result.RemoteEndPoint)
                                   .ConfigureAwait(false);
 
-                Log($"UDP ListIdentity reply sent to {result.RemoteEndPoint}");
+                Logger.Info(this, $"UDP ListIdentity reply sent to {result.RemoteEndPoint}");
             }
             catch (ObjectDisposedException) { break; }
             catch (Exception ex)
             {
-                if (_isRunning) Console.WriteLine($"[EIP]  UDP broadcast handler error: {ex.Message}");
+                if (_isRunning) Logger.Warn(this, $"UDP broadcast handler error: {ex.Message}");
             }
         }
     }

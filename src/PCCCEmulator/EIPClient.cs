@@ -233,10 +233,6 @@ public sealed partial class EIPTransport
             }
         }
 
-        // ── Logging helpers ──────────────────────────────────────────────────
-
-        private bool IsLogging => _transport._isLoggingEnabled;
-
         /// <summary>
         /// Sends a raw EIP response packet to the client. The data buffer must
         /// already contain a properly formatted EIP encapsulation header (24 bytes).
@@ -244,7 +240,7 @@ public sealed partial class EIPTransport
         /// </summary>
         private async Task SendRawResponse(byte[] data, int length)
         {
-            _transport.LogHex("TX:", data, length);
+            Logger.Hex(this, "TX:", data, length);
             await _stream.WriteAsync(data, 0, length).ConfigureAwait(false);
         }
 
@@ -303,7 +299,7 @@ public sealed partial class EIPTransport
                     {
                         if (await ReadExactAsync(buf, 24, length).ConfigureAwait(false) < length)
                             break;
-                        _transport.LogHex("RX:", buf, 24 + length);
+                        Logger.Hex(this, "RX:", buf, 24 + length);
                     }
 
                     // Dispatch command with the request context.
@@ -313,7 +309,7 @@ public sealed partial class EIPTransport
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
                 {
-                    _transport.Log($"ProcessAsync error (session 0x{_sessionHandle:X8}): {ex.Message}");
+                    Logger.Warn(this, $"ProcessAsync error (session 0x{_sessionHandle:X8}): {ex.Message}");
                     break;
                 }
             }
@@ -382,17 +378,17 @@ public sealed partial class EIPTransport
                     break;
 
                 case EIP_UNCONNECTED_SEND:
-                    if (!_isRegistered) { _transport.Log("Unconnected Send rejected — no session"); return; }
+                    if (!_isRegistered) { Logger.Info(this, "Unconnected Send rejected — no session"); return; }
                     await HandleUnconnectedSend(buf, length, context).ConfigureAwait(false);
                     break;
 
                 case EIP_CONNECTED_SEND:
-                    if (!_isRegistered) { _transport.Log("Connected Send rejected — no session"); return; }
+                    if (!_isRegistered) { Logger.Info(this, "Connected Send rejected — no session"); return; }
                     await HandleConnectedSend(buf, length, context).ConfigureAwait(false);
                     break;
 
                 default:
-                    _transport.Log($"Unknown command 0x{command:X4} — sending error reply");
+                    Logger.Info(this, $"Unknown command 0x{command:X4} — sending error reply");
                     await SendErrorReply(command, EIP_STATUS_INVALID_CMD, context).ConfigureAwait(false);
                     break;
             }
@@ -416,7 +412,7 @@ public sealed partial class EIPTransport
 
             if (requestedVersion != EIP_TRANSPORT_VERSION)
             {
-                _transport.Log($"RegisterSession: unsupported transport version {requestedVersion} (expected {EIP_TRANSPORT_VERSION})");
+                Logger.Info(this, $"RegisterSession: unsupported transport version {requestedVersion} (expected {EIP_TRANSPORT_VERSION})");
                 await SendErrorReply(EIP_REGISTER_SESSION, EIP_STATUS_UNSUPPORTED_VERSION, context)
                     .ConfigureAwait(false);
                 return;
@@ -444,7 +440,7 @@ public sealed partial class EIPTransport
             await SendRawResponse(response, response.Length).ConfigureAwait(false);
             _isRegistered = true;
 
-            _transport.Log($"RegisterSession: session 0x{_sessionHandle:X8} registered");
+            Logger.Info(this, $"RegisterSession: session 0x{_sessionHandle:X8} registered");
         }
 
         /// <summary>
@@ -468,7 +464,7 @@ public sealed partial class EIPTransport
             await SendRawResponse(response, response.Length).ConfigureAwait(false);
             _isRegistered = false;
 
-            _transport.Log($"UnregisterSession: session 0x{_sessionHandle:X8} released");
+            Logger.Info(this, $"UnregisterSession: session 0x{_sessionHandle:X8} released");
         }
 
         // ── List commands ────────────────────────────────────────────────────
@@ -503,7 +499,7 @@ public sealed partial class EIPTransport
 
             FixEipLength(ms, w);
             await FlushAsync(ms).ConfigureAwait(false);
-            _transport.Log("ListServices response sent");
+            Logger.Info(this, "ListServices response sent");
         }
 
         /// <summary>
@@ -517,14 +513,14 @@ public sealed partial class EIPTransport
             // Use cached local IP address (avoid per-packet enumeration)
             if (_transport._cachedLocalAddress == null)
             {
-                _transport.Log("[WARN] HandleListIdentity: no valid IPv4 unicast address found");
+                Logger.Info(this, "[WARN] HandleListIdentity: no valid IPv4 unicast address found");
                 return;
             }
             
             IPEndPoint localEndpoint = new IPEndPoint(_transport._cachedLocalAddress, _transport._port);
             byte[] reply = BuildListIdentityResponse(context.SenderContext, _sessionHandle, localEndpoint);
             await SendRawResponse(reply, reply.Length).ConfigureAwait(false);
-            _transport.Log($"ListIdentity response sent ({EIP_PRODUCT_NAME})");
+            Logger.Info(this, $"ListIdentity response sent ({EIP_PRODUCT_NAME})");
         }
 
         /// <summary>
@@ -548,7 +544,7 @@ public sealed partial class EIPTransport
             // Bytes 24-25: item count = 0
 
             await SendRawResponse(response, response.Length).ConfigureAwait(false);
-            _transport.Log("ListInterfaces response sent (empty)");
+            Logger.Info(this, "ListInterfaces response sent (empty)");
         }
 
         // ── Unconnected Send (0x006F) ────────────────────────────────────────
@@ -689,7 +685,7 @@ public sealed partial class EIPTransport
 
                     if (conn == null)
                     {
-                        _transport.Log($"Connected Send: bad connection ID 0x{connId:X8} — packet dropped");
+                        Logger.Info(this, $"Connected Send: bad connection ID 0x{connId:X8} — packet dropped");
                         return;
                     }
 
@@ -777,7 +773,7 @@ public sealed partial class EIPTransport
             lock (_connLock)
                 _connections[newId] = conn;
 
-            _transport.Log($"ForwardOpen{(isExtended ? "Ex" : "")}: " +
+            Logger.Info(this, $"ForwardOpen{(isExtended ? "Ex" : "")}: " +
                 $"OT=0x{otConnId:X8} TO=0x{toConnId:X8} → assigned TargID=0x{newId:X8}, " +
                 $"Active connections={_connections.Count}");
 
@@ -814,10 +810,10 @@ public sealed partial class EIPTransport
             }
 
             if (conn != null)
-                _transport.Log($"ForwardClose: connection 0x{conn.AssignedId:X8} closed, " +
+                Logger.Info(this, $"ForwardClose: connection 0x{conn.AssignedId:X8} closed, " +
                            $"remaining connections={_connections.Count}");
             else
-                _transport.Log($"ForwardClose: connection serial 0x{connSerial:X4} not found");
+                Logger.Info(this, $"ForwardClose: connection serial 0x{connSerial:X4} not found");
 
             await SendForwardCloseResponse(connSerial, vendorId, serialNum, context).ConfigureAwait(false);
         }
@@ -898,7 +894,7 @@ public sealed partial class EIPTransport
             FixEipLength(ms, w);
             await FlushAsync(ms).ConfigureAwait(false);
 
-            _transport.Log($"ForwardOpen response: replySvc=0x{replySvc:X2}, AssignedID=0x{assignedId:X8}");
+            Logger.Info(this, $"ForwardOpen response: replySvc=0x{replySvc:X2}, AssignedID=0x{assignedId:X8}");
         }
 
         private async Task SendForwardCloseResponse(ushort connSerial, ushort vendorId, uint serialNum, EIPRequestContext context)
@@ -968,7 +964,7 @@ public sealed partial class EIPTransport
             byte svc = buf[offset++];
             if (svc != CIP_SERVICE_EXECUTE_PCCC)
             {
-                _transport.Log($"ExtractAndDispatchPCCC: unexpected service 0x{svc:X2} (expected 0x4B)");
+                Logger.Info(this, $"ExtractAndDispatchPCCC: unexpected service 0x{svc:X2} (expected 0x4B)");
                 return;
             }
 
@@ -999,7 +995,7 @@ public sealed partial class EIPTransport
             // Minimum: CMD(1) STS(1) TNS(2) FUNC(1) = 5 bytes.
             if (offset + 5 > buf.Length || offset + 5 > itemEnd)
             {
-                _transport.Log($"ExtractAndDispatchPCCC: truncated PCCC header at offset {offset}");
+                Logger.Info(this, $"ExtractAndDispatchPCCC: truncated PCCC header at offset {offset}");
                 return;
             }
 
@@ -1027,7 +1023,7 @@ public sealed partial class EIPTransport
             if (remaining > 0)
                 Array.Copy(buf, offset, pdu, pduOff, Math.Min(remaining, buf.Length - offset));
 
-            _transport.Log($"PCCC dispatch: CMD=0x{pcccCmd:X2} TNS=0x{pcccTns:X4} FNC=0x{pcccFunc:X2} data={remaining}B");
+            Logger.Info(this, $"PCCC dispatch: CMD=0x{pcccCmd:X2} TNS=0x{pcccTns:X4} FNC=0x{pcccFunc:X2} data={remaining}B");
 
             _transport.IncrementFramesProcessed();
             _transport._emulator.IncrementTotalPacketsReceived();
@@ -1066,7 +1062,7 @@ public sealed partial class EIPTransport
             }
             catch (Exception ex)
             {
-                _transport.Log($"SendSerializedAsync failed for session 0x{_sessionHandle:X8}: {ex.Message}");
+                Logger.Warn(this, $"SendSerializedAsync failed for session 0x{_sessionHandle:X8}: {ex.Message}");
                 _transport._emulator.IncrementUndeliveredPackets();
             }
             finally
@@ -1088,7 +1084,7 @@ public sealed partial class EIPTransport
         {
             if (_disposed || _transport.IsDisposing) return;
 
-            _transport.Log($"SendResponseAsync: PDU length={pdu.Length}");
+            Logger.Info(this, $"SendResponseAsync: PDU length={pdu.Length}");
 
             if (context.IsConnectedAtReceive)
                 await SendConnectedResponse(pdu, context).ConfigureAwait(false);
