@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCComm - PCCC Communication Library for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 // 
 // Based on original DF1Comm.vb by Archie Jacobs (Manufacturing Automation LLC)
@@ -19,16 +19,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-namespace DF1Comm;
+namespace PCCCComm;
 
 /// <summary>
-/// Custom exception for DF1 library errors.
+/// Checksum selection for DF1 frames.
+/// CRC-16/ARC (init=0x0000, poly=0xA001) as AB DF1 spec
+/// BCC uses simple XOR (returned in low byte).
 /// </summary>
-public class DF1Exception : Exception
+public enum CheckSumOptions
 {
-    public DF1Exception() { }
-
-    public DF1Exception(string message) : base(message) { }
-
-    public DF1Exception(string message, Exception inner) : base(message, inner) { }
+    Crc = 0,
+    Bcc = 1
 }

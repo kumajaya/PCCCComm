@@ -9,7 +9,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using DF1Comm;
+using PCCCComm;
 using DF1ProgramTool.Models;
 using DF1ProgramTool.Services;
 using ReactiveUI;
@@ -19,7 +19,7 @@ namespace DF1ProgramTool.ViewModels;
 public class MainWindowViewModel : ReactiveObject, IDisposable
 {
     // ─── Private state ────────────────────────────────────────────────────────
-    private global::DF1Comm.DF1Comm? _df1;
+    private global::PCCCComm.PCCCComm? _df1;
     private CancellationTokenSource? _cts;
     private PlcInfo _currentPlcInfo = new PlcInfo(0, "Unknown", false, "Unknown", string.Empty, 0, 0, "UNKNOWN");
     private readonly IDialogService _dialogService;
@@ -348,7 +348,7 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
 
             DisposeDF1();
 
-            _df1 = new global::DF1Comm.DF1Comm(SelectedPort, SelectedBaud, parity)
+            _df1 = new global::PCCCComm.PCCCComm(SelectedPort, SelectedBaud, parity)
             {
                 TargetNode = (int)TargetNode,
                 MyNode     = (int)MyNode,

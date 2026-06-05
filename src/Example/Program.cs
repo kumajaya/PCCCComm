@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCComm - PCCC Communication Library for .NET
 // Copyright (c) 2026 Ketut Kumajaya
-// 
-// Based on original DF1Comm.vb by Archie Jacobs (Manufacturing Automation LLC)
-// which was released under GPLv2-or-later.
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,7 +19,7 @@
 using System.IO;
 using System.IO.Ports;
 using System.Runtime.InteropServices;
-using Comm = DF1Comm;
+using Comm = PCCCComm;
 
 /// <summary>
 /// Enhanced DF1 client for testing DF1Emulator or real PLCs.
@@ -98,9 +95,9 @@ class Program
     /// Sends a raw DF1 PDU using reflection to call the private PrefixAndSend method.
     /// The TNS bytes in the PDU are ignored; the library generates its own TNS.
     /// </summary>
-    private static int SendRawCommand(Comm.DF1Comm df1, byte[] pdu)
+    private static int SendRawCommand(Comm.PCCCComm df1, byte[] pdu)
     {
-        var method = typeof(Comm.DF1Comm).GetMethod("PrefixAndSend",
+        var method = typeof(Comm.PCCCComm).GetMethod("PrefixAndSend",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         if (method == null)
             throw new Exception("PrefixAndSend method not found");
@@ -236,7 +233,7 @@ class Program
         // After parsing portName from arguments, normalize and validate it
         portName = NormalizePortName(portName);
 
-        var df1 = new Comm.DF1Comm(portName, baud, parity)
+        var df1 = new Comm.PCCCComm(portName, baud, parity)
         {
             TargetNode = targetNode,
             MyNode = myNode,

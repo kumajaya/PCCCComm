@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 
-// DF1Comm - DF1 Protocol Library for .NET
+// PCCCComm - PCCC Communication Library for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 // 
 // Based on original DF1Comm.vb by Archie Jacobs (Manufacturing Automation LLC)
@@ -21,7 +21,7 @@
 
 using System.IO.Ports;
 
-namespace DF1Comm.Core;
+namespace PCCCComm.Core;
 
 /// <summary>
 /// Serial port wrapper with robust byte array handling and deadlock prevention.

@@ -8,20 +8,20 @@ using System.Threading;
 using System.Threading.Tasks;
 using DF1ProgramTool.Utilities;
 using DF1ProgramTool.Models;
-using DF1Comm;
+using PCCCComm;
 
 namespace DF1ProgramTool.Services;
 
 public class ProgramTransferService
 {
-    private readonly global::DF1Comm.DF1Comm _df1;
+    private readonly global::PCCCComm.PCCCComm _df1;
     private readonly IProgress<string>? _progressMessage;
     private readonly IProgress<double>? _progressPercent;
     private readonly CancellationToken _cancellationToken;
     private readonly PlcInfo? _plcInfo;
 
     public ProgramTransferService(
-        global::DF1Comm.DF1Comm df1,
+        global::PCCCComm.PCCCComm df1,
         IProgress<string>? message = null,
         IProgress<double>? percent = null,
         CancellationToken cancellation = default,
@@ -48,7 +48,7 @@ public class ProgramTransferService
             int completedFiles = 0;
 
             // Subscribe to new FileProgress event
-            EventHandler<global::DF1Comm.DF1Comm.FileProgressEventArgs> progressHandler = (_, e) =>
+            EventHandler<global::PCCCComm.PCCCComm.FileProgressEventArgs> progressHandler = (_, e) =>
             {
                 completedFiles = e.FilesCompleted;
                 totalFiles = e.TotalFiles;
@@ -108,14 +108,14 @@ public class ProgramTransferService
 
             if (!skipSetProgramMode)
             {
-                // DF1Comm.SetProgramMode() throws on failure; let the exception propagate
+                // PCCCComm.SetProgramMode() throws on failure; let the exception propagate
                 _progressMessage?.Report($"Setting PLC to Program mode…");
                 _df1.SetProgramMode();
             }
 
             _cancellationToken.ThrowIfCancellationRequested();
 
-            EventHandler<global::DF1Comm.DF1Comm.FileProgressEventArgs> progressHandler = (_, e) =>
+            EventHandler<global::PCCCComm.PCCCComm.FileProgressEventArgs> progressHandler = (_, e) =>
             {
                 double pct = e.GrandTotalBytes > 0 
                     ? (double)e.TotalBytesTransferred / e.GrandTotalBytes * 100.0
@@ -290,7 +290,7 @@ public class ProgramTransferService
             int completedFiles = 0;
 
             // Subscribe to FileProgress to track PLC upload progress
-            EventHandler<global::DF1Comm.DF1Comm.FileProgressEventArgs> progressHandler = (_, e) =>
+            EventHandler<global::PCCCComm.PCCCComm.FileProgressEventArgs> progressHandler = (_, e) =>
             {
                 completedFiles = e.FilesCompleted;
                 totalFiles = e.TotalFiles;

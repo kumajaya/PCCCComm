@@ -36,7 +36,7 @@ public static class PlcIdentifier
     ///   Byte 23    : flags (bits 2-7 = program owner node, 0x3F = no owner)
     ///                bit 0 = directory file corrupted
     /// </summary>
-    public static async Task<PlcInfo> IdentifyAsync(global::DF1Comm.DF1Comm df1)
+    public static async Task<PlcInfo> IdentifyAsync(global::PCCCComm.PCCCComm df1)
     {
         try
         {
@@ -71,7 +71,7 @@ public static class PlcIdentifier
                     // Per emulator/spec: DATA[3] = ProcessorType (redundant), DATA[5..15] = bulletin ASCII (11 bytes)
                     if (data.Length > 3)
                     {
-                        // If DF1Comm GetProcessorType returned something different, keep procType from GetProcessorType()
+                        // If PCCCComm GetProcessorType returned something different, keep procType from GetProcessorType()
                         // but we can override if needed:
                         // procType = data[3];
                     }
@@ -89,7 +89,7 @@ public static class PlcIdentifier
             }
             catch
             {
-                // ignore if DF1Comm doesn't support raw diagnostic read
+                // ignore if PCCCComm doesn't support raw diagnostic read
             }
 
             bool supports = family is "SLC" or "MicroLogix";

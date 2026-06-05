@@ -1,16 +1,16 @@
-# DF1Comm – DF1 Protocol Library for .NET (C# Port)
+# PCCC Communication Suite for .NET
 
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![.NET](https://img.shields.io/badge/.NET-8.0-purple)](https://dotnet.microsoft.com/)
 
-**DF1Comm** is a complete, self‑contained C# implementation of the **Allen‑Bradley DF1 full‑duplex protocol** for .NET.  
+**PCCC Communication Suite** is a complete, self‑contained .NET implementation for communicating with Allen‑Bradley PLCs using the **PCCC** (Programmable Controller Communications Command) protocol over **DF1 serial** and **EtherNet/IP**.
 
-It is a **port** of the original **DF1Comm.vb** written by **Archie Jacobs of Manufacturing Automation LLC** – a proven, widely used DF1 implementation. This C# version preserves the original logic while adding:
+The suite includes:
 
-- A reusable **DF1 communication library** (`DF1Comm`)
-- A **standalone PCCC emulator** (`PCCCEmulator`) for testing without real PLC hardware
-- An **example client** that demonstrates all major library features
-- A **desktop GUI tool** (`DF1ProgramTool`) for upload/download/compare PLC programs
+- **PCCCComm** – A reusable communication library (supports DF1 and EtherNet/IP)
+- **PCCCEmulator** – Standalone PLC emulator (SLC 5/03 with DF1 and EtherNet/IP)
+- **Example** – Client example with interactive CLI
+- **PCCCImageTool** – Desktop GUI for upload/download/compare PLC images
 
 All components target .NET 8 and are licensed under GNU General Public License v3.0 or later (GPLv3+).
 
@@ -19,82 +19,86 @@ All components target .NET 8 and are licensed under GNU General Public License v
 ## Repository Structure
 
 ```
-DF1Comm/
+PCCCComm/
 ├── LICENSE                         (GNU GPL v3.0)
 ├── README.md                       (this file)
 ├── src/
-│   ├── DF1Comm/                    # Core library (C# port of DF1Comm.vb)
-│   │   ├── CheckSumOptions.cs
-│   │   ├── DF1Comm.cs
-│   │   ├── DF1Exception.cs
+│   ├── PCCCComm/                   # Core library (DF1 + EIP transport)
+│   │   ├── PCCCComm.cs
+│   │   ├── PCCCCommOptions.cs
+│   │   ├── PCCCCommException.cs
 │   │   ├── Models.cs
 │   │   ├── Core/
-│   │   │   ├── AddressParser.cs
-│   │   │   ├── DataLink.cs
+│   │   │   ├── ITransport.cs
+│   │   │   ├── DF1Transport.cs
+│   │   │   ├── EIPTransport.cs
 │   │   │   ├── MessageDecoder.cs
 │   │   │   ├── PacketBuilder.cs
-│   │   │   ├── SerialPortWrapper.cs
-│   │   │   └── StringConverter.cs
-│   │   └── DF1Comm.csproj
-│   ├── PCCCEmulator/                # PCCC emulator (standalone)
-│   │   ├── DF1Transport.cs
-│   │   ├── MessageDecoder.cs
-│   │   ├── EIPTransport.cs
+│   │   │   ├── AddressParser.cs
+│   │   │   ├── StringConverter.cs
+│   │   │   ├── ISerialPort.cs
+│   │   │   └── SerialPortWrapper.cs
+│   │   └── PCCCComm.csproj
+│   ├── PCCCEmulator/               # PCCC emulator (standalone)
+│   │   ├── PCCCEmulator.cs
+│   │   ├── PlcMemory.cs
+│   │   ├── DF1Transport.cs (emulator version)
+│   │   ├── EIPTransport.cs (emulator version)
 │   │   ├── EIPClient.cs
 │   │   ├── ILinkTransport.cs
-│   │   ├── PlcMemory.cs
-│   │   ├── PCCCEmulator.cs
+│   │   ├── MessageDecoder.cs
+│   │   ├── Logger.cs
 │   │   ├── Program.cs
 │   │   ├── PCCCEmulator.csproj
 │   │   └── README.md
-│   ├── DF1ProgramTool/               # Desktop GUI for upload/download
+│   ├── PCCCImageTool/             # Desktop GUI for upload/download
 │   │   ├── Views/
 │   │   ├── ViewModels/
 │   │   ├── Models/
 │   │   ├── Services/
 │   │   ├── Utilities/
-│   │   ├── DF1ProgramTool.csproj
+│   │   ├── PCCCImageTool.csproj
 │   │   └── README.md
 │   └── Example/                    # Example client application
 │       ├── Program.cs
 │       ├── Example.csproj
 │       └── README.md
-└── DF1Comm.sln                     # Visual Studio solution
+└── PCCCComm.sln                     # Visual Studio solution
 ```
 
 ---
 
 ## Features
 
-### DF1Comm Library (C# Port)
-- Full‑duplex DF1 framing (DLE STX / DLE ETX with DLE stuffing)
-- **BCC** and **CRC‑16** (calculation as per AB specification) checksum support
-- Read/write any data type: **integers, floats, bits, strings, timers, counters**
-- Switch processor between **RUN** and **PROGRAM** modes
-- Auto‑detect communication settings (baud, parity, checksum) via `DetectCommSettings()`
+### PCCCComm Library
+- **DF1 full‑duplex** serial framing (DLE stuffing, CRC-16/BCC, ACK/NAK, ENQ)
+- **EtherNet/IP (EIP)** transport over TCP (CIP Unconnected Send, Execute PCCC)
+- Read/write any data type: integers, floats, bits, strings, timers, counters
+- Switch processor between RUN and PROGRAM modes
+- Auto‑detect DF1 communication settings (`DetectCommSettings()`)
 - Retrieve data file directory (`GetDataMemory()`)
 - Upload/download complete program files (SLC style)
-- Support for **SLC 5/03**, **MicroLogix 1500**, and many other DF1‑compatible PLCs
+- Support for SLC 5/03, MicroLogix 1500, and many other PCCC‑compatible PLCs
 
 ### PCCCEmulator (Standalone Tool)
-- Emulates an **SLC 5/03** DF1 port (processor type `0x49`)
-- **Loads real PLC program** from embedded .bin resource (converted from APS .ACH archive)
-- Implements the full DF1 link layer: ACK/NAK, ENQ handling, checksum validation
-- Implements EtherNet/IP support: TCP port 44818, UDP broadcast ListIdentity
-- In‑memory file system with pre‑defined data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, and additional B/N files up to file 31)
-- Responds to **Get Status** (CMD 0x06 FNC 0x03) with realistic 24‑byte payload
-- Handles **Protected Typed Logical Read/Write** (0xA1, 0xA2, 0xAA, 0xAB)
+- Emulates an SLC 5/03 (processor type `0x49`) with DF1 and EIP interfaces
+- Loads real PLC program from embedded .bin resource (converted from APS .ACH archive)
+- Full DF1 link layer: ACK/NAK, ENQ, checksum
+- Full EtherNet/IP server: TCP port 44818, UDP broadcast ListIdentity, Forward Open/Close, Connected/Unconnected Send
+- In‑memory file system with pre‑defined data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, and additional files up to file 31)
+- Responds to Get Status (CMD 0x06 FNC 0x03) with realistic 24‑byte payload
+- Handles Protected Typed Logical Read/Write (0xA1, 0xA2, 0xAA, 0xAB)
 - Configurable node ID, checksum, baud rate, parity via command line
 - Console hex logging for debugging
 
 ### Example Client
-- Demo sequence: reads processor type, data files, and specific addresses; writes integers, floats, and bits; toggles RUN/PROGRAM mode
-- **Interactive CLI** (`DF1>` prompt) with read, write, writestring, sendhex, mode, stats, and more
-- **Communication statistics** – total requests, successes, timeouts, NAKs, other errors, error rate
-- **Stress test mode** – continuous read loop with configurable iteration count (`--stress-test [n]`)
-- Can be used with **real PLC** or **PCCCEmulator** over a virtual serial pair or ethernet
+- Demonstrates reading processor type, data files, and specific addresses; writing integers, floats, bits; toggling RUN/PROGRAM mode
+- Interactive CLI (`PCCC>` prompt) with read, write, writestring, sendhex, mode, stats, and more
+- Communication statistics – total requests, successes, timeouts, NAKs, error rate
+- Stress test mode – continuous read loop (`--stress-test [n]`)
+- Works with real PLC or PCCCEmulator over virtual serial pair or Ethernet
 
-### DF1ProgramTool (Desktop GUI)
+### PCCCImageTool (Desktop GUI)
 - Cross‑platform GUI built with Avalonia UI
 - Upload entire PLC program to a binary file
 - Download previously saved program back to the PLC
@@ -107,9 +111,8 @@ DF1Comm/
 
 ## Attribution
 
-This C# library is a **direct port** of the original **DF1Comm.vb** written by **Archie Jacobs, Manufacturing Automation LLC**.  
-
-The original Visual Basic code has been faithfully translated to C#, preserving the DF1 logic, error handling, and timing behaviour. All enhancements (emulator, example client, modern .NET packaging) are built on top of that core.
+This C# library is a **refactored and enhanced version** of the original **DF1Comm.vb** written by **Archie Jacobs, Manufacturing Automation LLC**.  
+The original Visual Basic code was faithfully ported to C# and then restructured to support multiple transports (DF1, EIP). All DF1 serial behaviours remain identical to the original implementation.
 
 We thank Archie Jacobs for providing a robust, well‑tested DF1 implementation to the industrial automation community.
 
@@ -118,8 +121,8 @@ We thank Archie Jacobs for providing a robust, well‑tested DF1 implementation 
 ## Requirements
 
 - **.NET 8 SDK** or later
-- Windows / Linux / macOS (serial port support required)
-- For testing without hardware: a **virtual serial port or ethernet emulator** (e.g. com0com on Windows, `socat` on Linux)
+- Windows / Linux / macOS (serial port support required for DF1)
+- For testing without hardware: a **virtual serial pair** (e.g. com0com on Windows, `socat` on Linux) or Ethernet loopback
 
 ---
 
@@ -128,122 +131,126 @@ We thank Archie Jacobs for providing a robust, well‑tested DF1 implementation 
 Clone the repository and build the whole solution:
 
 ```bash
-git clone https://github.com/kumajaya/DF1Comm.git
-cd DF1Comm
-dotnet build -c Release DF1Comm.sln
+git clone https://github.com/kumajaya/PCCCComm.git
+cd PCCCComm
+dotnet build -c Release PCCCComm.sln
 ```
 
 Individual projects can also be built separately:
 
 ```bash
-dotnet build -c Release src/DF1Comm/DF1Comm.csproj
+dotnet build -c Release src/PCCCComm/PCCCComm.csproj
 dotnet build -c Release src/PCCCEmulator/PCCCEmulator.csproj
 dotnet build -c Release src/Example/Example.csproj
+dotnet build -c Release src/PCCCImageTool/PCCCImageTool.csproj
 ```
 
 ---
 
 ## Usage
 
-### 1. Using the DF1Comm Library
+### 1. Using the PCCCComm Library (DF1 serial)
 
 ```csharp
-using DF1Comm;
+using PCCCComm;
 
-var df1 = new DF1Comm("COM1", 19200, Parity.None)
+var comm = new PCCCComm("COM2", 19200, Parity.None)
 {
     TargetNode = 1,
     MyNode = 0,
     CheckSum = CheckSumOptions.Crc
 };
 
-df1.OpenComms();
+comm.OpenComms();
 
 // Read processor type
-int procType = df1.GetProcessorType();
+int procType = comm.GetProcessorType();
 Console.WriteLine($"Processor: 0x{procType:X2}");
 
 // Read an integer from N7:0
-string value = df1.ReadAny("N7:0");
+string value = comm.ReadAny("N7:0");
 Console.WriteLine($"N7:0 = {value}");
 
 // Write a float to F8:1
-df1.WriteData("F8:1", 3.14159f);
+comm.WriteData("F8:1", 3.14159f);
 
 // Set RUN mode
-df1.SetRunMode();
+comm.SetRunMode();
 
-df1.CloseComms();
+comm.CloseComms();
 ```
 
-### 2. Running the Emulator
+### 2. Using the PCCCComm Library (EtherNet/IP)
+
+```csharp
+using PCCCComm;
+
+var comm = new PCCCComm("192.168.1.10", 44818); // EIP transport
+comm.OpenComms();
+
+string value = comm.ReadAny("N7:0");
+Console.WriteLine(value);
+
+comm.CloseComms();
+```
+
+### 3. Running the Emulator (DF1)
 
 ```bash
 dotnet run --project src/PCCCEmulator -- COM2 --baud 19200 --checksum crc
 ```
 
-See `src/PCCCEmulator/README.md` for full emulator documentation.
+### 4. Running the Emulator (EtherNet/IP)
 
-### 3. Running the Example Client
+```bash
+dotnet run --project src/PCCCEmulator -- --mode eip --port 44818
+```
+
+### 5. Running the Example Client
 
 ```bash
 dotnet run --project src/Example -- COM1 --target 1 --checksum crc
 ```
 
-The client runs a demo sequence, prints communication statistics, then enters an interactive CLI (`DF1>` prompt). Use `--interactive-only` to skip the demo, `--no-interactive` to skip the CLI, or `--stress-test [n]` for continuous load testing.
+### 6. Testing Emulator + Client Together (DF1)
 
-See `src/Example/README.md` for full client documentation.
+- Create a virtual serial pair (e.g. `COM1` ↔ `COM2`).
+- Start emulator on `COM2` and client on `COM1`.
 
-### 4. Testing Emulator + Client Together
+### 7. Testing Emulator + Client Together (EIP)
 
-1. Create a virtual serial pair (e.g. `COM1` ↔ `COM2`).
-2. Start emulator on `COM2`:
-   ```bash
-   dotnet run --project src/PCCCEmulator -- COM2 --checksum crc
-   ```
-3. In another terminal, start the example client on `COM1`:
-   ```bash
-   dotnet run --project src/Example -- COM1 --checksum crc
-   ```
+- Start emulator: `dotnet run --project src/PCCCEmulator -- --mode eip`
+- Start example client (if extended to EIP) or use any EIP client (RSLinx, libplctag, pycomm3).
 
-### 5. Running the GUI Tool (DF1ProgramTool)
+### 8. Running the GUI Tool (PCCCImageTool)
 
 ```bash
-dotnet run --project src/DF1ProgramTool
+dotnet run --project src/PCCCImageTool
 ```
-
-The tool presents a graphical interface where you can select the COM port, baud rate, parity, and node ID. After connecting, the processor type is automatically detected. Upload/download buttons are enabled only for supported PLC families (SLC and MicroLogix).  
-See `src/DF1ProgramTool/README.md` for full documentation.
-
-### 6. Testing Emulator + DF1ProgramTool Together
-
-1. Create a virtual serial pair (e.g. `COM1` ↔ `COM2`).
-2. Start emulator on `COM2`:
-   ```bash
-   dotnet run --project src/PCCCEmulator -- COM2 --checksum crc
-   ```
-3. Start DF1ProgramTool and connect to `COM1`.
-4. Upload from the emulator, then download – the emulator will respond correctly.
 
 ---
 
 ## Protocol Reference
 
-The implementation follows **Allen‑Bradley Publication 1770‑6.5.16** (DF1 Protocol and Command Set). Supported commands include:
+The implementation follows **Allen‑Bradley Publication 1770‑6.5.16** (DF1 Protocol and Command Set) and **ODVA EtherNet/IP Specification** (Volumes 1 & 2). Supported PCCC commands include:
 
 | Command | Description |
 |---------|-------------|
 | `0x06` (Get Status) | Read processor type, mode, diagnostics |
 | `0x0F` (Protected Typed Logical Read/Write) | Read/write data files (0xA1, 0xA2, 0xAA, 0xAB) |
 | `0x01` (Reset) | Reset communication |
-| `0x0B` (Set Variables) | Configure communication parameters (RSLinx auto‑configure) |
+| `0x0B` (Set Variables) | RSLinx auto‑configure |
 | `0x0A` (Diagnostic Counters) | Read modem and packet statistics |
-| `0x67` (Read Modified Data) | Simplified read variant |
+| `0x67` (Read Modified Data) | Simplified read |
 | `0x0F` (Execute Command List) | Multi‑function commands (mode change, I/O config, upload/download) |
 
-Checksum modes as per AB specification:
-- **BCC**: uses two's complement of sum.
-- **CRC‑16**: Initial value `0x0000`, polynomial `0xA001`, ETX byte `0x03` included.
+DF1 checksum modes as per AB specification:
+- **BCC**: two's complement of sum.
+- **CRC‑16**: initial `0x0000`, polynomial `0xA001`, ETX byte `0x03` included.
+
+EtherNet/IP encapsulation:
+- **RegisterSession** (0x0065), **Unconnected Send** (0x006F), **Connected Send** (0x0070)
+- CIP service **Execute PCCC** (0x4B) and **CM Unconnected Send** (0x52)
 
 ---
 
@@ -256,7 +263,7 @@ Checksum modes as per AB specification:
 | `Illegal Command or Format` | The target may not support the addressed file/element. Check file numbers and element bounds. |
 | `Processor is in Program mode` | Normal – writes may be restricted. Use `SetRunMode()` to change. |
 | `Port busy` | Only one application can open a COM port at a time. Close other programs (RSLinx, etc.). |
-| `RSLinx does not see memory` | Enable verbose logging in the emulator and verify `Read File 0` requests are answered correctly. |
+| `EIP connection timeout` | Check firewall (TCP 44818), verify emulator or PLC is reachable, and that `--mode eip` is used. |
 
 ---
 
@@ -268,19 +275,19 @@ Checksum modes as per AB specification:
 4. Push to the branch (`git push origin feature/amazing-feature`).
 5. Open a Pull Request.
 
-Please keep all code **self‑contained** (avoid external dependencies except `System.IO.Ports`). Add unit tests when possible.
+Please keep all code **self‑contained** (avoid external dependencies except `System.IO.Ports` and `System.Net.Sockets`). Add unit tests when possible.
 
 ---
 
 ## License
 
-**DF1Comm – C# port of DF1Comm.vb**  
+**PCCC Communication Suite**  
 Copyright (c) 2026 Ketut Kumajaya
 
 The original **DF1Comm.vb** (by Archie Jacobs, Manufacturing Automation LLC) was released under the  
 **GNU General Public License, version 2 or any later version**.
 
-This C# port and the Example Client are **derived works** of the original VB code.  
+This C# port and its extensions are **derived works** of the original VB code.  
 Therefore, they are also licensed under the **GNU General Public License v3.0 or any later version**.
 
 ```
@@ -313,8 +320,9 @@ See the [GNU license compatibility FAQ](https://www.gnu.org/licenses/license-com
 
 ## Acknowledgements
 
-- **Archie Jacobs, Manufacturing Automation LLC** – for the original VB DF1Comm implementation that made this port possible.
-- **Allen‑Bradley / Rockwell Automation** – for the DF1 protocol specification (Publication 1770‑6.5.16).
+- **Archie Jacobs, Manufacturing Automation LLC** – for the original VB DF1Comm implementation.
+- **Allen‑Bradley / Rockwell Automation** – for the DF1 protocol specification (Publication 1770‑6.5.16) and EtherNet/IP specification.
+- **Kyle Hayes** – for libplctag, which served as reference for EIP implementation.
 
 ---
 
@@ -322,4 +330,4 @@ See the [GNU license compatibility FAQ](https://www.gnu.org/licenses/license-com
 
 - [PCCCEmulator](src/PCCCEmulator/README.md) – standalone emulator
 - [Example Client](src/Example/README.md) – usage demonstration
-- [DF1ProgramTool](src/DF1ProgramTool/README.md) – desktop GUI for upload/download
+- [PCCCImageTool](src/PCCCImageTool/README.md) – desktop GUI for upload/download
