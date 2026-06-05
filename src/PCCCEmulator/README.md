@@ -84,15 +84,41 @@ PCCC emulator running
 Press Enter to stop.
 ```
 
+### UIC Mode (DH485 via 1747-UIC)
+To communicate with a DH485 network using an Allen-Bradley 1747-UIC converter:
+```bash
+dotnet run --project PCCCEmulator.csproj -- COM2 --mode uic
+```
+
+Output:
+```
+[MEM] PCCCEmulator.Resources.DBU550.bin
+      Size=9921 Magic=0xDF1A Ver=1 Type=0x49 SLC 5/03
+      Files=33 TS=2026-05-31 01:59:11
+      Loaded: 21 data files, 10 program files
+[MEM] PCCC PLC memory initialized with embedded program.
+[MEM] Hot cache initialized with 6 files
+[EMU] PCCC emulator initialized in UIC mode
+[EMU] PCCC emulator started in UIC mode
+[SYS] PCCC emulator running
+      Mode      : UIC
+      Port      : COM2
+      Baud rate : 19200 (fixed for 1747-UIC)
+      Node ID   : 1
+      Protocol  : DF1 encapsulated to DH485 via UIC
+      Logging   : Enabled
+[SYS] Press Enter to stop.
+```
+
 ### Command line options
 | Option | Description | Default |
 |--------|-------------|---------|
-| `[port]` | Serial port name (DF1/DH485 mode only) | `COM2` |
-| `--baud <n>` | Baud rate (DF1/DH485 mode only) | `19200` |
-| `--parity <none/odd/even>` | Parity mode (DF1/DH485 mode only) | `none` |
+| `[port]` | Serial port name (DF1/UIC mode only) | `COM2` |
+| `--baud <n>` | Baud rate (DF1/UIC mode only) | `19200` |
+| `--parity <none/odd/even>` | Parity mode (DF1/UIC mode only) | `none` |
 | `--node <n>` | Emulator node ID | `1` |
 | `--checksum <crc/bcc>` | Checksum mode (DF1 mode only) | `crc` |
-| `--mode <df1\|dh485\|eip>` | Transport mode | `df1` |
+| `--mode <df1\|uic\|eip>` | Transport mode | `df1` |
 | `--port <n>` | EIP port number (EIP mode only) | `44818` |
 | `--quiet, -q` | Disable logging for maximum performance | `false` |
 | `--help, -h` | Show usage | – |

@@ -88,7 +88,7 @@ public class PCCCEmulator : IDisposable
     public enum TransportMode
     {
         DF1,      // Serial DF1 full-duplex (default, fully implemented)
-        DH485,    // DH485 via serial (planned for future release)
+        UIC,      // DH485 via 1747-UIC (implemented)
         EIP       // EtherNet/IP (EIP/PCCC) via TCP (fully implemented)
     }
 
@@ -206,7 +206,10 @@ public class PCCCEmulator : IDisposable
         _transport = mode switch
         {
             TransportMode.DF1   => new DF1Transport(this, portName, baudRate, parity),
-            TransportMode.DH485 => throw new NotImplementedException("DH485 transport support is planned for a future release"),
+            TransportMode.UIC   => new DF1Transport(this, portName, 19200, Parity.None)
+            {
+                CheckSum = CheckSumOptions.Crc
+            },
             TransportMode.EIP   => new EIPTransport(this, eipPort),
             _                   => throw new ArgumentException($"Unknown emulator mode: {mode}")
         };

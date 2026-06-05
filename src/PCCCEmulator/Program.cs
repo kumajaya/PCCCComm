@@ -110,7 +110,7 @@ class Program
         var emulatorMode = mode switch
         {
             "df1" => PCCCEmulator.TransportMode.DF1,
-            "dh485" => PCCCEmulator.TransportMode.DH485,
+            "uic" => PCCCEmulator.TransportMode.UIC,
             "eip" => PCCCEmulator.TransportMode.EIP,
             _ => PCCCEmulator.TransportMode.DF1
         };
@@ -146,12 +146,12 @@ class Program
                 Console.WriteLine($"      Node ID   : {node}");
                 Console.WriteLine($"      Checksum  : {emulator.CheckSum}");
             }
-            else if (emulatorMode == PCCCEmulator.TransportMode.DH485)
+            else if (emulatorMode == PCCCEmulator.TransportMode.UIC)
             {
                 Console.WriteLine($"      Port      : {portName}");
-                Console.WriteLine($"      Baud rate : 19200 (fixed for DH485)");
+                Console.WriteLine($"      Baud rate : 19200 (fixed for 1747-UIC)");
                 Console.WriteLine($"      Node ID   : {node}");
-                Console.WriteLine($"      Status    : Not yet implemented");
+                Console.WriteLine($"      Protocol  : DF1 encapsulated to DH485 via UIC");
             }
             else if (emulatorMode == PCCCEmulator.TransportMode.EIP)
             {
@@ -198,7 +198,7 @@ class Program
         Console.WriteLine();
         Console.WriteLine("Transport Modes:");
         Console.WriteLine("  df1    - Serial DF1 full-duplex (default, fully implemented)");
-        Console.WriteLine("  dh485  - DH485 via serial (future)");
+        Console.WriteLine("  uic    - DH485 via 1747-UIC (implemented)");
         Console.WriteLine("  eip    - EtherNet/IP (EIP/PCCC) via TCP (implemented)");
     }
 }
