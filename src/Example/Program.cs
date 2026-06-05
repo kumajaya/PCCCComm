@@ -70,7 +70,7 @@ class Program
             RecordSuccess();
             return result;
         }
-        catch (Comm.DF1Exception ex)
+        catch (Comm.PCCCException ex)
         {
             if (ex.Message.Contains("NAK")) RecordNak();
             else if (ex.Message.Contains("No Response") || ex.Message.Contains("Timeout")) RecordTimeout();
@@ -327,7 +327,7 @@ class Program
                             Console.WriteLine($"  {count} reads completed. Last value: {displayValue}");
                         }
                     }
-                    catch (Comm.DF1Exception ex)
+                    catch (Comm.PCCCException ex)
                     {
                         if (ex.Message.Contains("NAK")) RecordNak();
                         else if (ex.Message.Contains("No Response")) RecordTimeout();
@@ -464,7 +464,7 @@ class Program
                                 break;
                         }
                     }
-                    catch (Comm.DF1Exception ex)
+                    catch (Comm.PCCCException ex)
                     {
                         Console.WriteLine($"PCCC Error: {ex.Message}");
                     }

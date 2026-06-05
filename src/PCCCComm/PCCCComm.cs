@@ -99,8 +99,9 @@ public class PCCCComm : IDisposable
         set
         {
             if (value != "DF1")
-                System.Diagnostics.Debug.WriteLine($"Warning: Protocol '{value}' is not supported. Using DF1.");
-            m_Protocol = "DF1";
+                throw new NotSupportedException($"Protocol '{value}' is not supported. " + 
+                        "Only 'DF1' is supported in this version.");
+            m_Protocol = value;
         }
     }
 
@@ -132,7 +133,12 @@ public class PCCCComm : IDisposable
     public int ResponseTimeoutMs
     {
         get => responseTimeoutMs;
-        set => responseTimeoutMs = value > 0 ? value : 2000;
+        set
+        {
+            responseTimeoutMs = value > 0 ? value : 2000;
+            if (_currentTransport is DF1Transport df1)
+                df1.MaxTicks = responseTimeoutMs / 20;  // each tick = 20 ms
+        }
     }
 
     /// <summary>Event arguments for file progress during upload/download.</summary>
@@ -178,7 +184,7 @@ public class PCCCComm : IDisposable
         if (_currentTransport is DF1Transport df1)
         {
             df1.ChecksumType = m_CheckSum;
-
+            df1.MaxTicks = responseTimeoutMs / 20; // Sync timeout
             // Forward raw frame events if the transport is DF1Transport
             df1.RawFrameSent += ForwardRawFrameSent;
             df1.RawFrameReceived += ForwardRawFrameReceived;
@@ -198,7 +204,7 @@ public class PCCCComm : IDisposable
         else { data[0] = 6; func = 0x80; }
         int reply = PrefixAndSend(0xF, func, data, true, out _);
         if (reply != 0)
-            throw new PCCCCommException("Failed to change to Run mode, Check PLC Key switch - " + MessageDecoder.DecodeMessage(reply));
+            throw new PCCCException("Failed to change to Run mode, Check PLC Key switch - " + MessageDecoder.DecodeMessage(reply));
     }
 
     /// <summary>Set CPU mode (PLC‑5 / MicroLogix).</summary>
@@ -241,7 +247,7 @@ public class PCCCComm : IDisposable
         else { data[0] = 1; func = 0x80; }
         int reply = PrefixAndSend(0xF, func, data, true, out _);
         if (reply != 0)
-            throw new PCCCCommException("Failed to change to Program mode, Check PLC Key switch - " + MessageDecoder.DecodeMessage(reply));
+            throw new PCCCException("Failed to change to Program mode, Check PLC Key switch - " + MessageDecoder.DecodeMessage(reply));
     }
 
     /// <summary>Read the processor type code (e.g., 0x49 for SLC 5/03).</summary>
@@ -250,7 +256,7 @@ public class PCCCComm : IDisposable
         byte[] data = Array.Empty<byte>();
         int reply = PrefixAndSend(6, 3, data, true, out int rTNS);
         if (reply != 0)
-            throw new PCCCCommException("GetProcessorType failed: " + MessageDecoder.DecodeMessage(reply));
+            throw new PCCCException("GetProcessorType failed: " + MessageDecoder.DecodeMessage(reply));
 
         if (_dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt) && pkt.Length > 9)
         {
@@ -258,7 +264,7 @@ public class PCCCComm : IDisposable
             return ProcessorType;
         }
 
-        throw new PCCCCommException("GetProcessorType: response packet too short or missing");
+        throw new PCCCException("GetProcessorType: response packet too short or missing");
     }
 
     /// <summary>Get raw Diagnostic Status payload (CMD 0x06 FNC 0x03).</summary>
@@ -271,6 +277,8 @@ public class PCCCComm : IDisposable
 
         if (_dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt) && pkt.Length > 6)
         {
+            // Guard: if status byte (STS) is non-zero, the request failed
+            if (pkt[3] != 0) return null;
             int dataLen = pkt.Length - 6;
             if (dataLen <= 0) return Array.Empty<byte>();
             var result = new byte[dataLen];
@@ -284,7 +292,7 @@ public class PCCCComm : IDisposable
     public string[] ReadAny(string startAddress, int numberOfElements)
     {
         DataAddress p = AddressParser.Parse(startAddress);
-        if (p.FileType == 0) throw new PCCCCommException("Invalid Address");
+        if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
         short arrayElements = (short)(numberOfElements - 1);
         if (arrayElements < 0) arrayElements = 0;
@@ -319,7 +327,7 @@ public class PCCCComm : IDisposable
                 retries++;
                 continue;
             }
-            throw new PCCCCommException(MessageDecoder.DecodeMessage(reply));
+            throw new PCCCException(MessageDecoder.DecodeMessage(reply));
         }
 
         string[] result = new string[arrayElements + 1];
@@ -397,18 +405,18 @@ public class PCCCComm : IDisposable
     public int ReadModifyWrite(string[] addresses, ushort[] andMasks, ushort[] orMasks)
     {
         if (addresses == null || addresses.Length == 0)
-            throw new PCCCCommException("ReadModifyWrite: number of sets must be non-zero.");
+            throw new PCCCException("ReadModifyWrite: number of sets must be non-zero.");
         if (andMasks == null || orMasks == null)
-            throw new PCCCCommException("ReadModifyWrite: andMasks and orMasks cannot be null.");
+            throw new PCCCException("ReadModifyWrite: andMasks and orMasks cannot be null.");
         if (addresses.Length != andMasks.Length || addresses.Length != orMasks.Length)
-            throw new PCCCCommException("ReadModifyWrite: addresses, andMasks, and orMasks must have the same length.");
+            throw new PCCCException("ReadModifyWrite: addresses, andMasks, and orMasks must have the same length.");
 
         DataAddress[] parsed = new DataAddress[addresses.Length];
         for (int i = 0; i < addresses.Length; i++)
         {
             parsed[i] = AddressParser.Parse(addresses[i]);
             if (parsed[i].FileType == 0)
-                throw new PCCCCommException($"ReadModifyWrite: invalid address '{addresses[i]}'.");
+                throw new PCCCException($"ReadModifyWrite: invalid address '{addresses[i]}'.");
         }
 
         byte[] body = PacketBuilder.BuildReadModifyWriteBody(parsed, andMasks, orMasks);
@@ -434,7 +442,7 @@ public class PCCCComm : IDisposable
             for (int i = 0; i < numberOfElements; i++)
             {
                 if (dataToWrite[i] > 32767 || dataToWrite[i] < -32768)
-                    throw new PCCCCommException("Integer data out of range, must be between -32768 and 32767");
+                    throw new PCCCException("Integer data out of range, must be between -32768 and 32767");
                 converted[i * 2] = (byte)(dataToWrite[i] & 0xFF);
                 converted[i * 2 + 1] = (byte)((dataToWrite[i] >> 8) & 0xFF);
             }
@@ -459,7 +467,7 @@ public class PCCCComm : IDisposable
             for (int i = 0; i < numberOfElements; i++)
             {
                 if (dataToWrite[i] > 2147483647 || dataToWrite[i] < -2147483648)
-                    throw new PCCCCommException("Integer data out of range, must be between -2147483648 and 2147483647");
+                    throw new PCCCException("Integer data out of range, must be between -2147483648 and 2147483647");
                 BitConverter.GetBytes((int)dataToWrite[i]).CopyTo(converted, i * 4);
             }
         }
@@ -468,7 +476,7 @@ public class PCCCComm : IDisposable
             for (int i = 0; i < numberOfElements; i++)
             {
                 if (dataToWrite[i] > 32767 || dataToWrite[i] < -32768)
-                    throw new PCCCCommException("Integer data out of range, must be between -32768 and 32767");
+                    throw new PCCCException("Integer data out of range, must be between -32768 and 32767");
                 converted[i * 2] = (byte)((int)dataToWrite[i] & 0xFF);
                 converted[i * 2 + 1] = (byte)(((int)dataToWrite[i] >> 8) & 0xFF);
             }
@@ -534,12 +542,12 @@ public class PCCCComm : IDisposable
     {
         var pAddr = new DataAddress { FileNumber = 0, FileType = 2, Element = 0x2F };
         byte[] data = ReadRawData(pAddr, 2, out int reply);
-        if (reply != 0) throw new PCCCCommException(MessageDecoder.DecodeMessage(reply) + " - Failed to get data table list");
+        if (reply != 0) throw new PCCCException(MessageDecoder.DecodeMessage(reply) + " - Failed to get data table list");
 
         int fzSize = data[0] + data[1] * 256;
         pAddr.Element = 0; pAddr.SubElement = 0;
         byte[] fzd = ReadRawData(pAddr, fzSize, out reply);
-        if (reply != 0) throw new PCCCCommException(MessageDecoder.DecodeMessage(reply) + " - Failed to get data table list");
+        if (reply != 0) throw new PCCCException(MessageDecoder.DecodeMessage(reply) + " - Failed to get data table list");
 
         var list = new List<DataFileDetails>();
         int filePosition = 143, idx = 0;
@@ -565,7 +573,7 @@ public class PCCCComm : IDisposable
         int reply = PrefixAndSend(0xF, 0xA2, data, true, out int rTNS);
         if (reply == 0 && _dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt) && pkt.Length > 6)
             return pkt[6] > 0 ? pkt[6] - 1 : 0;
-        throw new PCCCCommException("Failed to get Slot Count - " + MessageDecoder.DecodeMessage(reply));
+        throw new PCCCException("Failed to get Slot Count - " + MessageDecoder.DecodeMessage(reply));
     }
 
     public IOConfig[] GetIOConfig()
@@ -577,18 +585,18 @@ public class PCCCComm : IDisposable
     public IOConfig[] GetSLCIOConfig()
     {
         int slots = GetSlotCount();
-        if (slots <= 0) throw new PCCCCommException("Failed to get Slot Count");
+        if (slots <= 0) throw new PCCCException("Failed to get Slot Count");
         byte[] data = { (byte)(4 + (slots + 1) * 6 + 2), 0, 0x60, 0, 0 };
         int reply = PrefixAndSend(0xF, 0xA2, data, true, out int rTNS);
-        if (reply != 0) throw new PCCCCommException("Failed to get IO Config - " + MessageDecoder.DecodeMessage(reply));
+        if (reply != 0) throw new PCCCException("Failed to get IO Config - " + MessageDecoder.DecodeMessage(reply));
 
         var result = new IOConfig[slots + 1];
         if (!_dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt))
-            throw new PCCCCommException("No IO Config data returned from PLC.");
+            throw new PCCCException("No IO Config data returned from PLC.");
         for (int i = 0; i <= slots; i++)
         {
             if (i * 6 + 15 >= pkt.Length)
-                throw new PCCCCommException($"IO Config packet too short for slot {i}.");
+                throw new PCCCException($"IO Config packet too short for slot {i}.");
             result[i].InputBytes  = pkt[i * 6 + 10];
             result[i].OutputBytes = pkt[i * 6 + 12];
             result[i].CardCode    = BitConverter.ToInt16(new byte[] { pkt[i * 6 + 14], pkt[i * 6 + 15] }, 0);
@@ -600,10 +608,10 @@ public class PCCCComm : IDisposable
     {
         byte[] data = { 4, 0, 0x62, 0, 0 };
         int reply = PrefixAndSend(0xF, 0xA2, data, true, out int rTNS);
-        if (reply != 0) throw new PCCCCommException("Failed to get IO Config for ML1500 - " + MessageDecoder.DecodeMessage(reply));
+        if (reply != 0) throw new PCCCException("Failed to get IO Config for ML1500 - " + MessageDecoder.DecodeMessage(reply));
 
         if (!_dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt0) || pkt0.Length <= 6)
-            throw new PCCCCommException("Failed to get IO Config for ML1500 - response too short");
+            throw new PCCCException("Failed to get IO Config for ML1500 - response too short");
         int fzSize = pkt0[6] * 2;
         byte[] fzd = new byte[fzSize + 1];
         int filePosition = 0, subElement = 0;
@@ -636,7 +644,7 @@ public class PCCCComm : IDisposable
         for (int s = 1; s <= slotCount; s++)
         {
             if (idx + 19 >= fzd.Length)
-                throw new PCCCCommException($"ML1500 IO Config data too short for slot {s}.");
+                throw new PCCCException($"ML1500 IO Config data too short for slot {s}.");
             result[s].InputBytes = fzd[idx + 2] * 2;
             result[s].OutputBytes = fzd[idx + 8] * 2;
             result[s].CardCode = BitConverter.ToInt16(new byte[] { fzd[idx + 18], fzd[idx + 19] }, 0);
@@ -650,7 +658,7 @@ public class PCCCComm : IDisposable
             result[0].InputBytes  = basePkt[10];
             result[0].OutputBytes = basePkt[12];
         }
-        else throw new PCCCCommException("Failed to get Base IO Config for ML1500 - " + MessageDecoder.DecodeMessage(reply));
+        else throw new PCCCException("Failed to get Base IO Config for ML1500 - " + MessageDecoder.DecodeMessage(reply));
 
         return result;
     }
@@ -712,7 +720,7 @@ public class PCCCComm : IDisposable
                 {
                     pf.Data = ReadRawData(addr, pf.NumberOfBytes, out int reply);
                     if (reply != 0 && reply != 0x50)
-                        throw new PCCCCommException("Failed to Read Program File " + addr.FileNumber +
+                        throw new PCCCException("Failed to Read Program File " + addr.FileNumber +
                                             ", Type " + addr.FileType + " - " + MessageDecoder.DecodeMessage(reply));
                     if (reply == 0x50)
                         pf.Data = Array.Empty<byte>();
@@ -780,7 +788,7 @@ public class PCCCComm : IDisposable
                 case 0x49:
                     pAddr.FileType = 0x63; pAddr.Element = 0;
                     byte[] four = ReadRawData(pAddr, 4, out int r4);
-                    if (r4 != 0) throw new PCCCCommException("Failed to Read File 0, Type 63h - " + MessageDecoder.DecodeMessage(r4));
+                    if (r4 != 0) throw new PCCCException("Failed to Read File 0, Type 63h - " + MessageDecoder.DecodeMessage(r4));
                     Array.Copy(four, 0, data, 8, 4);
                     pAddr.FileType = 1; pAddr.Element = 0x23;
                     data[1] = 0x0A; data[3] = 4;
@@ -802,17 +810,17 @@ public class PCCCComm : IDisposable
             data[data.Length - 1] = 0x56;
 
             int reply = PrefixAndSend(0xF, 0x88, data, true, out _);
-            if (reply != 0) throw new PCCCCommException("Failed to Initialize for Download - " + MessageDecoder.DecodeMessage(reply));
+            if (reply != 0) throw new PCCCException("Failed to Initialize for Download - " + MessageDecoder.DecodeMessage(reply));
 
             byte[] empty = Array.Empty<byte>();
 
             reply = PrefixAndSend(0xF, 0x11, empty, true, out _);
-            if (reply != 0) throw new PCCCCommException("Failed to Secure Sole Access - " + MessageDecoder.DecodeMessage(reply));
+            if (reply != 0) throw new PCCCException("Failed to Secure Sole Access - " + MessageDecoder.DecodeMessage(reply));
 
             pAddr.BitNumber = 16;
             byte[] data3 = { (byte)(plcFiles[0].Data.Length & 0xFF), (byte)((plcFiles[0].Data.Length >> 8) & 0xFF) };
             reply = WriteRawData(pAddr, 2, data3);
-            if (reply != 0) throw new PCCCCommException("Failed to Write Directory Length - " + MessageDecoder.DecodeMessage(reply));
+            if (reply != 0) throw new PCCCException("Failed to Write Directory Length - " + MessageDecoder.DecodeMessage(reply));
 
             totalBytesTransferred += 2;
             filesCompleted = 1;
@@ -829,7 +837,7 @@ public class PCCCComm : IDisposable
 
             pAddr.Element = 0;
             reply = WriteRawData(pAddr, plcFiles[0].Data.Length, plcFiles[0].Data);
-            if (reply != 0) throw new PCCCCommException("Failed to Write New Program Directory - " + MessageDecoder.DecodeMessage(reply));
+            if (reply != 0) throw new PCCCException("Failed to Write New Program Directory - " + MessageDecoder.DecodeMessage(reply));
 
             totalBytesTransferred += plcFiles[0].Data.Length;
             filesCompleted++;
@@ -853,7 +861,7 @@ public class PCCCComm : IDisposable
                 pAddr.BitNumber = 16;
 
                 reply = WriteRawData(pAddr, plcFiles[i].Data.Length, plcFiles[i].Data);
-                if (reply != 0) throw new PCCCCommException("Failed when writing files to PLC - " + MessageDecoder.DecodeMessage(reply));
+                if (reply != 0) throw new PCCCException("Failed when writing files to PLC - " + MessageDecoder.DecodeMessage(reply));
 
                 totalBytesTransferred += plcFiles[i].Data?.Length ?? 0;
                 filesCompleted++;
@@ -870,10 +878,10 @@ public class PCCCComm : IDisposable
             }
 
             reply = PrefixAndSend(0xF, 0x52, empty, true, out _);
-            if (reply != 0) throw new PCCCCommException("Failed to Indicate to PLC that Download is complete - " + MessageDecoder.DecodeMessage(reply));
+            if (reply != 0) throw new PCCCException("Failed to Indicate to PLC that Download is complete - " + MessageDecoder.DecodeMessage(reply));
 
             reply = PrefixAndSend(0xF, 0x12, empty, true, out _);
-            if (reply != 0) throw new PCCCCommException("Failed to Release Sole Access - " + MessageDecoder.DecodeMessage(reply));
+            if (reply != 0) throw new PCCCException("Failed to Release Sole Access - " + MessageDecoder.DecodeMessage(reply));
         }
         finally
         {
@@ -978,13 +986,15 @@ public class PCCCComm : IDisposable
             transport.FrameReceived += OnFrameReceived;
             transport.RawFrameSent += ForwardRawFrameSent;
             transport.RawFrameReceived += ForwardRawFrameReceived;
+            // Sync timeout to transport ticks
+            transport.MaxTicks = responseTimeoutMs / 20;
             transport.Open();
             _currentTransport = transport;
             return 0;
         }
         catch (Exception ex)
         {
-            throw new PCCCCommException("Failed To Open " + m_ComPort + ". " + ex.Message);
+            throw new PCCCException("Failed To Open " + m_ComPort + ". " + ex.Message);
         }
     }
 
@@ -1081,6 +1091,9 @@ public class PCCCComm : IDisposable
         return -8;
     }
 
+    // DF1 protocol limits (Publication 1770-6.5.16)
+    private const int MaxReadPayloadBytes = 236;
+    private const int MaxWritePayloadBytes = 164;
     private byte[] ReadRawData(DataAddress pAddr, int numberOfBytes, out int reply)
     {
         reply = 0;
@@ -1089,7 +1102,7 @@ public class PCCCComm : IDisposable
 
         while (filePosition < numberOfBytes && reply == 0)
         {
-            int toRead = numberOfBytes - filePosition < 236 ? numberOfBytes - filePosition : 236;
+            int toRead = Math.Min(numberOfBytes - filePosition, MaxReadPayloadBytes);
             if (toRead > 168 && pAddr.FileType == 0x8D) toRead = 168;
             if (toRead > 234 && (pAddr.FileType == 0x86 || pAddr.FileType == 0x87)) toRead = 234;
             if (toRead > 0x78 && pAddr.FileType == 0xA4) toRead = 0x78;
@@ -1118,7 +1131,7 @@ public class PCCCComm : IDisposable
 
         while (filePosition < numberOfBytes && reply == 0)
         {
-            int toWrite = numberOfBytes - filePosition < 164 ? numberOfBytes - filePosition : 164;
+            int toWrite = Math.Min(numberOfBytes - filePosition, MaxWritePayloadBytes);
             if (p.FileType >= 0xA1 && toWrite > 0x78) toWrite = 0x78;
 
             byte[] body = PacketBuilder.BuildWriteRequestBody(p, dataToWrite, filePosition, toWrite, out int func);
@@ -1129,7 +1142,7 @@ public class PCCCComm : IDisposable
         }
 
         if (reply == 0) return 0;
-        throw new PCCCCommException(MessageDecoder.DecodeMessage(reply));
+        throw new PCCCException(MessageDecoder.DecodeMessage(reply));
     }
 
     private byte[] ReadFileDirectory()
@@ -1144,12 +1157,12 @@ public class PCCCComm : IDisposable
         }
 
         byte[] data = ReadRawData(pAddr, 2, out int reply);
-        if (reply != 0) throw new PCCCCommException("Failed to Get Program Directory Size - " + MessageDecoder.DecodeMessage(reply));
+        if (reply != 0) throw new PCCCException("Failed to Get Program Directory Size - " + MessageDecoder.DecodeMessage(reply));
 
         pAddr.Element = 0;
         int size = data[0] + data[1] * 256;
         byte[] fzd = ReadRawData(pAddr, size, out reply);
-        if (reply != 0) throw new PCCCCommException("Failed to Get Program Directory - " + MessageDecoder.DecodeMessage(reply));
+        if (reply != 0) throw new PCCCException("Failed to Get Program Directory - " + MessageDecoder.DecodeMessage(reply));
         return fzd;
     }
 
@@ -1193,7 +1206,8 @@ public class PCCCComm : IDisposable
         // Raise DataReceived if this is a reply (CMD > 31)
         if (innerFrame.Length > 2 && innerFrame[2] > 31)
         {
-            if (!DisableEvent)
+            // Truly unsolicited, not a reply to our own request
+            if (!DisableEvent && !_responseEvents.ContainsKey(tns))
                 DataReceived?.Invoke(this, EventArgs.Empty);
         }
         // Handle unsolicited message (CMD=0x0F, FUNC=0xAA)
@@ -1225,14 +1239,4 @@ public class PCCCComm : IDisposable
     {
         CloseComms();
     }
-}
-
-/// <summary>
-/// Exception thrown by the PCCCComm library.
-/// </summary>
-public class PCCCCommException : Exception
-{
-    public PCCCCommException() { }
-    public PCCCCommException(string message) : base(message) { }
-    public PCCCCommException(string message, Exception inner) : base(message, inner) { }
 }

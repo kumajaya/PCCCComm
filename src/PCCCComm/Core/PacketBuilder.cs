@@ -309,7 +309,7 @@ public static class PacketBuilder
 
             // Per AB spec and libpccc: total data must not exceed 243 bytes
             if (body.Count > 243)
-                throw new DF1Exception($"ReadModifyWrite: set {i + 1} exceeded maximum command size of 243 bytes.");
+                throw new PCCCException($"ReadModifyWrite: set {i + 1} exceeded maximum command size of 243 bytes.");
         }
 
         return body.ToArray();

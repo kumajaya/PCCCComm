@@ -22,13 +22,12 @@
 namespace PCCCComm;
 
 /// <summary>
-/// Custom exception for DF1 library errors.
+/// Checksum selection for DF1 frames.
+/// CRC-16/ARC (init=0x0000, poly=0xA001) as AB DF1 spec
+/// BCC uses two's complement of sum.
 /// </summary>
-public class DF1Exception : Exception
+public enum CheckSumOptions
 {
-    public DF1Exception() { }
-
-    public DF1Exception(string message) : base(message) { }
-
-    public DF1Exception(string message, Exception inner) : base(message, inner) { }
+    Crc = 0,
+    Bcc = 1
 }

@@ -57,7 +57,7 @@ public class DF1Transport : ITransport
 
     private CheckSumOptions _checksumType = CheckSumOptions.Crc;
     private int _sleepDelay = 0;                // backoff after NAK (helps with USB converters)
-    private volatile bool _lastResponseWasNAK = false;
+    private bool _lastResponseWasNAK = false;
 
     // ACK/NAK polling flags (used during SendFrame)
     private volatile bool _ackReceived;
@@ -278,6 +278,7 @@ public class DF1Transport : ITransport
 
         byte[]? pduToDeliver = null;
         bool enqReceived = false;
+        bool respondWithNak = false;
 
         lock (_rxLock)
         {
@@ -422,6 +423,7 @@ public class DF1Transport : ITransport
                 _rxBuffer.RemoveAt(0);
                 consumed = true;
             }
+            respondWithNak = _lastResponseWasNAK;   // capture inside lock
         }
 
         // Raise events outside the lock to avoid blocking the serial receive thread
@@ -430,7 +432,7 @@ public class DF1Transport : ITransport
             // The DF1 specification requires responding to ENQ with the status
             // of the last received frame. We send ACK if the last frame was valid,
             // otherwise NAK. This matches the original VB behavior.
-            SendControl(_lastResponseWasNAK ? NAK : ACK);
+            SendControl(respondWithNak ? NAK : ACK);
         }
         if (pduToDeliver != null)
         {

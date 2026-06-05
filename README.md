@@ -25,8 +25,8 @@ PCCCComm/
 ├── src/
 │   ├── PCCCComm/                   # Core library (DF1 + EIP transport)
 │   │   ├── PCCCComm.cs
-│   │   ├── PCCCCommOptions.cs
-│   │   ├── PCCCCommException.cs
+│   │   ├── PCCCOptions.cs
+│   │   ├── PCCCException.cs
 │   │   ├── Models.cs
 │   │   ├── Core/
 │   │   │   ├── ITransport.cs
