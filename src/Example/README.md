@@ -1,13 +1,13 @@
-# DF1Comm Example Client
+# PCCCComm Example Client
 
 **Purpose**  
-Enhanced DF1 client for testing `DF1Comm` against a real PLC or the DF1Emulator. Supports a demo sequence, interactive CLI, communication statistics, and stress testing.
+Enhanced PCCC client for testing `PCCCComm` against a real PLC or the PCCCEmulator. Supports a demo sequence, interactive CLI, communication statistics, and stress testing.
 
 > **⚠️ CAUTION – REAL PLC HAZARD**  
 > This example client **writes data** to the connected PLC (N7, F8, B3, and mode switching).  
 > Running the demo on a **real PLC** will modify its memory and may affect machine operation.  
 > **Only use with a real PLC if you fully understand the consequences.**  
-> For safe testing, use the [DF1Emulator](../DF1Emulator) instead.
+> For safe testing, use the [PCCCEmulator](../PCCCEmulator) instead.
 
 ## Features
 - Reads processor type (Get Status, CMD 0x06 FNC 0x03)
@@ -21,16 +21,16 @@ Enhanced DF1 client for testing `DF1Comm` against a real PLC or the DF1Emulator.
 - **Stress test mode** – continuous read loop with configurable iteration count
 - Configurable serial settings (port, baud, parity, node IDs, checksum)
 
-![Example client](Assets/Screenshots/Example.png)
+![Example client](Images/Screenshots/Example.png)
 
-*Example client stress test on DF1Emulator*
+*Example client stress test on PCCCEmulator*
 
 ## Requirements
 - .NET 8 SDK or later
-- `DF1Comm` library (referenced via project or DLL)
+- `PCCCComm` library (referenced via project or DLL)
 - A DF1 target – either:
   - A real SLC 5/03 or MicroLogix PLC with DF1 port
-  - The **DF1Emulator** (standalone emulator) connected via virtual serial pair
+  - The **PCCCEmulator** (standalone emulator) connected via virtual serial pair
 
 ## Build
 
@@ -39,8 +39,8 @@ Enhanced DF1 client for testing `DF1Comm` against a real PLC or the DF1Emulator.
 dotnet build -c Release Example.csproj
 ```
 
-### If `DF1Comm` is a separate project in the same solution
-Ensure the solution includes both `DF1Comm.csproj` and `Example.csproj` with a `ProjectReference`.
+### If `PCCCComm` is a separate project in the same solution
+Ensure the solution includes both `PCCCComm.csproj` and `Example.csproj` with a `ProjectReference`.
 
 ## Run
 
@@ -83,13 +83,13 @@ If the specified port is not found, the client will display a list of available 
 > ```
 ```
 
-### Example with DF1Emulator (virtual pair)
+### Example with PCCCEmulator (virtual pair)
 
 **Windows** (using com0com):
 1. Create a virtual COM pair, e.g. `COM1` ↔ `COM2`.
 2. Start the emulator on `COM2`:
    ```bash
-   dotnet run --project DF1Emulator.csproj -- COM2 --checksum crc
+   dotnet run --project PCCCEmulator.csproj -- COM2 --checksum crc
    ```
 3. In another terminal, run the example client on `COM1`:
    ```bash
@@ -103,7 +103,7 @@ If the specified port is not found, the client will display a list of available 
    ```
 2. Start the emulator on `/dev/ttyV0`:
    ```bash
-   dotnet run --project ../DF1Emulator/DF1Emulator.csproj -- ttyV0 --checksum crc
+   dotnet run --project ../PCCCEmulator/PCCCEmulator.csproj -- ttyV0 --checksum crc
    ```
 3. In another terminal, run the example client on `/dev/ttyV1`:
    ```bash
@@ -208,11 +208,11 @@ DF1>
 | `Illegal Command or Format` | The target may not support the addressed file/element. Check file numbers and element bounds. |
 | `Processor is in Program mode` | Normal – some commands are restricted. Use `setrun` in the CLI or `SetRunMode()` to change. |
 | `Access denied` | Some DF1 targets have command protection. Not supported by this example. |
-| `PrefixAndSend method not found` | `sendhex` uses reflection on a private method. Ensure `DF1Comm` library version matches. |
+| `PrefixAndSend method not found` | `sendhex` uses reflection on a private method. Ensure `PCCCComm` library version matches. |
 
 ## License
-Same as the DF1Comm library.
+Same as the PCCCComm library.
 
 ## See also
-- [DF1Emulator](../DF1Emulator) – standalone emulator for testing
-- [DF1Comm Library Documentation](https://github.com/kumajaya/DF1Comm)
+- [PCCCEmulator](../PCCCEmulator) – standalone emulator for testing
+- [PCCCComm Library Documentation](https://github.com/kumajaya/PCCCComm)

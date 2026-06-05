@@ -22,7 +22,7 @@ using System.Runtime.InteropServices;
 using Comm = PCCCComm;
 
 /// <summary>
-/// Enhanced DF1 client for testing DF1Emulator or real PLCs.
+/// Enhanced PCCC client for testing PCCCEmulator or real PLCs.
 /// Supports interactive CLI, communication statistics, and stress testing.
 /// </summary>
 class Program
@@ -61,7 +61,7 @@ class Program
         Console.WriteLine("Statistics reset.");
     }
 
-    // ─── Helper to execute DF1 operation with statistics ──────────────
+    // ─── Helper to execute PCCC operation with statistics ──────────────
     private static T? Execute<T>(Func<T> action, string errorContext = "")
     {
         try
@@ -92,7 +92,7 @@ class Program
     }
 
     /// <summary>
-    /// Sends a raw DF1 PDU using reflection to call the private PrefixAndSend method.
+    /// Sends a raw PCCC PDU using reflection to call the private PrefixAndSend method.
     /// The TNS bytes in the PDU are ignored; the library generates its own TNS.
     /// </summary>
     private static int SendRawCommand(Comm.PCCCComm df1, byte[] pdu)
@@ -353,7 +353,7 @@ class Program
                 bool interactive = true;
                 while (interactive)
                 {
-                    Console.Write("DF1> ");
+                    Console.Write("PCCC> ");
                     string input = Console.ReadLine()?.Trim() ?? "";
                     if (string.IsNullOrEmpty(input)) continue;
                     string[] parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -466,7 +466,7 @@ class Program
                     }
                     catch (Comm.DF1Exception ex)
                     {
-                        Console.WriteLine($"DF1 Error: {ex.Message}");
+                        Console.WriteLine($"PCCC Error: {ex.Message}");
                     }
                     catch (Exception ex)
                     {
@@ -490,7 +490,7 @@ class Program
 
     static void PrintUsage()
     {
-        Console.WriteLine("DF1 Example Client - Enhanced Explorer");
+        Console.WriteLine("PCCC Example Client - Enhanced Explorer");
         Console.WriteLine();
         Console.WriteLine("Usage:");
         Console.WriteLine("  dotnet run -- [port] [options]");
@@ -513,7 +513,7 @@ class Program
         Console.WriteLine("  read <addr> [cnt]    Read value(s) from address");
         Console.WriteLine("  write <addr> <v...>  Write integer(s) to address");
         Console.WriteLine("  writestring <addr> <text>   Write string to string address (ST)");
-        Console.WriteLine("  sendhex <DST> <CMD> <FNC> [data...]   Send raw DF1 command (hex bytes)");
+        Console.WriteLine("  sendhex <DST> <CMD> <FNC> [data...]   Send raw PCCC command (hex bytes)");
         Console.WriteLine("  mode                 Show current PLC mode (RUN/PROGRAM)");
         Console.WriteLine("  setrun               Switch PLC to RUN mode");
         Console.WriteLine("  setprog              Switch PLC to PROGRAM mode");
@@ -535,7 +535,7 @@ class Program
         Console.WriteLine("  read <address> [count]   - Read 1 or more elements");
         Console.WriteLine("  write <address> <val...> - Write integer values (supports multiple)");
         Console.WriteLine("  writestring <address> <text> - Write string to ST file");
-        Console.WriteLine("  sendhex <DST> <CMD> <FNC> [data...] - Send raw DF1 command (hex)");
+        Console.WriteLine("  sendhex <DST> <CMD> <FNC> [data...] - Send raw PCCC command (hex)");
         Console.WriteLine("  mode                     - Show PLC mode (RUN/PROGRAM)");
         Console.WriteLine("  setrun                   - Set PLC to RUN mode");
         Console.WriteLine("  setprog                  - Set PLC to PROGRAM mode");
