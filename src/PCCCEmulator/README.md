@@ -263,6 +263,158 @@ The emulator simulates a specific SLC 5/03 configuration with the following data
 | 6    | 1746-NI4    | Analog Input   | 4 channels × 2 bytes = 8 bytes  |
 
 ## Project structure
+The following class diagram illustrates the main components and their relationships:
+```mermaid
+classDiagram
+    direction TB
+
+    class ILinkTransport {
+        <<interface>>
+        +Start() void
+        +Stop() void
+        +SendResponse(pdu, clientContext) void
+        +PduReceived event
+        +Name string
+    }
+
+    class PCCCEmulator {
+        <<coordinator>>
+        +CheckSum CheckSumOptions
+        +MyNode int
+        +Mode TransportMode
+        +Start() void
+        +Stop() void
+        +SetLoggingEnabled(bool) void
+        +GetBadPacketsDetected() int
+        +GetTotalPacketsReceived() int
+        +GetFramesProcessed() long
+        -_transport ILinkTransport
+        -_memory PlcMemory
+    }
+
+    class TransportMode {
+        <<enumeration>>
+        DF1
+        UIC
+        EIP
+    }
+
+    class DF1Transport {
+        +CheckSum CheckSumOptions
+        +MyNode int
+        +Start() void
+        +Stop() void
+        +SendResponse(pdu, ctx) void
+        -_emulator PCCCEmulator
+        -SerialPort _port
+        -Channel _rxChannel
+        -byte[] _rxBuffer
+        -int _rxHead, _rxTail, _rxCount
+        -Timer _healthTimer
+    }
+
+    class EIPTransport {
+        +Start() void
+        +Stop() void
+        +SendResponse(pdu, ctx) void
+        -_emulator PCCCEmulator
+        -TcpListener _listener
+        -Dictionary~uint,EIPClient~ _clients
+        -UdpClient _udpListener
+        -Timer _healthTimer
+    }
+
+    class EIPClient {
+        <<sealed>>
+        -EIPTransport _transport
+        -Dictionary~uint,CipConnection~ _connections
+        +ProcessAsync() Task
+        -HandleForwardOpen()
+        -HandleForwardClose()
+        -HandleConnectedSend()
+        -HandleUnconnectedSend()
+        -ExtractAndDispatchPCCC()
+    }
+
+    class CipConnection {
+        <<sealed>>
+        +uint AssignedId
+        +uint OrigConnectionId
+        +ushort SerialNumber
+        +int SequenceNumber
+    }
+
+    class EIPRequestContext {
+        <<sealed>>
+        +EIPClient Client
+        +ulong SenderContext
+        +bool IsConnectedAtReceive
+        +CipConnection Connection
+        +byte[] RequestId
+    }
+
+    class PlcMemory {
+        +ReadRaw(fileType, fileNumber, element, length) byte[]
+        +Write(fileType, fileNumber, element, subElement, length, data) bool
+        +ReadModifyWrite(fileType, fileNumber, element, subElement, mask, data) bool
+        +GetFileSize(fileType, fileNumber) int
+        +GetFileInfo(fileNumber, ...) bool
+        +GetStats(out reads, out writes, out hits, out hitRate) void
+        -Dictionary~(int,int),byte[]~ _files
+        -ReaderWriterLockSlim _rwLock
+        -Dictionary~int,HotFileEntry~ _hotCache
+    }
+
+    class MessageDecoder {
+        <<static>>
+        +CalculateChecksum(data, option) ushort
+        +ApplyDleStuffing(source, dest) int
+        +RemoveDleStuffing(source, dest) int
+        +DecodeMessage(msgNumber) string
+    }
+
+    class Logger {
+        <<static>>
+        +bool Enabled
+        +bool ShowTimestamp
+        +Info(sender, message) void
+        +Hex(sender, prefix, data, length) void
+        +Always(sender, message) void
+        +AlwaysHex(sender, prefix, data, length) void
+        +Warn(sender, message) void
+    }
+
+    class CheckSumOptions {
+        <<enumeration>>
+        Crc
+        Bcc
+    }
+
+    %% Relasi struktural
+    ILinkTransport <|.. DF1Transport : implements
+    ILinkTransport <|.. EIPTransport : implements
+    PCCCEmulator *-- PlcMemory : composition
+    PCCCEmulator o-- ILinkTransport : aggregation
+    PCCCEmulator --> TransportMode : uses
+
+    %% EIP internal
+    EIPTransport *-- EIPClient : manages 1..*
+    EIPClient *-- CipConnection : tracks 1..*
+    EIPClient ..> EIPRequestContext : creates per request
+
+    %% Penggunaan utilitas
+    DF1Transport ..> MessageDecoder : uses
+    DF1Transport ..> CheckSumOptions : uses
+    DF1Transport ..> Logger : logs
+    EIPTransport ..> Logger : logs
+    EIPClient ..> Logger : logs
+    PlcMemory ..> Logger : logs
+    PCCCEmulator ..> Logger : logs
+
+    %% Catatan untuk mode UIC
+    note for DF1Transport "Also used for UIC mode (1747-UIC)\nFixed baud=19200, parity=None, checksum=CRC"
+```
+
 | File              | Description |
 |-------------------|-------------|
 | `Program.cs`      | CLI entry point, argument parsing, usage help |
