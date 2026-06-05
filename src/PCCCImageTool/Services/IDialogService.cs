@@ -1,8 +1,8 @@
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using DF1ProgramTool.Models;
+using PCCCImageTool.Models;
 
-namespace DF1ProgramTool.Services;
+namespace PCCCImageTool.Services;
 
 public interface IDialogService
 {

@@ -1,11 +1,11 @@
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
-using DF1ProgramTool.Services;
-using DF1ProgramTool.ViewModels;
-using DF1ProgramTool.Views;
+using PCCCImageTool.Services;
+using PCCCImageTool.ViewModels;
+using PCCCImageTool.Views;
 
-namespace DF1ProgramTool;
+namespace PCCCImageTool;
 
 public partial class App : Application
 {

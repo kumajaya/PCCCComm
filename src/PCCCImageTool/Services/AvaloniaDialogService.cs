@@ -10,9 +10,9 @@ using Avalonia.Data;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
-using DF1ProgramTool.Models;
+using PCCCImageTool.Models;
 
-namespace DF1ProgramTool.Services;
+namespace PCCCImageTool.Services;
 
 public class AvaloniaDialogService : IDialogService
 {

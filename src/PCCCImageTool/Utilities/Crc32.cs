@@ -1,6 +1,6 @@
 using System;
 
-namespace DF1ProgramTool.Utilities;
+namespace PCCCImageTool.Utilities;
 
 /// <summary>
 /// Small CRC32 helper (IEEE 802.3 polynomial 0xEDB88320).

@@ -6,11 +6,11 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
-using DF1ProgramTool.Utilities;
-using DF1ProgramTool.Models;
+using PCCCImageTool.Utilities;
+using PCCCImageTool.Models;
 using PCCCComm;
 
-namespace DF1ProgramTool.Services;
+namespace PCCCImageTool.Services;
 
 public class ProgramTransferService
 {
@@ -207,7 +207,7 @@ public class ProgramTransferService
         using var br = new BinaryReader(fs, System.Text.Encoding.UTF8, leaveOpen: true);
 
         ushort magic = br.ReadUInt16();
-        if (magic != 0xDF1A) throw new InvalidDataException("Not a DF1ProgramTool file (magic mismatch)");
+        if (magic != 0xDF1A) throw new InvalidDataException("Not a PCCCImageTool file (magic mismatch)");
 
         byte version = br.ReadByte();
         if (version != 1) throw new InvalidDataException($"Unsupported file version: {version} (expected 1)");

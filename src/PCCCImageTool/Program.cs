@@ -2,7 +2,7 @@ using Avalonia;
 using Avalonia.ReactiveUI;
 using System;
 
-namespace DF1ProgramTool;
+namespace PCCCImageTool;
 
 sealed class Program
 {

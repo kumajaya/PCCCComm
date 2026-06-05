@@ -1,6 +1,6 @@
 using System;
 
-namespace DF1ProgramTool.Models;
+namespace PCCCImageTool.Models;
 
 public record PlcInfo(
     int ProcessorType,

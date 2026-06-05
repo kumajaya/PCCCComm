@@ -11,7 +11,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PCCCComm", "src\PCCCComm\PC
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Example", "src\Example\Example.csproj", "{B80907CB-24FA-47E3-BB9C-F239C01C62F2}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DF1ProgramTool", "src\DF1ProgramTool\DF1ProgramTool.csproj", "{E102C9AA-A430-4B5A-A53A-02E1BF754B51}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PCCCImageTool", "src\PCCCImageTool\PCCCImageTool.csproj", "{E102C9AA-A430-4B5A-A53A-02E1BF754B51}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

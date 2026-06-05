@@ -1,4 +1,4 @@
-# DF1ProgramTool – Desktop GUI for PLC Upload/Download
+# PCCCImageTool – Desktop GUI for PLC Upload/Download
 
 **Purpose**  
 Cross‑platform desktop GUI (Avalonia UI) that uploads the complete program from an Allen‑Bradley SLC or MicroLogix PLC to a binary file, and restores it back to a compatible controller. Designed as a lightweight, stand‑alone alternative for program backup and restore without RSLogix.
@@ -8,7 +8,7 @@ Cross‑platform desktop GUI (Avalonia UI) that uploads the complete program fro
 > Running download on a **real PLC** will **erase the existing program** and replace it with the contents of the selected file.  
 > This may cause unexpected machine motion, loss of safety functions, or production downtime.  
 > **Only use this tool on a real PLC if you fully understand the consequences and have a verified backup.**  
-> For safe testing, use the [DF1Emulator](../DF1Emulator) first.
+> For safe testing, use the [PCCCEmulator](../PCCCEmulator) first.
 
 ## Features
 - Automatic **PLC detection** – processor type, family, and run/program mode.
@@ -18,38 +18,38 @@ Cross‑platform desktop GUI (Avalonia UI) that uploads the complete program fro
 - **Supports** SLC 5/01, 5/02, 5/03, 5/04, 5/05 and MicroLogix 1000/1500.
 - **Graphical COM port selection** – baud rate, parity, and node address configurable.
 - **Progress indication** – shows current file being transferred.
-- **Self‑contained** – uses only the DF1Comm library, no external UI dependencies.
+- **Self‑contained** – uses only the PCCCComm library, no external UI dependencies.
 - **⚠️ Download overwrites PLC memory** – use with extreme caution on real hardware
 
 ## Screenshots
 
-![Main Window](Assets/Screenshots/MainWindow.png)
+![Main Window](Images/Screenshots/MainWindow.png)
 
-*Main window after downloading DF1Emulator internal memory*
+*Main window after downloading PCCCEmulator internal memory*
 
-![Compare Results](Assets/Screenshots/CompareResults.png)
+![Compare Results](Images/Screenshots/CompareResults.png)
 
 *Compare dialog showing differences between backup file and PLC memory*
 
 ## Requirements
 - .NET 8 SDK or later
 - Windows / Linux / macOS (serial port support required)
-- For testing without hardware: virtual serial pair + DF1Emulator (included in the same repository)
+- For testing without hardware: virtual serial pair + PCCCEmulator (included in the same repository)
 
 ## Build
 From the repository root:
 ```bash
-dotnet build src/DF1ProgramTool/DF1ProgramTool.csproj
+dotnet build src/PCCCImageTool/PCCCImageTool.csproj
 ```
 
 Or build the whole solution:
 ```bash
-dotnet build DF1Comm.sln
+dotnet build PCCCComm.sln
 ```
 
 ## Run
 ```bash
-dotnet run --project src/DF1ProgramTool
+dotnet run --project src/PCCCImageTool
 ```
 
 **Command line options** – none (all settings are configured in the GUI).
@@ -66,7 +66,7 @@ sudo usermod -a -G dialout $USER
 ### No serial ports detected
 
 On some Linux systems, `SerialPort.GetPortNames()` may return an empty list even when devices are present.  
-DF1ProgramTool detects this and provides a fallback list of typical device names:
+PCCCImageTool detects this and provides a fallback list of typical device names:
 
 - `/dev/ttyS0`   – legacy serial port
 - `/dev/ttyUSB0` – USB‑to‑serial adapter (most common)
@@ -81,19 +81,19 @@ sudo ln -s /dev/ttyUSB1 /dev/ttyS31
 
 Then select `/dev/ttyS31` from the port list in the GUI.
 
-## Testing with the DF1Emulator
+## Testing with the PCCCEmulator
 
 1. Create a virtual serial pair (e.g. `COM1` ↔ `COM2` on Windows, or `ttyV0` ↔ `ttyV1` using `socat` on Linux).
 2. Start the emulator on one end:
    ```bash
-   dotnet run --project src/DF1Emulator -- COM2 --checksum crc
+   dotnet run --project src/PCCCEmulator -- COM2 --checksum crc
    ```
-3. Start DF1ProgramTool and connect to the **other** end (`COM1` or `ttyV1`).
+3. Start PCCCImageTool and connect to the **other** end (`COM1` or `ttyV1`).
 4. Upload, then download – the emulator behaves like a real SLC 5/03.
 
 ## File format
 
-The generated `.bin` file contains a raw DF1 memory snapshot with a comprehensive header and integrity checks:
+The generated `.bin` file contains a raw PCCC memory snapshot with a comprehensive header and integrity checks:
 
 | Offset | Content                                       |
 |--------|-----------------------------------------------|
@@ -116,19 +116,19 @@ The generated `.bin` file contains a raw DF1 memory snapshot with a comprehensiv
 | End    | CRC32 (uint32) of all preceding data          |
 | End+4  | SHA256 (32 bytes) of all preceding data       |
 
-This format is **not compatible** with `.RSS` files from RSLogix; it is intended only for exchange between DF1Comm‑based tools.  
+This format is **not compatible** with `.RSS` files from RSLogix; it is intended only for exchange between PCCC‑based tools.  
 The file includes both CRC32 and SHA256 checksums to detect accidental corruption and intentional tampering.  
 During download, the tool validates the processor type and bulletin against the target PLC to prevent mismatched downloads.
 
 ## Creating Backup Files from APS Archives
 
-DF1ProgramTool reads/writes `.bin` files in its own format.  
+PCCCImageTool reads/writes `.bin` files in its own format.  
 To convert an existing **APS .ACH archive** to this format, use the external converter:
 
 ```bash
-python Tools/ach_to_df1.py DBU550.ACH --out DBU550.bin
+python Tools/ach_to_pccc.py DBU550.ACH --out DBU550.bin
 ```
-The resulting `.bin` file can be downloaded to a real PLC or the DF1Emulator.
+The resulting `.bin` file can be downloaded to a real PLC or the PCCCEmulator.
 
 ## Troubleshooting
 
@@ -150,18 +150,18 @@ The resulting `.bin` file can be downloaded to a real PLC or the DF1Emulator.
 | `Views/MainWindow.axaml` | Main window XAML layout |
 | `ViewModels/MainWindowViewModel.cs` | MVVM logic for communication and transfer |
 | `Models/CompareResult.cs` | Comparison result data structure |
-| `Models/FileTypeHelper.cs` | DF1 file type to string conversion |
+| `Models/FileTypeHelper.cs` | PCCC file type to string conversion |
 | `Models/PlcInfo.cs` | PLC type information |
 | `Services/AvaloniaDialogService.cs` | Dialog service implementation for Avalonia |
-| `Services/FrameDecoder.cs` | DF1 serial frame decoder for logging |
+| `Services/FrameDecoder.cs` | PCCC transport frame decoder for logging |
 | `Services/IDialogService.cs` | Dialog service interface |
 | `Services/PlcIdentifier.cs` | Processor type detection |
 | `Services/ProgramTransferService.cs` | Upload/download and file serialisation |
 | `Utilities/Crc32.cs` | Small CRC32 helper (IEEE 802.3 polynomial 0xEDB88320) |
 
 ## License
-Same as the DF1Comm library (GPLv3+).
+Same as the PCCCComm library (GPLv3+).
 
 ## Contributing
 - Fork, create a feature branch, and open a pull request.
-- Test with both the DF1Emulator and real hardware when possible.
+- Test with both the PCCCEmulator and real hardware when possible.

@@ -3,8 +3,8 @@ using System.Linq;
 using System.Text;
 using System.Collections.Generic;
 
-using DF1ProgramTool.Models;
-namespace DF1ProgramTool.Services;
+using PCCCImageTool.Models;
+namespace PCCCImageTool.Services;
 
 public static class FrameDecoder
 {
@@ -63,7 +63,7 @@ public static class FrameDecoder
             if (elem == 0xFF && data.Length >= idx+2) { elem = data[idx] | (data[idx+1] << 8); idx += 2; }
 
             // size is the number of bytes requested in this transaction — not the total file size.
-            // For large files (e.g. T4=468 bytes) DF1Comm splits into multiple transactions
+            // For large files (e.g. T4=468 bytes) PCCCComm splits into multiple transactions
             // (max 236 bytes each), so size/bpe reflects only this transaction's portion.
             int bpe = FileTypeHelper.GetBytesPerElement(fileType);
             int wordsRequested = size / bpe;

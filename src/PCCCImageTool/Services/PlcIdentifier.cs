@@ -1,9 +1,9 @@
 using System;
 using System.Text;
 using System.Threading.Tasks;
-using DF1ProgramTool.Models;
+using PCCCImageTool.Models;
 
-namespace DF1ProgramTool.Services;
+namespace PCCCImageTool.Services;
 
 public static class PlcIdentifier
 {
@@ -15,7 +15,7 @@ public static class PlcIdentifier
     /// Inner frame layout (WithoutFunc):
     ///   [0]=DST [1]=SRC [2]=CMD [3]=STS [4]=TNS_LO [5]=TNS_HI [6]=DATA[0] ...
     ///
-    /// DF1Comm reads ProcessorType from DataPackets[rTNS][9] = inner[9] = DATA[3].
+    /// PCCCComm reads ProcessorType from DataPackets[rTNS][9] = inner[9] = DATA[3].
     /// payload[3] = 0x49 (SLC 5/03) → ProcessorType = 0x49.
     ///
     /// Payload layout per Publication 1770-6.5.16 Chapter 10 (1747-L532):

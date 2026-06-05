@@ -1,11 +1,11 @@
 using System;
 
-namespace DF1ProgramTool.Models;
+namespace PCCCImageTool.Models;
 
 public static class FileTypeHelper
 {
     /// <summary>
-    /// Returns human-readable name for DF1 file type code.
+    /// Returns human-readable name for PCCC file type code.
     /// Supports SLC, MicroLogix, and common PLC-5 file types.
     /// </summary>
     public static string GetFileTypeName(int fileType)

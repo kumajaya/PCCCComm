@@ -1,6 +1,6 @@
 using System;
 
-namespace DF1ProgramTool.Models;
+namespace PCCCImageTool.Models;
 
 /// <summary>
 /// Result of structure-only comparison (file existence and size)

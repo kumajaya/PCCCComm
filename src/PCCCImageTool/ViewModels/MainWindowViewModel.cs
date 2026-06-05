@@ -10,11 +10,11 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using PCCCComm;
-using DF1ProgramTool.Models;
-using DF1ProgramTool.Services;
+using PCCCImageTool.Models;
+using PCCCImageTool.Services;
 using ReactiveUI;
 
-namespace DF1ProgramTool.ViewModels;
+namespace PCCCImageTool.ViewModels;
 
 public class MainWindowViewModel : ReactiveObject, IDisposable
 {
@@ -286,10 +286,10 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
             .GetName().Version?.ToString() ?? "1.0";
         
         await _dialogService.ShowMessageAsync(
-            "About DF1 Program Transfer Tool",
-            $"DF1 Program Transfer Tool\n" +
+            "About PCCC Image Transfer Tool",
+            $"PCCC Image Transfer Tool\n" +
             $"Version {version}\n\n" +
-            "A simple tool to upload/download SLC/MicroLogix PLC programs via DF1 protocol.\n\n" +
+            "A simple tool to upload/download SLC/MicroLogix PLC programs via supported protocol.\n\n" +
             "© 2026 Ketut Kumajaya, Samator Indo Gas\n\n" +
             "License: GPL-3.0-or-later");
     }

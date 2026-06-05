@@ -1,9 +1,9 @@
 using System;
 using Avalonia.Controls;
 using Avalonia.ReactiveUI;
-using DF1ProgramTool.ViewModels;
+using PCCCImageTool.ViewModels;
 
-namespace DF1ProgramTool.Views;
+namespace PCCCImageTool.Views;
 
 public partial class MainWindow : ReactiveWindow<MainWindowViewModel>
 {

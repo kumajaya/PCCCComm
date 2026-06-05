@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ach_to_df1.py — Convert APS .ACH archive to DF1ProgramTool .bin format
+ach_to_df1.py — Convert APS .ACH archive to PCCCImageTool .bin format
 ==========================================================================
 Reads an SLC 500 .ACH archive (APS / Advanced Programming Software) and
-writes a .bin file in the binary format consumed by DF1ProgramTool's
+writes a .bin file in the binary format consumed by PCCCImageTool's
 DownloadFromFileAsync() / LoadFromFileAndValidate().
 
 Verified against DBU550.ACH (SLC 5/03, 1747-L532E):
@@ -41,7 +41,7 @@ Usage
   # Quiet:
   python ach_to_df1.py DBU550.ACH --quiet
 
-.bin file format (DF1ProgramTool v1)
+.bin file format (PCCCImageTool v1)
 --------------------------------------
   [0x00] uint16  magic = 0xDF1A
   [0x02] uint8   version = 1
@@ -55,7 +55,7 @@ Usage
   ...    int32   fileCount
   per file:
     int32  fileNumber
-    int32  fileType       (DF1 type code)
+    int32  fileType       (PCCC type code)
     int32  numberOfBytes
     int32  dataLength
     N bytes data
@@ -72,7 +72,7 @@ ACH format (reverse-engineered)
     Concatenated LAD data, split by per-LAD byte sizes from PLC directory.
     Remainder bytes after last LAD file are ignored.
 
-APS type codes → DF1 file types:
+APS type codes → PCCC file types:
   0=O(0x8B)  1=I(0x8C)  2=S(0x84)  3=B(0x85)  4=T(0x86)
   5=C(0x87)  6=R(0x88)  7=N(0x89)  8=F(0x8A)
 
@@ -98,7 +98,7 @@ from typing import List, Optional, Tuple, Dict
 DF1BIN_MAGIC   = 0xDF1A
 DF1BIN_VERSION = 1
 
-# APS type code → (DF1 file type code, words per element)
+# APS type code → (PCCC file type code, words per element)
 APS_TYPE_MAP = {
     0: (0x8B, 3),  # O  Output      3 words/elem
     1: (0x8C, 3),  # I  Input       3 words/elem
@@ -170,7 +170,7 @@ SYS1_DATA = bytes([0x00, 0x00])
 @dataclass
 class PlcFileEntry:
     file_number:    int
-    file_type:      int     # DF1 type code
+    file_type:      int     # PCCC type code
     number_of_bytes: int
     data:           bytes
 
@@ -491,7 +491,7 @@ def build_bin(
     ram_kb:       int,
     bulletin:     str,
 ) -> bytes:
-    """Serialise ConversionResult to DF1ProgramTool .bin format.
+    """Serialise ConversionResult to PCCCImageTool .bin format.
     
     The .bin file includes:
       - File 0 (Directory) - reconstructed
@@ -506,7 +506,7 @@ def build_bin(
     sys0 = SYS0_DATA
     sys1 = SYS1_DATA
     
-    # Build complete file list in the order DF1Comm expects:
+    # Build complete file list in the order PCCCComm expects:
     # 1. Directory (file number 0, special type 0)
     # 2. SYS file 0 (file number 0, type 0x01)
     # 3. SYS file 1 (file number 1, type 0x01)
@@ -683,7 +683,7 @@ def _parse_lad_sizes(s: str) -> List[tuple]:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Convert APS .ACH archive to DF1ProgramTool .bin format.",
+        description="Convert APS .ACH archive to PCCCImageTool .bin format.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -692,7 +692,7 @@ def main():
     ap.add_argument("--out", type=Path, default=None,
                     help="Output .bin path (default: <stem>.bin next to source)")
 
-    # PLC metadata — embedded in .bin header; checked by DF1ProgramTool on download
+    # PLC metadata — embedded in .bin header; checked by PCCCImageTool on download
     ap.add_argument("--processor-type", default="0x49",
                     help="Hex processor type e.g. 0x49 for SLC 5/03 (default: 0x49)")
     ap.add_argument("--bulletin", default="5/03",
