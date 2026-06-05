@@ -60,6 +60,8 @@ public class PCCCComm : IDisposable
 
     // Transport abstraction (DF1, EIP, etc.)
     private ITransport? _currentTransport;
+    private readonly string? _eipHost = null;
+    private readonly int    _eipPort  = 0;
 
     // Named methods for forwarding raw frame events (to allow unsubscribe)
     private void ForwardRawFrameSent(object? sender, byte[] data) => RawFrameSent?.Invoke(sender, data);
@@ -90,8 +92,8 @@ public class PCCCComm : IDisposable
         set { if (value != m_Parity) CloseComms(); m_Parity = value; }
     }
 
-    // Protocol property kept for compatibility; only "DF1" is supported.
-    // If set to any other value, a warning is issued and DF1 is used.
+    // Protocol property kept for API compatibility; only "DF1" is supported.
+    // Setting any other value throws NotSupportedException.
     private string m_Protocol = "DF1";
     public string Protocol
     {
@@ -169,6 +171,23 @@ public class PCCCComm : IDisposable
             m_Parity = parity;
         }
         // The transport will be created in OpenComms() to allow property changes before opening.
+    }
+
+    /// <summary>
+    /// Initialises the library with an EIP (EtherNet/IP) transport.
+    /// </summary>
+    /// <param name="host">PLC IP address or hostname.</param>
+    /// <param name="port">EIP port (default 44818).</param>
+    /// <param name="timeoutMs">Timeout for send/receive operations (default 5000 ms).</param>
+    public PCCCComm(string host, int port, int timeoutMs = 5000)
+    {
+        TNS = (ushort)((rnd.Next() & 0x7F) + 1);
+        responseTimeoutMs = timeoutMs;
+        _eipHost = host;
+        _eipPort = port;
+        _currentTransport = new EIPTransport(host, port, timeoutMs);
+        _currentTransport.FrameReceived += OnFrameReceived;
+        // EIPTransport has no checksum type or raw frame diagnostic events.
     }
 
     /// <summary>
@@ -975,9 +994,33 @@ public class PCCCComm : IDisposable
     /// </summary>
     public int OpenComms()
     {
+        // If a transport already exists, ensure it is open.
         if (_currentTransport != null)
-            CloseComms();
+        {
+            if (!_currentTransport.IsOpen)
+                _currentTransport.Open();
+            return 0;
+        }
 
+        // No transport exists. Recreate based on connection type.
+        if (_eipHost != null)
+        {
+            // Reconnect EIP transport (e.g. after CloseComms was called).
+            try
+            {
+                var eip = new EIPTransport(_eipHost, _eipPort, responseTimeoutMs);
+                eip.FrameReceived += OnFrameReceived;
+                eip.Open();
+                _currentTransport = eip;
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                throw new PCCCException($"Failed to connect to {_eipHost}:{_eipPort}. {ex.Message}");
+            }
+        }
+
+        // Fall back to DF1 serial transport.
         try
         {
             var port = new SerialPortWrapper(m_ComPort, m_BaudRate, m_Parity);
@@ -986,7 +1029,6 @@ public class PCCCComm : IDisposable
             transport.FrameReceived += OnFrameReceived;
             transport.RawFrameSent += ForwardRawFrameSent;
             transport.RawFrameReceived += ForwardRawFrameReceived;
-            // Sync timeout to transport ticks
             transport.MaxTicks = responseTimeoutMs / 20;
             transport.Open();
             _currentTransport = transport;
@@ -1064,10 +1106,14 @@ public class PCCCComm : IDisposable
         }
         catch (TimeoutException)
         {
+            if (wait && ev != null)
+                _responseEvents.TryRemove(currentTNS, out _);
             return -3;
         }
         catch (Exception)
         {
+            if (wait && ev != null)
+                _responseEvents.TryRemove(currentTNS, out _);
             return -6;
         }
 
@@ -1213,8 +1259,13 @@ public class PCCCComm : IDisposable
         // Handle unsolicited message (CMD=0x0F, FUNC=0xAA)
         else if (innerFrame.Length > 6 && innerFrame[2] == 0x0F && innerFrame[6] == 0xAA)
         {
-            int replyTns = innerFrame[5] * 256 + innerFrame[4];
-            SendResponse(innerFrame[2] + 0x40, replyTns);
+            // Unsolicited write: send a PCCC reply only for DF1 serial.
+            // EtherNet/IP uses request-response; no explicit reply is needed.
+            if (_currentTransport is DF1Transport)
+            {
+                int replyTns = innerFrame[5] * 256 + innerFrame[4];
+                SendResponse(innerFrame[2] + 0x40, replyTns);
+            }
             UnsolicitedMessageRcvd?.Invoke(this, EventArgs.Empty);
         }
     }

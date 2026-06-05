@@ -57,7 +57,11 @@ class Program
 
     private static void ResetStats()
     {
-        _totalRequests = _successfulRequests = _timeouts = _naks = _otherErrors = 0;
+        Interlocked.Exchange(ref _totalRequests, 0);
+        Interlocked.Exchange(ref _successfulRequests, 0);
+        Interlocked.Exchange(ref _timeouts, 0);
+        Interlocked.Exchange(ref _naks, 0);
+        Interlocked.Exchange(ref _otherErrors, 0);
         Console.WriteLine("Statistics reset.");
     }
 
@@ -95,7 +99,11 @@ class Program
     /// Sends a raw PCCC PDU using reflection to call the private PrefixAndSend method.
     /// The TNS bytes in the PDU are ignored; the library generates its own TNS.
     /// </summary>
-    private static int SendRawCommand(Comm.PCCCComm df1, byte[] pdu)
+    /// <remarks>
+    /// The out parameter rTNS is intentionally ignored; this method only returns the status code.
+    /// Response data is not retrieved here.
+    /// </remarks>
+    private static int SendRawCommand(Comm.PCCCComm pccc, byte[] pdu)
     {
         var method = typeof(Comm.PCCCComm).GetMethod("PrefixAndSend",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
@@ -106,17 +114,18 @@ class Program
         int func    = pdu[6];
         byte[] data = pdu.Length > 7 ? pdu[7..] : Array.Empty<byte>();
 
-        int originalTarget = df1.TargetNode;
-        df1.TargetNode = pdu[0]; // DST dari user
+        int originalTarget = pccc.TargetNode;
+        pccc.TargetNode = pdu[0]; // override target node from user-supplied DST byte
         try
         {
+            // rTNS (args[4]) is an out parameter; we don't need the value.
             object[] args = new object[] { command, func, data, true, 0 };
-            object? resultObj = method.Invoke(df1, args);
+            object? resultObj = method.Invoke(pccc, args);
             return resultObj != null ? (int)resultObj : -1;
         }
         finally
         {
-            df1.TargetNode = originalTarget; // restore
+            pccc.TargetNode = originalTarget; // restore
         }
     }
 
@@ -163,9 +172,13 @@ class Program
     // ─── Main ─────────────────────────────────────────────────────────
     static void Main(string[] args)
     {
+        string transport = "df1";
         string portName = "COM1";
         int baud = 19200;
         Parity parity = Parity.None;
+        string eipHost = "";
+        int eipPort = 44818;
+        int timeoutMs = 5000;
         int targetNode = 1;
         int myNode = 0;
         string checksum = "crc";
@@ -181,6 +194,10 @@ class Program
 
             if (i == 0 && !a.StartsWith("--"))
                 portName = args[i];
+            else if (a == "--transport" && i + 1 < args.Length)
+            {
+                transport = args[++i].ToLowerInvariant();
+            }
             else if (a == "--baud" && i + 1 < args.Length)
             {
                 if (int.TryParse(args[++i], out var b)) baud = b;
@@ -193,6 +210,18 @@ class Program
                     "even" => Parity.Even,
                     _ => Parity.None
                 };
+            }
+            else if (a == "--host" && i + 1 < args.Length)
+            {
+                eipHost = args[++i];
+            }
+            else if (a == "--eip-port" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[++i], out var p)) eipPort = p;
+            }
+            else if (a == "--timeout" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[++i], out var t)) timeoutMs = t;
             }
             else if (a == "--target" && i + 1 < args.Length)
             {
@@ -230,47 +259,67 @@ class Program
             }
         }
 
-        // After parsing portName from arguments, normalize and validate it
-        portName = NormalizePortName(portName);
+        Comm.PCCCComm pccc;
 
-        var df1 = new Comm.PCCCComm(portName, baud, parity)
+        if (transport == "eip")
         {
-            TargetNode = targetNode,
-            MyNode = myNode,
-            CheckSum = checksum == "crc" ? Comm.CheckSumOptions.Crc : Comm.CheckSumOptions.Bcc
-        };
+            if (string.IsNullOrEmpty(eipHost))
+                throw new Exception("EIP mode requires --host <IP>");
+
+            pccc = new Comm.PCCCComm(eipHost, eipPort, timeoutMs)
+            {
+                TargetNode = targetNode,
+                MyNode = myNode
+            };
+            Console.WriteLine($"EIP: Connecting to {eipHost}:{eipPort} (timeout {timeoutMs} ms)");
+        }
+        else // DF1 serial
+        {
+            portName = NormalizePortName(portName);
+            pccc = new Comm.PCCCComm(portName, baud, parity)
+            {
+                TargetNode = targetNode,
+                MyNode = myNode,
+                CheckSum = checksum == "crc" ? Comm.CheckSumOptions.Crc : Comm.CheckSumOptions.Bcc
+            };
+            Console.WriteLine($"DF1: Connecting to {portName} @ {baud} baud, {parity} parity, checksum={pccc.CheckSum}");
+            Console.WriteLine($"MyNode={myNode}, TargetNode={targetNode}");
+        }
 
         try
         {
-            df1.OpenComms();
-            Console.WriteLine($"Connected on {portName}");
-            Console.WriteLine($"Baud={baud}, Parity={parity}, Checksum={df1.CheckSum}");
-            Console.WriteLine($"MyNode={myNode}, TargetNode={targetNode}\n");
+            pccc.OpenComms();
+
+            if (transport == "eip")
+                Console.WriteLine($"EIP session established with {eipHost}:{eipPort}");
+            else
+                Console.WriteLine("DF1 port opened successfully");
+            Console.WriteLine();
 
             if (!interactiveOnly)
             {
-                // ── Demo operations ─────────────────────────────────────
-                int proc = Execute(() => df1.GetProcessorType(), "GetProcessorType");
+                // ── Demo operations (read/write only, no automatic mode change) ──
+                int proc = Execute(() => pccc.GetProcessorType(), "GetProcessorType");
                 Console.WriteLine($"Processor Type: 0x{proc:X2}");
 
                 Console.WriteLine("\n--- Read Operations (Demo) ---");
-                string o0 = Execute(() => df1.ReadAny("O0:0"), "Read O0:0") ?? "";
+                string o0 = Execute(() => pccc.ReadAny("O0:0"), "Read O0:0") ?? "";
                 Console.WriteLine($"O0:0 = {o0}");
-                string i1 = Execute(() => df1.ReadAny("I1:0"), "Read I1:0") ?? "";
+                string i1 = Execute(() => pccc.ReadAny("I1:0"), "Read I1:0") ?? "";
                 Console.WriteLine($"I1:0 = {i1}");
-                ExecuteVoid(() => df1.WriteData("B3:0", 0), "Write B3:0 init");
-                string b3 = Execute(() => df1.ReadAny("B3:0"), "Read B3:0") ?? "";
+                ExecuteVoid(() => pccc.WriteData("B3:0", 0), "Write B3:0 init");
+                string b3 = Execute(() => pccc.ReadAny("B3:0"), "Read B3:0") ?? "";
                 Console.WriteLine($"B3:0 = {b3}");
-                string n7 = Execute(() => df1.ReadAny("N7:0"), "Read N7:0") ?? "";
+                string n7 = Execute(() => pccc.ReadAny("N7:0"), "Read N7:0") ?? "";
                 Console.WriteLine($"N7:0 = {n7}");
-                string f8 = Execute(() => df1.ReadAny("F8:0"), "Read F8:0") ?? "";
+                string f8 = Execute(() => pccc.ReadAny("F8:0"), "Read F8:0") ?? "";
                 Console.WriteLine($"F8:0 = {f8}");
 
-                int mode = Execute(() => df1.GetRunMode(), "GetRunMode");
+                int mode = Execute(() => pccc.GetRunMode(), "GetRunMode");
                 Console.WriteLine(mode == 1 ? "PLC is in RUN mode" : "PLC is in PROGRAM mode");
 
                 Console.WriteLine("\n--- Data Files ---");
-                Comm.DataFileDetails[]? files = Execute(() => df1.GetDataMemory(), "GetDataMemory");
+                Comm.DataFileDetails[]? files = Execute(() => pccc.GetDataMemory(), "GetDataMemory");
                 if (files != null)
                 {
                     foreach (var f in files)
@@ -283,26 +332,22 @@ class Program
 
                 Console.WriteLine("\n--- Write Operations (Demo) ---");
                 Console.WriteLine("Writing 999 to N7:1...");
-                ExecuteVoid(() => df1.WriteData("N7:1", 999), "Write N7:1");
+                ExecuteVoid(() => pccc.WriteData("N7:1", 999), "Write N7:1");
                 Console.WriteLine("Writing 2.718 to F8:1...");
-                ExecuteVoid(() => df1.WriteData("F8:1", 2.718f), "Write F8:1");
+                ExecuteVoid(() => pccc.WriteData("F8:1", 2.718f), "Write F8:1");
                 Console.WriteLine("Setting B3:0/0 = 1...");
-                ExecuteVoid(() => df1.WriteData("B3:0/0", 1), "Write B3:0/0");
+                ExecuteVoid(() => pccc.WriteData("B3:0/0", 1), "Write B3:0/0");
                 Console.WriteLine("Setting B3:0/3 = 1...");
-                ExecuteVoid(() => df1.WriteData("B3:0/3", 1), "Write B3:0/3");
-
-                Console.WriteLine(mode == 1 ? "Switching to PROGRAM mode..." : "Switching to RUN mode...");
-                if (mode == 1) ExecuteVoid(() => df1.SetProgramMode(), "SetProgramMode");
-                else ExecuteVoid(() => df1.SetRunMode(), "SetRunMode");
+                ExecuteVoid(() => pccc.WriteData("B3:0/3", 1), "Write B3:0/3");
 
                 Console.WriteLine("\n--- Read Operations After Write (Demo) ---");
-                n7 = Execute(() => df1.ReadAny("N7:1"), "Read N7:1") ?? "";
+                n7 = Execute(() => pccc.ReadAny("N7:1"), "Read N7:1") ?? "";
                 Console.WriteLine($"N7:1 = {n7}");
-                f8 = Execute(() => df1.ReadAny("F8:1"), "Read F8:1") ?? "";
+                f8 = Execute(() => pccc.ReadAny("F8:1"), "Read F8:1") ?? "";
                 Console.WriteLine($"F8:1 = {f8}");
-                b3 = Execute(() => df1.ReadAny("B3:0"), "Read B3:0") ?? "";
+                b3 = Execute(() => pccc.ReadAny("B3:0"), "Read B3:0") ?? "";
                 Console.WriteLine($"B3:0 = {b3}");
-                mode = Execute(() => df1.GetRunMode(), "GetRunMode");
+                mode = Execute(() => pccc.GetRunMode(), "GetRunMode");
                 Console.WriteLine(mode == 1 ? "PLC is in RUN mode" : "PLC is in PROGRAM mode");
 
                 PrintStats();
@@ -318,8 +363,7 @@ class Program
                 {
                     try
                     {
-                        // Read simulated sine wave value from F8:0
-                        string[] val = df1.ReadAny("F8:0", 1) ?? Array.Empty<string>();
+                        string[] val = pccc.ReadAny("F8:0", 1) ?? Array.Empty<string>();
                         RecordSuccess();
                         if (++count % 100 == 0)
                         {
@@ -346,6 +390,7 @@ class Program
             }
 
             // ── Interactive CLI mode (unless --no-interactive) ─────────
+            // Note: interactive CLI commands are not tracked in communication statistics.
             if (!noInteractive)
             {
                 Console.WriteLine("\n=== Interactive CLI Mode ===");
@@ -379,40 +424,55 @@ class Program
                             case "read":
                                 if (parts.Length < 2) { Console.WriteLine("Usage: read <address> [count]"); break; }
                                 string addr = parts[1];
-                                int cnt = parts.Length >= 3 ? int.Parse(parts[2]) : 1;
-                                string[] readResult = df1.ReadAny(addr, cnt) ?? Array.Empty<string>();
+                                int cnt = 1;
+                                if (parts.Length >= 3 && !int.TryParse(parts[2], out cnt))
+                                {
+                                    Console.WriteLine("Invalid count; must be an integer.");
+                                    break;
+                                }
+                                string[] readResult = pccc.ReadAny(addr, cnt) ?? Array.Empty<string>();
                                 Console.WriteLine($"Result: {string.Join(", ", readResult)}");
                                 break;
                             case "write":
                                 if (parts.Length < 3) { Console.WriteLine("Usage: write <address> <value> [value2...]"); break; }
                                 string waddr = parts[1];
                                 var values = new List<int>();
+                                bool parseError = false;
                                 for (int i = 2; i < parts.Length; i++)
-                                    values.Add(int.Parse(parts[i]));
-                                df1.WriteData(waddr, values.Count, values.ToArray());
+                                {
+                                    if (!int.TryParse(parts[i], out int val))
+                                    {
+                                        Console.WriteLine($"Invalid integer value: '{parts[i]}'");
+                                        parseError = true;
+                                        break;
+                                    }
+                                    values.Add(val);
+                                }
+                                if (parseError) break;
+                                pccc.WriteData(waddr, values.Count, values.ToArray());
                                 Console.WriteLine("Write successful.");
                                 break;
                             case "writestring":
                                 if (parts.Length < 3) { Console.WriteLine("Usage: writestring <address> <text>"); break; }
                                 string saddr = parts[1];
                                 string text = string.Join(" ", parts, 2, parts.Length - 2);
-                                df1.WriteData(saddr, text);
+                                pccc.WriteData(saddr, text);
                                 Console.WriteLine("String write successful.");
                                 break;
                             case "mode":
-                                int current = df1.GetRunMode();
+                                int current = pccc.GetRunMode();
                                 Console.WriteLine(current == 1 ? "RUN mode" : "PROGRAM mode");
                                 break;
                             case "setrun":
-                                df1.SetRunMode();
+                                pccc.SetRunMode();
                                 Console.WriteLine("Switched to RUN mode");
                                 break;
                             case "setprog":
-                                df1.SetProgramMode();
+                                pccc.SetProgramMode();
                                 Console.WriteLine("Switched to PROGRAM mode");
                                 break;
                             case "type":
-                                int procType = df1.GetProcessorType();
+                                int procType = pccc.GetProcessorType();
                                 Console.WriteLine($"Processor Type: 0x{procType:X2}");
                                 break;
                             case "sendhex":
@@ -433,30 +493,32 @@ class Program
                                 }
                                 // Parse optional data bytes
                                 List<byte> dataBytes = new List<byte>();
+                                bool dataParseError = false;
                                 for (int i = 4; i < parts.Length; i++)
                                 {
-                                    if (byte.TryParse(parts[i], System.Globalization.NumberStyles.HexNumber, null, out byte b))
-                                        dataBytes.Add(b);
-                                    else
+                                    if (!byte.TryParse(parts[i], System.Globalization.NumberStyles.HexNumber, null, out byte b))
                                     {
                                         Console.WriteLine($"Invalid hex data: {parts[i]}");
+                                        dataParseError = true;
                                         break;
                                     }
+                                    dataBytes.Add(b);
                                 }
-                                // Build full PDU: DST, SRC=0, CMD, STS=0, TNS dummy (0,0), FNC, data...
+                                if (dataParseError) break;
+
                                 byte[] pdu = new byte[7 + dataBytes.Count];
                                 pdu[0] = dst;
-                                pdu[1] = 0x00;      // SRC
+                                pdu[1] = 0x00;
                                 pdu[2] = cmd_byte;
-                                pdu[3] = 0x00;      // STS
-                                pdu[4] = 0x00;      // TNS low (dummy)
-                                pdu[5] = 0x00;      // TNS high (dummy)
+                                pdu[3] = 0x00;
+                                pdu[4] = 0x00;
+                                pdu[5] = 0x00;
                                 pdu[6] = fnc;
                                 for (int i = 0; i < dataBytes.Count; i++)
                                     pdu[7 + i] = dataBytes[i];
 
                                 Console.WriteLine($"Sending: {BitConverter.ToString(pdu)}");
-                                int replyCode = SendRawCommand(df1, pdu);
+                                int replyCode = SendRawCommand(pccc, pdu);
                                 Console.WriteLine($"Reply status: {replyCode} (0=success, non-zero=error)");
                                 break;
                             default:
@@ -481,8 +543,8 @@ class Program
         }
         finally
         {
-            df1.CloseComms();
-            df1.Dispose();
+            pccc.CloseComms();
+            pccc.Dispose();
             Console.WriteLine("\nPress Enter to exit.");
             Console.ReadLine();
         }
@@ -501,6 +563,11 @@ class Program
         Console.WriteLine("Options:");
         Console.WriteLine("  --baud <n>           Baud rate (default 19200)");
         Console.WriteLine("  --parity <none|odd|even>  Parity mode (default none)");
+        Console.WriteLine("EtherNet/IP Options:");
+        Console.WriteLine("  --transport eip      Use EtherNet/IP transport");
+        Console.WriteLine("  --host <IP>          PLC IP address (required for EIP)");
+        Console.WriteLine("  --eip-port <n>       EIP port (default 44818)");
+        Console.WriteLine("  --timeout <n>        Connection and response timeout in ms (default 5000)");
         Console.WriteLine("  --target <n>         Target PLC node id (default 1)");
         Console.WriteLine("  --mynode <n>         Local/master node id (default 0)");
         Console.WriteLine("  --checksum <crc|bcc> DF1 checksum mode (default crc)");
@@ -527,6 +594,8 @@ class Program
         Console.WriteLine("  dotnet run -- COM1");
         Console.WriteLine("  dotnet run -- COM1 --interactive-only");
         Console.WriteLine("  dotnet run -- COM1 --stress-test 500");
+        Console.WriteLine("  dotnet run -- --transport eip --host 192.168.1.10");
+        Console.WriteLine("  dotnet run -- --transport eip --host 192.168.1.10 --stress-test 500");
     }
 
     static void PrintInteractiveHelp()
