@@ -135,7 +135,7 @@ public class PCCCComm : IDisposable
         set
         {
             m_CheckSum = value;
-            if (_currentTransport is DF1Transport df1)
+            if (_currentTransport is DF1FullDuplexTransport df1)
                 df1.ChecksumType = value;
         }
     }
@@ -159,7 +159,7 @@ public class PCCCComm : IDisposable
         set
         {
             responseTimeoutMs = value > 0 ? value : 2000;
-            if (_currentTransport is DF1Transport df1)
+            if (_currentTransport is DF1FullDuplexTransport df1)
                 df1.MaxTicks = responseTimeoutMs / 20;  // each tick = 20 ms
         }
     }
@@ -221,11 +221,11 @@ public class PCCCComm : IDisposable
         _currentTransport = transport ?? throw new ArgumentNullException(nameof(transport));
         AttachTransportEvents();
 
-        if (_currentTransport is DF1Transport df1)
+        if (_currentTransport is DF1FullDuplexTransport df1)
         {
             df1.ChecksumType = m_CheckSum;
             df1.MaxTicks = responseTimeoutMs / 20; // Sync timeout
-            // Forward raw frame events if the transport is DF1Transport
+            // Forward raw frame events if the transport is DF1FullDuplexTransport
         }
     }
 
@@ -965,7 +965,7 @@ public class PCCCComm : IDisposable
                     try
                     {
                         var port = new SerialPortWrapper(m_ComPort, m_BaudRate, m_Parity);
-                        var transport = new DF1Transport(port);
+                        var transport = new DF1FullDuplexTransport(port);
                         transport.ChecksumType = m_CheckSum;
                         transport.MaxTicks = 3; // short timeout for detection
                         transport.Open();
@@ -1008,7 +1008,7 @@ public class PCCCComm : IDisposable
     // ─── Comms ────────────────────────────────────────────────────────────────
     /// <summary>
     /// Opens the communication channel. For DF1 serial, this creates a new
-    /// <see cref="DF1Transport"/> using the current <see cref="ComPort"/>,
+    /// <see cref="DF1FullDuplexTransport"/> using the current <see cref="ComPort"/>,
     /// <see cref="BaudRate"/>, <see cref="Parity"/>, and <see cref="CheckSum"/>.
     /// </summary>
     public int OpenComms()
@@ -1043,7 +1043,7 @@ public class PCCCComm : IDisposable
         try
         {
             var port = new SerialPortWrapper(m_ComPort, m_BaudRate, m_Parity);
-            var transport = new DF1Transport(port);
+            var transport = new DF1FullDuplexTransport(port);
             transport.ChecksumType = m_CheckSum;
             transport.MaxTicks = responseTimeoutMs / 20;
             _currentTransport = transport;
@@ -1272,7 +1272,7 @@ public class PCCCComm : IDisposable
         {
             // Unsolicited write: send a PCCC reply only for DF1 serial.
             // EtherNet/IP uses request-response; no explicit reply is needed.
-            if (_currentTransport is DF1Transport)
+            if (_currentTransport is DF1FullDuplexTransport)
             {
                 int replyTns = innerFrame[5] * 256 + innerFrame[4];
                 SendResponse(innerFrame[2] + 0x40, replyTns);

@@ -18,11 +18,6 @@
 // 
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
-//
-// -----------------------------------------------------------------------------
-// DF1 full‑duplex transport over RS‑232.
-// Handles DLE stuffing, CRC‑16/BCC, ACK/NAK, ENQ, and automatic backoff.
-// Reference: Allen Bradley Publication 1770-6.5.16, Chapters 5-7.
 
 using System;
 using System.Collections.Generic;
@@ -33,129 +28,58 @@ namespace PCCCComm.Core;
 
 /// <inheritdoc cref="ITransport"/>
 /// <summary>
-/// DF1 full‑duplex transport implementation using a serial port.
-/// This class replaces the original <c>DataLink</c> and the serial‑related code
-/// that was previously embedded inside <c>PCCCComm</c>. All timing, retry, and
-/// backoff behaviours are preserved.
+/// DF1 full‑duplex transport over RS‑232 (point‑to‑point master).
+/// Handles DLE stuffing, CRC‑16/BCC, ACK/NAK, ENQ, and automatic backoff.
+/// Reference: Allen Bradley Publication 1770-6.5.16, Chapters 5-7.
 /// </summary>
-public class DF1Transport : ITransport
+public class DF1FullDuplexTransport : DF1BaseTransport
 {
-    // --- DF1 control characters (Publication 1770-6.5.16, Chapter 5) ---
-    private const byte DLE = 0x10;   // Data Link Escape
-    private const byte STX = 0x02;   // Start of Text
-    private const byte ETX = 0x03;   // End of Text
-    private const byte ACK = 0x06;   // Acknowledge
-    private const byte NAK = 0x15;   // Not Acknowledge
-    private const byte ENQ = 0x05;   // Enquiry
-
-    private readonly ISerialPort _port;
+    // --- State for receive frame assembly ---
     private readonly object _rxLock = new object();
     private readonly List<byte> _rxBuffer = new List<byte>();
     private DateTime _frameStartTime = DateTime.MinValue;
     private const int FrameTimeoutMs = 500;      // Max time between DLE STX and DLE ETX
     private const int MaxBufferBytes = 4096;     // Safety limit
 
-    private CheckSumOptions _checksumType = CheckSumOptions.Crc;
-    private int _sleepDelay = 0;                // backoff after NAK (helps with USB converters)
-    private bool _lastResponseWasNAK = false;
-
-    // ACK/NAK polling flags (used during SendFrame)
+    // --- ACK/NAK polling flags (used during SendFrame) ---
     private volatile bool _ackReceived;
     private volatile bool _nakReceived;
 
-    // ENQ polling flags (used by auto-detect)
+    // --- ENQ polling flags (used by auto-detect) ---
     private volatile bool _ackFlagForEnq;
     private volatile bool _nakFlagForEnq;
 
     private int _ackWaitTicks = 0;
-    private int _maxTicks = 100;                // 100 * 20ms = 2 seconds
-
-    public event EventHandler<byte[]>? FrameReceived;
-    public event EventHandler<byte[]>? RawFrameSent;
-    public event EventHandler<byte[]>? RawFrameReceived;
-
-    public bool IsOpen => _port.IsOpen;
-
-    /// <summary>Gets or sets the checksum algorithm (CRC or BCC).</summary>
-    public CheckSumOptions ChecksumType
-    {
-        get => _checksumType;
-        set => _checksumType = value;
-    }
+    private bool _lastResponseWasNAK = false;
 
     /// <summary>
-    /// Sleep delay (ms) added after a NAK. Increases automatically on repeated NAKs.
-    /// Helps stabilise communication with USB‑to‑serial converters.
+    /// Initialises the DF1 full‑duplex transport with a custom <see cref="ISerialPort"/>.
     /// </summary>
-    public int SleepDelay
+    public DF1FullDuplexTransport(ISerialPort port) : base(port)
     {
-        get => _sleepDelay;
-        set => _sleepDelay = value < 0 ? 0 : value;
-    }
-
-    /// <summary>
-    /// Maximum number of polling ticks (each tick = 20 ms) to wait for ACK/NAK.
-    /// Default is 100 (2 seconds). Used in auto‑detect and normal sends.
-    /// </summary>
-    public int MaxTicks
-    {
-        get => _maxTicks;
-        set => _maxTicks = value > 0 ? value : 100;
-    }
-
-    /// <summary>
-    /// Initialises the DF1 transport with a custom <see cref="ISerialPort"/>.
-    /// </summary>
-    public DF1Transport(ISerialPort port)
-    {
-        _port = port ?? throw new ArgumentNullException(nameof(port));
         _port.BytesReceived += OnBytesReceived;
     }
 
     /// <summary>
-    /// Initialises the DF1 transport with standard serial port parameters.
+    /// Initialises the DF1 full‑duplex transport with standard serial port parameters.
     /// </summary>
-    public DF1Transport(string portName, int baudRate, Parity parity)
-        : this(new SerialPortWrapper(portName, baudRate, parity))
+    public DF1FullDuplexTransport(string portName, int baudRate, Parity parity)
+        : base(portName, baudRate, parity)
     {
+        _port.BytesReceived += OnBytesReceived;
     }
 
     /// <inheritdoc/>
-    public void Open() => _port.Open();
-
-    /// <inheritdoc/>
-    public void Close() => _port.Close();
-
-    /// <inheritdoc/>
-    public void SendFrame(byte[] innerFrame)
+    public override void SendFrame(byte[] innerFrame)
     {
         if (innerFrame == null || innerFrame.Length == 0)
             throw new ArgumentException("Inner frame cannot be null or empty.", nameof(innerFrame));
 
-        // 1. DLE stuffing – duplicate any 0x10 byte in the payload
-        byte[] stuffed = ApplyDleStuffing(innerFrame);
+        // Build the complete wire frame using base helper
+        byte[] frame = BuildWireFrame(innerFrame);
+        OnRawFrameSent(frame);
 
-        // 2. Calculate checksum (CRC or BCC) over the UNSTUFFED inner frame
-        ushort checksum = MessageDecoder.CalculateChecksum(innerFrame, _checksumType);
-        int csLen = (_checksumType == CheckSumOptions.Crc) ? 2 : 1;
-
-        // 3. Build the complete wire frame: DLE STX + stuffed + DLE ETX + checksum
-        byte[] frame = new byte[2 + stuffed.Length + 2 + csLen];
-        int idx = 0;
-        frame[idx++] = DLE;
-        frame[idx++] = STX;
-        Array.Copy(stuffed, 0, frame, idx, stuffed.Length);
-        idx += stuffed.Length;
-        frame[idx++] = DLE;
-        frame[idx++] = ETX;
-        frame[idx++] = (byte)(checksum & 0xFF);
-        if (csLen == 2)
-            frame[idx++] = (byte)((checksum >> 8) & 0xFF);
-
-        // Raise raw frame event for logging
-        RawFrameSent?.Invoke(this, frame);
-
-        // 4. Send with retry (max 2 attempts, as in original VB code)
+        // Send with retry (max 2 attempts, as in original VB code)
         int retries = 0;
         const int maxRetries = 2;
 
@@ -164,14 +88,14 @@ public class DF1Transport : ITransport
             _ackReceived = false;
             _nakReceived = false;
 
-            if (_sleepDelay > 0)
-                Thread.Sleep(_sleepDelay);
+            if (SleepDelay > 0)
+                Thread.Sleep(SleepDelay);
 
             _port.Write(frame, 0, frame.Length);
 
             // Poll for ACK/NAK using 20 ms ticks
             _ackWaitTicks = 0;
-            while (!_ackReceived && !_nakReceived && _ackWaitTicks < _maxTicks)
+            while (!_ackReceived && !_nakReceived && _ackWaitTicks < MaxTicks)
             {
                 Thread.Sleep(20);
                 _ackWaitTicks++;
@@ -183,7 +107,7 @@ public class DF1Transport : ITransport
             if (_nakReceived)
             {
                 // Backoff: increase sleep delay for the next retry
-                if (_sleepDelay < 400) _sleepDelay += 50;
+                if (SleepDelay < 400) SleepDelay += 50;
                 retries++;
                 continue;
             }
@@ -202,7 +126,7 @@ public class DF1Transport : ITransport
     /// <returns>0 if ACK received, -2 if NAK received, -3 if timeout.</returns>
     public int SendEnqAndWaitForAck()
     {
-        if (!_port.IsOpen)
+        if (!IsOpen)
             Open();
 
         _ackFlagForEnq = false;
@@ -211,7 +135,7 @@ public class DF1Transport : ITransport
         SendControl(ENQ);
 
         int waitTicks = 0;
-        while (!_ackFlagForEnq && !_nakFlagForEnq && waitTicks < _maxTicks)
+        while (!_ackFlagForEnq && !_nakFlagForEnq && waitTicks < MaxTicks)
         {
             Thread.Sleep(20);
             waitTicks++;
@@ -231,47 +155,7 @@ public class DF1Transport : ITransport
         _nakFlagForEnq = false;
     }
 
-    // --- DLE stuffing helpers -------------------------------------------------
-
-    private static byte[] ApplyDleStuffing(byte[] payload)
-    {
-        var result = new List<byte>(payload.Length * 2);
-        foreach (byte b in payload)
-        {
-            result.Add(b);
-            if (b == DLE)
-                result.Add(DLE);
-        }
-        return result.ToArray();
-    }
-
-    private static byte[] RemoveDleStuffing(byte[] stuffed)
-    {
-        var result = new List<byte>(stuffed.Length);
-        for (int i = 0; i < stuffed.Length; i++)
-        {
-            if (stuffed[i] == DLE && i + 1 < stuffed.Length && stuffed[i + 1] == DLE)
-            {
-                result.Add(DLE);
-                i++; // skip the stuffed duplicate
-            }
-            else
-                result.Add(stuffed[i]);
-        }
-        return result.ToArray();
-    }
-
-    // --- Send a single control byte (ACK, NAK, ENQ) with DLE prefix ----------
-
-    private void SendControl(byte controlByte)
-    {
-        if (controlByte != ACK && controlByte != NAK && controlByte != ENQ)
-            throw new ArgumentException("Invalid control byte.", nameof(controlByte));
-        _port.Write(new byte[] { DLE, controlByte }, 0, 2);
-    }
-
-    // --- Serial receive handler (state machine) ------------------------------
-
+    // --- Serial receive handler (state machine) ---
     private void OnBytesReceived(object? sender, byte[] chunk)
     {
         if (chunk == null || chunk.Length == 0) return;
@@ -315,7 +199,7 @@ public class DF1Transport : ITransport
 
                     if (ctrl == ACK)
                     {
-                        if (_sleepDelay > 0) Thread.Sleep(_sleepDelay);
+                        if (SleepDelay > 0) Thread.Sleep(SleepDelay);
                         _ackReceived = true;
                         _ackFlagForEnq = true;
                     }
@@ -369,7 +253,7 @@ public class DF1Transport : ITransport
                     if (etxIndex == -1)
                         break; // need more bytes
 
-                    int csLen = (_checksumType == CheckSumOptions.Crc) ? 2 : 1;
+                    int csLen = (ChecksumType == CheckSumOptions.Crc) ? 2 : 1;
                     int totalFrameLen = etxIndex + 2 + csLen;
                     if (_rxBuffer.Count < totalFrameLen)
                         break; // checksum bytes not yet fully received
@@ -377,7 +261,7 @@ public class DF1Transport : ITransport
                     // Extract the complete frame
                     byte[] frame = new byte[totalFrameLen];
                     _rxBuffer.CopyTo(0, frame, 0, totalFrameLen);
-                    RawFrameReceived?.Invoke(this, frame);
+                    OnRawFrameReceived(frame);
                     _rxBuffer.RemoveRange(0, totalFrameLen);
                     _frameStartTime = DateTime.MinValue;
 
@@ -389,7 +273,7 @@ public class DF1Transport : ITransport
 
                     // Validate checksum
                     bool valid;
-                    if (_checksumType == CheckSumOptions.Crc)
+                    if (ChecksumType == CheckSumOptions.Crc)
                     {
                         ushort calc = MessageDecoder.CalculateChecksum(innerFrame, CheckSumOptions.Crc);
                         ushort recv = (ushort)(frame[etxIndex + 2] | (frame[etxIndex + 3] << 8));
@@ -413,7 +297,7 @@ public class DF1Transport : ITransport
                     {
                         SendControl(NAK);
                         _lastResponseWasNAK = true;
-                        if (_sleepDelay < 400) _sleepDelay += 50;
+                        if (SleepDelay < 400) SleepDelay += 50;
                     }
                     consumed = true;
                     continue;
@@ -436,14 +320,14 @@ public class DF1Transport : ITransport
         }
         if (pduToDeliver != null)
         {
-            FrameReceived?.Invoke(this, pduToDeliver);
+            OnFrameReceived(pduToDeliver);
         }
     }
 
     /// <inheritdoc/>
-    public void Dispose()
+    public override void Dispose()
     {
         _port.BytesReceived -= OnBytesReceived;
-        _port.Dispose();
+        base.Dispose();
     }
 }
