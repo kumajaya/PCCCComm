@@ -35,7 +35,7 @@ using System.Threading.Tasks;
 ///   3. Delegates transport-specific I/O to ILinkTransport implementations
 /// 
 /// Supported transports:
-///   - DF1 (serial) via DF1Transport (default, fully implemented)
+///   - DF1 (serial) via DF1BaseTransport (default, fully implemented)
 ///   - DH485 via serial (planned for future release)
 ///   - EtherNet/IP (EIP/PCCC) via TCP (fully implemented)
 /// 
@@ -164,7 +164,7 @@ public class PCCCEmulator : IDisposable
         set
         {
             _checkSum = value;
-            if (_transport is DF1Transport df1Transport)
+            if (_transport is DF1BaseTransport df1Transport)
                 df1Transport.CheckSum = value;
         }
     }
@@ -175,7 +175,7 @@ public class PCCCEmulator : IDisposable
         set
         {
             _myNode = value;
-            if (_transport is DF1Transport df1Transport)
+            if (_transport is DF1BaseTransport df1Transport)
                 df1Transport.MyNode = value;
         }
     }
@@ -205,8 +205,8 @@ public class PCCCEmulator : IDisposable
         // Create the appropriate transport handler based on mode
         _transport = mode switch
         {
-            TransportMode.DF1   => new DF1Transport(this, portName, baudRate, parity),
-            TransportMode.UIC   => new DF1Transport(this, portName, 19200, Parity.None)
+            TransportMode.DF1   => new DF1FullDuplexTransport(this, portName, baudRate, parity),
+            TransportMode.UIC   => new DF1FullDuplexTransport(this, portName, 19200, Parity.None)
             {
                 CheckSum = CheckSumOptions.Crc
             },
@@ -285,8 +285,8 @@ public class PCCCEmulator : IDisposable
         Logger.Enabled = enabled;
     }
 
-    // ─── Internal Methods for DF1Transport to Update Counters ─────────────────
-    // These allow DF1Transport to report transport-specific events without exposing
+    // ─── Internal Methods for DF1BaseTransport to Update Counters ─────────────────
+    // These allow DF1BaseTransport to report transport-specific events without exposing
     // internal counters directly to external code.
     internal void IncrementTotalPacketsSent()       => Interlocked.Increment(ref _totalPacketsSent);
     internal void IncrementFramesProcessed()        => Interlocked.Increment(ref _framesProcessed);
@@ -301,8 +301,8 @@ public class PCCCEmulator : IDisposable
     internal void IncrementLostModem()              => Interlocked.Increment(ref _lostModemCount);
     internal void IncrementEnqSent()                => Interlocked.Increment(ref _enqSent);
 
-    // ─── Internal Methods Called by DF1Transport ──────────────────────────────
-    // These provide DF1Transport with read-only access to diagnostic counters
+    // ─── Internal Methods Called by DF1BaseTransport ──────────────────────────────
+    // These provide DF1BaseTransport with read-only access to diagnostic counters
     // for health monitoring purposes.
     // Volatile.Read is used for a clean atomic read without the compare-exchange
     // idiom, which is semantically equivalent but more explicit in intent.
@@ -315,11 +315,11 @@ public class PCCCEmulator : IDisposable
 
     /// <summary>
     /// Updates modem status bits based on actual hardware line states.
-    /// Called by DF1Transport when pin change events occur.
+    /// Called by DF1BaseTransport when pin change events occur.
     /// </summary>
     internal void UpdateModemStatus()
     {
-        if (_transport is DF1Transport df1Transport)
+        if (_transport is DF1BaseTransport df1Transport)
         {
             ushort status = 0;
             if (df1Transport.GetCtsHolding()) status |= 0x0001;  // CTS

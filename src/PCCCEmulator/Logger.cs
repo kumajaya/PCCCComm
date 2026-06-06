@@ -63,7 +63,7 @@ public static class Logger
         return _categoryCache.GetOrAdd(type, t =>
         {
             if (t == typeof(PCCCEmulator)) return "EMU";
-            if (t == typeof(DF1Transport)) return "DFU";
+            if (t == typeof(DF1FullDuplexTransport)) return "DFU";
             if (t == typeof(EIPTransport)) return "EIP";
             if (t.Name == "EIPClient") return "EIP";
             if (t == typeof(PlcMemory)) return "MEM";
