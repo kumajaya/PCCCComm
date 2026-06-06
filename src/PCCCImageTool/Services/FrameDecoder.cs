@@ -30,6 +30,12 @@ public static class FrameDecoder
 
     public static string Decode(byte[] raw)
     {
+        // EIP frame detection (first byte is not DLE 0x10, and length >= 24)
+        if (raw.Length >= 24 && raw[0] != 0x10)
+        {
+            return DecodeEip(raw);
+        }
+
         if (raw.Length == 2 && raw[0] == 0x10)
             return raw[1] == 0x06 ? "ACK" : raw[1] == 0x15 ? "NAK" : raw[1] == 0x05 ? "ENQ" : $"DLE 0x{raw[1]:X2}";
 
@@ -53,7 +59,7 @@ public static class FrameDecoder
         // Note: Length == 7 means there is an FNC but no data — valid for some response frames
 
         var sb = new StringBuilder();
-        sb.AppendLine($"DST={dst} SRC={src} TNS={tns} CMD=0x{cmd:X2} FNC=0x{fnc:X2} STS={sts}");
+        sb.AppendLine($"          DST={dst} SRC={src} TNS={tns} CMD=0x{cmd:X2} FNC=0x{fnc:X2} STS={sts}");
 
         if (cmd == 0x0F && (fnc == 0xA1 || fnc == 0xA2 || fnc == 0xAA || fnc == 0xAB) && data.Length >= 4)
         {
@@ -81,4 +87,21 @@ public static class FrameDecoder
     }
 
     public static string Hex(byte[] bytes) => BitConverter.ToString(bytes).Replace('-', ' ');
+
+    private static string DecodeEip(byte[] raw)
+    {
+        if (raw.Length < 24) return $"EIP (truncated): {Hex(raw)}";
+        ushort cmd = (ushort)(raw[0] | (raw[1] << 8));
+        ushort len = (ushort)(raw[2] | (raw[3] << 8));
+        uint session = BitConverter.ToUInt32(raw, 4);
+        uint status = BitConverter.ToUInt32(raw, 8);
+        string cmdName = cmd switch
+        {
+            0x0065 => "RegisterSession",
+            0x0066 => "UnregisterSession",
+            0x006F => "SendRRData",
+            _ => $"0x{cmd:X4}"
+        };
+        return $"          EIP {cmdName} (session=0x{session:X8}, status=0x{status:X8}, len={len})";
+    }
 }

@@ -44,6 +44,13 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
     private decimal _myNode          = 0;
     private string  _logText         = string.Empty;
 
+    private string _eipHost    = "127.0.0.1";
+    private int    _eipPort    = 44818;
+    private int    _eipTimeout = 5000;
+
+    private TransportType _transportType = TransportType.Df1Serial;
+    public List<TransportType> TransportOptions { get; } = new() { TransportType.Df1Serial, TransportType.Eip };
+
     // ─── Log throttling fields ──────────────────────────────────────────────
     private readonly StringBuilder _pendingLogBatch = new();
     private readonly object _logBatchLock = new();
@@ -73,6 +80,12 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         }
     }
 
+    public TransportType TransportType
+    {
+        get => _transportType;
+        set => this.RaiseAndSetIfChanged(ref _transportType, value);
+    }
+
     public string SelectedPort
     {
         get => _selectedPort;
@@ -95,6 +108,24 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
     {
         get => _selectedChecksum;
         set => this.RaiseAndSetIfChanged(ref _selectedChecksum, value);
+    }
+
+    public string EipHost
+    {
+        get => _eipHost;
+        set => this.RaiseAndSetIfChanged(ref _eipHost, value);
+    }
+
+    public int EipPort
+    {
+        get => _eipPort;
+        set => this.RaiseAndSetIfChanged(ref _eipPort, value);
+    }
+
+    public int EipTimeout
+    {
+        get => _eipTimeout;
+        set => this.RaiseAndSetIfChanged(ref _eipTimeout, value);
     }
 
     public decimal TargetNode
@@ -327,34 +358,54 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
     // ─── Connect / Disconnect ────────────────────────────────────────────────
     private async Task ConnectAsync()
     {
-        if (string.IsNullOrEmpty(SelectedPort))
+        if (TransportType == TransportType.Df1Serial && string.IsNullOrEmpty(SelectedPort))
         {
             await _dialogService.ShowMessageAsync("Error", "Select a COM port first.");
+            return;
+        }
+        if (TransportType == TransportType.Eip && string.IsNullOrEmpty(EipHost))
+        {
+            await _dialogService.ShowMessageAsync("Error", "Enter PLC IP address.");
             return;
         }
 
         IsBusy = true;
         StatusText = "Connecting…";
-        AppendLog($"Connecting to {SelectedPort} @ {SelectedBaud} baud ({SelectedParity} parity, {SelectedChecksum} checksum)…");
+
+        if (TransportType == TransportType.Df1Serial)
+            AppendLog($"Connecting to {SelectedPort} @ {SelectedBaud} baud ({SelectedParity} parity, {SelectedChecksum} checksum)…");
+        else
+            AppendLog($"Connecting to {EipHost}:{EipPort} via EtherNet/IP (timeout {EipTimeout} ms)…");
 
         try
         {
-            Parity parity = SelectedParity switch
-            {
-                "Even" => Parity.Even,
-                "Odd"  => Parity.Odd,
-                _      => Parity.None
-            };
-
             DisposeDF1();
 
-            _df1 = new global::PCCCComm.PCCCComm(SelectedPort, SelectedBaud, parity)
+            if (TransportType == TransportType.Df1Serial)
             {
-                TargetNode = (int)TargetNode,
-                MyNode     = (int)MyNode,
-                CheckSum   = SelectedChecksum == "Crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc,
-                Protocol   = "DF1"
-            };
+                Parity parity = SelectedParity switch
+                {
+                    "Even" => Parity.Even,
+                    "Odd"  => Parity.Odd,
+                    _      => Parity.None
+                };
+
+                _df1 = new global::PCCCComm.PCCCComm(SelectedPort, SelectedBaud, parity)
+                {
+                    TargetNode = (int)TargetNode,
+                    MyNode     = (int)MyNode,
+                    CheckSum   = SelectedChecksum == "Crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc,
+                    Protocol   = "DF1"
+                };
+            }
+            else // EIP
+            {
+                _df1 = new global::PCCCComm.PCCCComm(EipHost, EipPort, EipTimeout)
+                {
+                    TargetNode = (int)TargetNode,
+                    MyNode = (int)MyNode
+                };
+            }
 
             await Task.Run(() => _df1.OpenComms());
             AppendLog("Port opened.");
@@ -364,16 +415,17 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
             AppendLog($"Identified: {plcInfo.Name} (0x{plcInfo.ProcessorType:X2}) " +
                       $"Upload/Download={plcInfo.SupportsUploadDownload}");
 
+            string transportName = TransportType == TransportType.Df1Serial ? "DF1 Serial" : "EtherNet/IP";
+
             if (plcInfo.SupportsUploadDownload)
             {
-                // Mode already read from diagnostic status in PlcIdentifier
                 string modeStr = plcInfo.ModeStr;
-                StatusText = $"Connected | {plcInfo.Name} (0x{plcInfo.ProcessorType:X2}) | {modeStr}";
+                StatusText = $"{transportName} Connected | {plcInfo.Name} (0x{plcInfo.ProcessorType:X2}) | {modeStr}";
                 AppendLog($"Mode: {modeStr}");
             }
             else
             {
-                StatusText = $"Connected | {plcInfo.Name} (upload/download not supported)";
+                StatusText = $"{transportName} Connected | {plcInfo.Name} (upload/download not supported)";
             }
 
             IsConnected = true;
@@ -419,7 +471,8 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
                 byte modeByte = data[18];
                 string modeStr = PlcIdentifier.DecodeModeString(modeByte);
                 CurrentPlcInfo = CurrentPlcInfo with { ModeStr = modeStr };
-                StatusText = $"Connected | {_currentPlcInfo.Name} (0x{_currentPlcInfo.ProcessorType:X2}) | {modeStr}";
+                string transportName = TransportType == TransportType.Df1Serial ? "DF1 Serial" : "EtherNet/IP";
+                StatusText = $"{transportName} Connected | {_currentPlcInfo.Name} (0x{_currentPlcInfo.ProcessorType:X2}) | {modeStr}";
             }
             else
             {
@@ -502,6 +555,9 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         Func<IProgress<string>, IProgress<double>, CancellationToken, Task> work,
         string operationName)
     {
+        // Clear log before starting new transfer to avoid UI lag from accumulated lines
+        ClearLog();
+
         IsBusy          = true;
         ProgressValue   = 0;
         ProgressMessage = string.Empty;

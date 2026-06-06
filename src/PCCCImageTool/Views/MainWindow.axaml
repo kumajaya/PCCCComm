@@ -1,19 +1,25 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:PCCCImageTool.ViewModels"
+        xmlns:conv="clr-namespace:PCCCImageTool.Converters"
         x:Class="PCCCImageTool.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="PCCC Image Transfer Tool"
-        Width="580" Height="640"
-        CanResize="True" MinWidth="500" MinHeight="500">
+        Width="580" Height="680"
+        CanResize="True" MinWidth="580" MinHeight="580">
 
     <Design.DataContext>
         <vm:MainWindowViewModel />
     </Design.DataContext>
 
+    <Window.Resources>
+        <conv:EnumToBooleanConverter x:Key="EnumToBooleanConverter" />
+        <conv:TransportTypeToStringConverter x:Key="TransportTypeToStringConverter" />
+    </Window.Resources>
+
     <DockPanel Margin="10">
 
-        <!-- Status bar -->
+        <!-- Status bar pinned to bottom -->
         <Border DockPanel.Dock="Bottom"
                 Background="#E0E0E0"
                 Padding="6,4"
@@ -22,6 +28,7 @@
             <TextBlock Text="{Binding StatusText}" FontSize="12" />
         </Border>
 
+        <!-- Main content: fixed-height sections + stretching Log -->
         <Grid RowDefinitions="Auto,Auto,Auto,*">
 
             <!-- ── Communication Settings ───────────────────────────────── -->
@@ -29,19 +36,45 @@
                     BorderBrush="Gray" BorderThickness="1" CornerRadius="5"
                     Padding="10" Margin="0,0,0,6">
                 <StackPanel>
+
+                    <!-- Header row: title + About button -->
                     <DockPanel Margin="0,0,0,6">
                         <TextBlock DockPanel.Dock="Left"
-                                Text="Communication Settings"
-                                FontWeight="Bold" Margin="0,0,0,8" 
-                                HorizontalAlignment="Left"/>
+                                   Text="Communication Settings"
+                                   FontWeight="Bold"
+                                   VerticalAlignment="Center" />
                         <Button DockPanel.Dock="Right"
                                 Content="About"
                                 Command="{Binding AboutCommand}"
-                                HorizontalAlignment="Right" 
+                                HorizontalAlignment="Right"
                                 Padding="8,2" FontSize="11" />
                     </DockPanel>
-                    <Grid ColumnDefinitions="Auto,*,Auto,*"
-                          RowDefinitions="Auto,Auto,Auto,Auto">
+
+                    <!-- Transport selector + transport-specific settings.
+                         All three Grids share the same ColumnDefinitions so
+                         labels and fields stay aligned regardless of which
+                         transport panel is visible. -->
+                    <Grid ColumnDefinitions="2*,3*,2*,3*" Margin="0,0,0,4">
+                        <TextBlock Grid.Column="0" Text="Transport:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <ComboBox  Grid.Column="1"
+                                   ItemsSource="{Binding TransportOptions}"
+                                   SelectedItem="{Binding TransportType}"
+                                   HorizontalAlignment="Stretch" Margin="0,3,10,3">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Converter={StaticResource TransportTypeToStringConverter}}" />
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </Grid>
+
+                    <!-- DF1 serial settings (collapsed when TransportType != Df1Serial) -->
+                    <Grid ColumnDefinitions="2*,3*,2*,3*"
+                          RowDefinitions="Auto,Auto,Auto"
+                          IsVisible="{Binding TransportType,
+                              Converter={StaticResource EnumToBooleanConverter},
+                              ConverterParameter=Df1Serial}">
 
                         <TextBlock Grid.Row="0" Grid.Column="0" Text="COM Port:"
                                    VerticalAlignment="Center" Margin="0,3,8,3" />
@@ -55,25 +88,20 @@
                                    ItemsSource="{Binding BaudRates}"
                                    SelectedItem="{Binding SelectedBaud}"
                                    HorizontalAlignment="Stretch" Margin="0,3,0,3" />
-                        <TextBlock Grid.Row="1" Grid.Column="2" Text="Checksum:"
-                                   VerticalAlignment="Center" Margin="0,3,8,3" />
-                        <ComboBox  Grid.Row="1" Grid.Column="3"
-                                   ItemsSource="{Binding ChecksumOptions}"
-                                   SelectedItem="{Binding SelectedChecksum}"
-                                   HorizontalAlignment="Stretch" Margin="0,3,0,3" />
+
                         <TextBlock Grid.Row="1" Grid.Column="0" Text="Parity:"
                                    VerticalAlignment="Center" Margin="0,3,8,3" />
                         <ComboBox  Grid.Row="1" Grid.Column="1"
                                    ItemsSource="{Binding ParityOptions}"
                                    SelectedItem="{Binding SelectedParity}"
                                    HorizontalAlignment="Stretch" Margin="0,3,10,3" />
-                        <TextBlock Grid.Row="2" Grid.Column="2" Text="Target Node:"
+                        <TextBlock Grid.Row="1" Grid.Column="2" Text="Checksum:"
                                    VerticalAlignment="Center" Margin="0,3,8,3" />
-                        <NumericUpDown Grid.Row="2" Grid.Column="3"
-                                       Value="{Binding TargetNode}"
-                                       Minimum="0" Maximum="31" Increment="1"
-                                       FormatString="0"
-                                       HorizontalAlignment="Stretch" Margin="0,3,0,3" />
+                        <ComboBox  Grid.Row="1" Grid.Column="3"
+                                   ItemsSource="{Binding ChecksumOptions}"
+                                   SelectedItem="{Binding SelectedChecksum}"
+                                   HorizontalAlignment="Stretch" Margin="0,3,0,3" />
+
                         <TextBlock Grid.Row="2" Grid.Column="0" Text="My Node:"
                                    VerticalAlignment="Center" Margin="0,3,8,3" />
                         <NumericUpDown Grid.Row="2" Grid.Column="1"
@@ -81,19 +109,72 @@
                                        Minimum="0" Maximum="31" Increment="1"
                                        FormatString="0"
                                        HorizontalAlignment="Stretch" Margin="0,3,10,3" />
-                        <StackPanel Grid.Row="3" Grid.Column="2" Grid.ColumnSpan="2"
-                                    Orientation="Horizontal" Spacing="6"
-                                    HorizontalAlignment="Right" Margin="0,6,0,0">
-                            <Button Content="Refresh"
-                                    Command="{Binding RefreshPortsCommand}" />
-                            <Button Content="Connect"
-                                    Command="{Binding ConnectCommand}"
-                                    IsVisible="{Binding !IsConnected}" />
-                            <Button Content="Disconnect"
-                                    Command="{Binding DisconnectCommand}"
-                                    IsVisible="{Binding IsConnected}" />
-                        </StackPanel>
+                        <TextBlock Grid.Row="2" Grid.Column="2" Text="Target Node:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <NumericUpDown Grid.Row="2" Grid.Column="3"
+                                       Value="{Binding TargetNode}"
+                                       Minimum="0" Maximum="31" Increment="1"
+                                       FormatString="0"
+                                       HorizontalAlignment="Stretch" Margin="0,3,0,3" />
                     </Grid>
+
+                    <!-- EIP settings (collapsed when TransportType != Eip) -->
+                    <Grid ColumnDefinitions="2*,3*,2*,3*"
+                          RowDefinitions="Auto,Auto,Auto"
+                          IsVisible="{Binding TransportType,
+                              Converter={StaticResource EnumToBooleanConverter},
+                              ConverterParameter=Eip}">
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Host:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <TextBox   Grid.Row="0" Grid.Column="1"
+                                   Text="{Binding EipHost}"
+                                   HorizontalAlignment="Stretch" Margin="0,3,10,3" />
+                        <TextBlock Grid.Row="0" Grid.Column="2" Text="Port:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <NumericUpDown Grid.Row="0" Grid.Column="3"
+                                       Value="{Binding EipPort}"
+                                       Minimum="1" Maximum="65535" Increment="1"
+                                       FormatString="0"
+                                       HorizontalAlignment="Stretch" Margin="0,3,0,3" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Timeout (ms):"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <NumericUpDown Grid.Row="1" Grid.Column="1"
+                                       Value="{Binding EipTimeout}"
+                                       Minimum="1000" Maximum="30000" Increment="500"
+                                       FormatString="0"
+                                       HorizontalAlignment="Stretch" Margin="0,3,10,3" />
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="My Node:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <NumericUpDown Grid.Row="2" Grid.Column="1"
+                                       Value="{Binding MyNode}"
+                                       Minimum="0" Maximum="31" Increment="1"
+                                       FormatString="0"
+                                       HorizontalAlignment="Stretch" Margin="0,3,10,3" />
+                        <TextBlock Grid.Row="2" Grid.Column="2" Text="Target Node:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <NumericUpDown Grid.Row="2" Grid.Column="3"
+                                       Value="{Binding TargetNode}"
+                                       Minimum="0" Maximum="31" Increment="1"
+                                       FormatString="0"
+                                       HorizontalAlignment="Stretch" Margin="0,3,0,3" />
+                    </Grid>
+
+                    <!-- Connect / Disconnect buttons -->
+                    <StackPanel Orientation="Horizontal" Spacing="6"
+                                HorizontalAlignment="Right" Margin="0,10,0,0">
+                        <Button Content="Refresh"
+                                Command="{Binding RefreshPortsCommand}" />
+                        <Button Content="Connect"
+                                Command="{Binding ConnectCommand}"
+                                IsVisible="{Binding !IsConnected}" />
+                        <Button Content="Disconnect"
+                                Command="{Binding DisconnectCommand}"
+                                IsVisible="{Binding IsConnected}" />
+                    </StackPanel>
+
                 </StackPanel>
             </Border>
 
@@ -108,22 +189,19 @@
                                 Command="{Binding UploadCommand}"
                                 IsEnabled="{Binding CanUpload}"
                                 Width="170"
-                                Background="#2E7D32"
-                                Foreground="White"
+                                Background="#2E7D32" Foreground="White"
                                 BorderThickness="0" />
                         <Button Content="Compare"
                                 Command="{Binding CompareCommand}"
                                 IsEnabled="{Binding CanCompare}"
                                 Width="170"
-                                Background="#1565C0"
-                                Foreground="White"
+                                Background="#1565C0" Foreground="White"
                                 BorderThickness="0" />
                         <Button Content="Download  (File → PLC)"
                                 Command="{Binding DownloadCommand}"
                                 IsEnabled="{Binding CanDownload}"
                                 Width="170"
-                                Background="#C62828"
-                                Foreground="White"
+                                Background="#C62828" Foreground="White"
                                 BorderThickness="0" />
                     </StackPanel>
                 </StackPanel>
@@ -142,7 +220,7 @@
                 </StackPanel>
             </Border>
 
-            <!-- ── Log ──────────────────────────────────────────────────── -->
+            <!-- ── Log (stretches to fill remaining height) ─────────────── -->
             <Border Grid.Row="3"
                     BorderBrush="Gray" BorderThickness="1" CornerRadius="5"
                     Padding="10">
@@ -155,7 +233,7 @@
                                 HorizontalAlignment="Right"
                                 Padding="8,2" FontSize="11" />
                     </DockPanel>
-                    <!-- x:Name so code-behind can scroll to end on update -->
+                    <!-- Last child of DockPanel gets all remaining space -->
                     <TextBox x:Name="LogTextBox"
                              Text="{Binding LogText}"
                              IsReadOnly="True"
@@ -163,7 +241,8 @@
                              TextWrapping="NoWrap"
                              FontFamily="Consolas,Courier New,monospace"
                              FontSize="11"
-                             BorderThickness="0" />
+                             BorderThickness="0"
+                             VerticalAlignment="Stretch" />
                 </DockPanel>
             </Border>
 
