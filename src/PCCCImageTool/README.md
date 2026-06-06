@@ -140,24 +140,237 @@ The resulting `.bin` file can be downloaded to a real PLC or the PCCCEmulator.
 | **Dialog hangs / no reaction** | Run from a terminal to see debug output; ensure the main window is not hidden. |
 | **PLC stopped working after download** | You downloaded a program file that is not compatible with your PLC. Restore the original backup using RSLogix or this tool if a correct backup exists. |
 | **Compare shows mismatches** | Normal if the PLC program has changed since the backup was created. Use Upload to create a fresh backup. |
+| **EIP connection timeout** | Check firewall (TCP/UDP 44818). Ensure emulator or PLC is reachable. |
 
 ## Project structure
+The following class diagram illustrates the main components of PCCCImageTool and their relationships, following the MVVM pattern with ReactiveUI:
+
+### Part 1 – UI Layer
+```mermaid
+classDiagram
+    direction TB
+
+    class TransportType {
+        <<enumeration>>
+        Df1Serial
+        Eip
+    }
+
+    class IDialogService {
+        <<interface>>
+        +ShowMessageAsync(title, message) Task
+        +ShowConfirmAsync(title, message) Task~bool~
+        +OpenFilePickerAsync(title) Task~string?~
+        +SaveFilePickerAsync(title, suggestedFileName) Task~string?~
+        +ShowCompareResultsAsync~T~(results) Task
+    }
+
+    class AvaloniaDialogService {
+        +ShowMessageAsync(title, message) Task
+        +ShowConfirmAsync(title, message) Task~bool~
+        +OpenFilePickerAsync(title) Task~string?~
+        +SaveFilePickerAsync(title, suggestedFileName) Task~string?~
+        +ShowCompareResultsAsync~T~(results) Task
+        -GetMainWindow() Window?
+        -GetTopLevel() TopLevel?
+        -BuildDialog(title, message, actionControl) Window
+    }
+
+    IDialogService <|.. AvaloniaDialogService : implements
+
+    class EnumToBooleanConverter {
+        <<IValueConverter>>
+        +Convert(value, targetType, parameter, culture) object?
+        +ConvertBack(value, targetType, parameter, culture) object?
+    }
+
+    class TransportTypeToStringConverter {
+        <<IValueConverter>>
+        +Convert(value, targetType, parameter, culture) object?
+        +ConvertBack(value, targetType, parameter, culture) object?
+    }
+
+    class MainWindowViewModel {
+        -IDialogService _dialogService
+        -PlcInfo _currentPlcInfo
+        -TransportType _transportType
+        -bool _isBusy
+        -bool _isConnected
+        -string _statusText
+        -double _progressValue
+        -string _progressMessage
+        -string _logText
+        +ObservableCollection~string~ AvailablePorts
+        +ObservableCollection~int~ BaudRates
+        +ObservableCollection~string~ ParityOptions
+        +ObservableCollection~string~ ChecksumOptions
+        +List~TransportType~ TransportOptions
+        +ReactiveCommand~Unit,Unit~ RefreshPortsCommand
+        +ReactiveCommand~Unit,Unit~ ConnectCommand
+        +ReactiveCommand~Unit,Unit~ DisconnectCommand
+        +ReactiveCommand~Unit,Unit~ UploadCommand
+        +ReactiveCommand~Unit,Unit~ DownloadCommand
+        +ReactiveCommand~Unit,Unit~ CompareCommand
+        +ReactiveCommand~Unit,Unit~ ClearLogCommand
+        +ReactiveCommand~Unit,Unit~ AboutCommand
+        +MainWindowViewModel(dialogService)
+        +Dispose() void
+        +CanUpload bool
+        +CanDownload bool
+        +CanCompare bool
+        -AppendLog(line) void
+        -ConnectAsync() Task
+        -UploadAsync() Task
+        -DownloadAsync() Task
+        -CompareAsync() Task
+    }
+
+    class MainWindow {
+        <<sealed>>
+        +MainWindow()
+        -LogTextBox TextBox
+    }
+
+    MainWindow --> MainWindowViewModel : DataContext
+    MainWindow ..> EnumToBooleanConverter : uses
+    MainWindow ..> TransportTypeToStringConverter : uses
+    MainWindowViewModel --> IDialogService : uses
+    MainWindowViewModel --> TransportType : uses
+
+    note for MainWindowViewModel "Uses ProgramTransferService, PlcIdentifier, PlcInfo from Core Layer (Part 2)"
+```
+
+### Part 2 – Core Layer
+```mermaid
+classDiagram
+    direction TB
+
+    %% ==================== Models ====================
+    class PlcInfo {
+        <<record>>
+        +int ProcessorType
+        +string Name
+        +bool SupportsUploadDownload
+        +string Family
+        +string Bulletin
+        +byte SeriesRevision
+        +byte RamKb
+        +string ModeStr
+        +GetDefaultFileName(modeStr) string
+    }
+
+    class StructureCompareResult {
+        +int FileNumber
+        +int FileType
+        +string FileTypeName
+        +bool FileExistsInPlc
+        +bool FileExistsInFile
+        +bool SizeMatches
+        +int? FileSizeBytes
+        +int? PlcSizeBytes
+        +string SizeDisplay
+        +string PlcSizeDisplay
+        +bool StructureMatch
+        +string StructureStatus
+        +string MismatchReason
+    }
+
+    class FullCompareResult {
+        +uint? FileCrc32
+        +uint? PlcCrc32
+        +bool DataMatches
+        +string DataStatus
+    }
+
+    FullCompareResult --|> StructureCompareResult : inherits
+
+    class FileTypeHelper {
+        <<static>>
+        +GetFileTypeName(fileType) string
+        +GetBytesPerElement(fileType) int
+    }
+
+    %% ==================== Core Services ====================
+    class ProgramTransferService {
+        -PCCCComm _df1
+        -IProgress~string~? _progressMessage
+        -IProgress~double~? _progressPercent
+        -CancellationToken _cancellationToken
+        -PlcInfo? _plcInfo
+        +UploadToFileAsync(filePath) Task
+        +DownloadFromFileAsync(filePath, targetProcessorType, targetBulletin, skipSetProgramMode) Task
+        +CompareFullAsync(filePath) Task~List~FullCompareResult~~
+        -SaveToFile(path, files, ...) void
+        -LoadFromFileAndValidate(path, targetProcessorType, targetBulletin, requireBulletinMatch) Collection~PLCFileDetails~
+    }
+
+    class PlcIdentifier {
+        <<static>>
+        +IdentifyAsync(df1) Task~PlcInfo~
+        +DecodeModeString(modeByte) string
+    }
+
+    class FrameDecoder {
+        <<static>>
+        +Decode(raw) string
+        +Hex(bytes) string
+        -RemoveDleStuffing(stuffed) byte[]
+        -DecodeEip(raw) string
+    }
+
+    class Crc32 {
+        <<static>>
+        +Compute(data) uint
+        -CreateTable() uint[]
+    }
+
+    %% ==================== External Library ====================
+    class PCCCComm {
+        <<external>>
+        +OpenComms() void
+        +CloseComms() void
+        +GetProcessorType() int
+        +GetDiagnosticStatusRaw() byte[]
+        +UploadProgramData() Collection~PLCFileDetails~
+        +DownloadProgramData(files) void
+        +SetProgramMode() void
+        +SetRunMode() void
+        +RawFrameSent event
+        +RawFrameReceived event
+        +FileProgress event
+    }
+
+    %% ==================== Relationships ====================
+    ProgramTransferService --> PCCCComm : uses
+    ProgramTransferService --> Crc32 : uses
+    ProgramTransferService --> FileTypeHelper : uses
+    ProgramTransferService --> PlcInfo : may use
+    PlcIdentifier --> PlcInfo : returns
+    FrameDecoder --> FileTypeHelper : uses
+
+    note for ProgramTransferService "Instantiated by MainWindowViewModel (UI Layer Part 1)"
+    note for StructureCompareResult "Displayed by AvaloniaDialogService (UI Layer Part 1)"
+    note for FullCompareResult "Displayed by AvaloniaDialogService (UI Layer Part 1)"
+```
 
 | File | Description |
 |------|-------------|
 | `Program.cs` | Application entry point |
 | `App.axaml` / `App.axaml.cs` | Avalonia application setup |
-| `Views/MainWindow.axaml` | Main window XAML layout |
-| `ViewModels/MainWindowViewModel.cs` | MVVM logic for communication and transfer |
+| `Converters/EnumToBooleanConverter.cs` | Convert transport type to boolean |
+| `Converters/TransportTypeToStringConverter.cs` | Convert transport type to string |
 | `Models/CompareResult.cs` | Comparison result data structure |
 | `Models/FileTypeHelper.cs` | PCCC file type to string conversion |
 | `Models/PlcInfo.cs` | PLC type information |
+| `Models/TransportType.cs` | Transport type information |
 | `Services/AvaloniaDialogService.cs` | Dialog service implementation for Avalonia |
 | `Services/FrameDecoder.cs` | PCCC transport frame decoder for logging |
 | `Services/IDialogService.cs` | Dialog service interface |
 | `Services/PlcIdentifier.cs` | Processor type detection |
 | `Services/ProgramTransferService.cs` | Upload/download and file serialisation |
 | `Utilities/Crc32.cs` | Small CRC32 helper (IEEE 802.3 polynomial 0xEDB88320) |
+| `Views/MainWindow.axaml` | Main window XAML layout |
+| `ViewModels/MainWindowViewModel.cs` | MVVM logic for communication and transfer |
 
 ## License
 Same as the PCCCComm library (GPLv3+).
