@@ -33,4 +33,5 @@ public interface ISerialPort : IDisposable
     void Write(byte[] buffer, int offset, int count);
     bool RtsEnable { get; set; }
     bool DtrEnable { get; set; }
+    int BaudRate { get; }
 }

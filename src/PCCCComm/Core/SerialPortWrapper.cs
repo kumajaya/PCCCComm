@@ -33,6 +33,8 @@ public class SerialPortWrapper : ISerialPort
 
     public event EventHandler<byte[]>? BytesReceived;
 
+    public int BaudRate => _port.BaudRate;
+
     public SerialPortWrapper(string portName, int baudRate, Parity parity)
     {
         _port = new SerialPort(portName, baudRate, parity, 8, StopBits.One)

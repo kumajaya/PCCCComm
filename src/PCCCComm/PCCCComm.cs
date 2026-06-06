@@ -63,6 +63,13 @@ public class PCCCComm : IDisposable
     private readonly string? _eipHost = null;
     private readonly int    _eipPort  = 0;
 
+    // ─── Half-duplex master configuration (DF1Master) ─────────────────────
+    private int _slaveAddress = 1;
+    private DF1HalfDuplexTransport.Rs485ControlMode _rs485Mode = DF1HalfDuplexTransport.Rs485ControlMode.Auto;
+    private int _rtsAssertDelayMs = 1;
+    private int _rtsDeassertDelayMs = 5;
+    private bool _echoSuppression = false;
+
     /// <summary>
     /// Subscribes to all events of the current transport.
     /// </summary>
@@ -121,9 +128,8 @@ public class PCCCComm : IDisposable
         get => m_Protocol;
         set
         {
-            if (value != "DF1")
-                throw new NotSupportedException($"Protocol '{value}' is not supported. " + 
-                        "Only 'DF1' is supported in this version.");
+            if (value != "DF1" && value != "DF1Master")
+                throw new NotSupportedException($"Protocol '{value}' is not supported. Only 'DF1' or 'DF1Master' are supported.");
             m_Protocol = value;
         }
     }
@@ -135,12 +141,89 @@ public class PCCCComm : IDisposable
         set
         {
             m_CheckSum = value;
-            if (_currentTransport is DF1FullDuplexTransport df1)
+            if (_currentTransport is DF1BaseTransport df1)
                 df1.ChecksumType = value;
         }
     }
 
     public bool AsyncMode { get; set; }
+
+    /// <summary>
+    /// Gets or sets the slave node address for DF1Master mode (1-254). Default is 1.
+    /// </summary>
+    public int SlaveAddress
+    {
+        get => _slaveAddress;
+        set
+        {
+            if (value < 1 || value > 254)
+                throw new ArgumentOutOfRangeException(nameof(SlaveAddress), "Address must be 1-254.");
+            _slaveAddress = value;
+            if (_currentTransport is DF1HalfDuplexTransport master)
+                master.SlaveAddress = value;
+        }
+    }
+
+    /// <summary>
+    /// Gets or sets the RS-485 direction control mode for DF1Master mode.
+    /// Default is Auto (assumes hardware auto-direction).
+    /// </summary>
+    public DF1HalfDuplexTransport.Rs485ControlMode Rs485Mode
+    {
+        get => _rs485Mode;
+        set
+        {
+            _rs485Mode = value;
+            if (_currentTransport is DF1HalfDuplexTransport master)
+                master.Rs485Mode = value;
+        }
+    }
+
+    /// <summary>
+    /// Delay in milliseconds after asserting RTS/DTR before writing data (DF1Master only).
+    /// Default is 1 ms.
+    /// </summary>
+    public int Rs485AssertDelayMs
+    {
+        get => _rtsAssertDelayMs;
+        set
+        {
+            _rtsAssertDelayMs = Math.Max(0, value);
+            if (_currentTransport is DF1HalfDuplexTransport master)
+                master.RtsAssertDelayMs = _rtsAssertDelayMs;
+        }
+    }
+
+    /// <summary>
+    /// Delay in milliseconds after writing data before deasserting RTS/DTR (DF1Master only).
+    /// Default is 5 ms.
+    /// </summary>
+    public int Rs485DeassertDelayMs
+    {
+        get => _rtsDeassertDelayMs;
+        set
+        {
+            _rtsDeassertDelayMs = Math.Max(0, value);
+            if (_currentTransport is DF1HalfDuplexTransport master)
+                master.RtsDeassertDelayMs = _rtsDeassertDelayMs;
+        }
+    }
+
+    /// <summary>
+    /// When true, bytes transmitted by the master are expected to echo back on the RX line
+    /// (common on RS-485 without hardware echo cancellation). The transport will discard
+    /// echoed bytes automatically. Default is false.
+    /// </summary>
+    public bool EchoSuppression
+    {
+        get => _echoSuppression;
+        set
+        {
+            _echoSuppression = value;
+            if (_currentTransport is DF1HalfDuplexTransport master)
+                master.EchoSuppression = value;
+        }
+    }
 
     // ─── Events ──────────────────────────────────────────────────────────────
     public event EventHandler? DataReceived;
@@ -159,7 +242,7 @@ public class PCCCComm : IDisposable
         set
         {
             responseTimeoutMs = value > 0 ? value : 2000;
-            if (_currentTransport is DF1FullDuplexTransport df1)
+            if (_currentTransport is DF1BaseTransport df1)
                 df1.MaxTicks = responseTimeoutMs / 20;  // each tick = 20 ms
         }
     }
@@ -221,11 +304,11 @@ public class PCCCComm : IDisposable
         _currentTransport = transport ?? throw new ArgumentNullException(nameof(transport));
         AttachTransportEvents();
 
-        if (_currentTransport is DF1FullDuplexTransport df1)
+        if (_currentTransport is DF1BaseTransport df1)
         {
             df1.ChecksumType = m_CheckSum;
             df1.MaxTicks = responseTimeoutMs / 20; // Sync timeout
-            // Forward raw frame events if the transport is DF1FullDuplexTransport
+            // Forward raw frame events if the transport is DF1BaseTransport
         }
     }
 
@@ -1039,13 +1122,30 @@ public class PCCCComm : IDisposable
             }
         }
 
-        // Fall back to DF1 serial transport.
+        // DF1 serial transport (full-duplex or half-duplex master)
         try
         {
             var port = new SerialPortWrapper(m_ComPort, m_BaudRate, m_Parity);
-            var transport = new DF1FullDuplexTransport(port);
-            transport.ChecksumType = m_CheckSum;
-            transport.MaxTicks = responseTimeoutMs / 20;
+            ITransport transport;
+            if (m_Protocol == "DF1Master")
+            {
+                var master = new DF1HalfDuplexTransport(port);
+                master.ChecksumType = m_CheckSum;
+                master.MaxTicks = responseTimeoutMs / 20;
+                master.SlaveAddress = _slaveAddress;
+                master.Rs485Mode = _rs485Mode;
+                master.RtsAssertDelayMs = _rtsAssertDelayMs;
+                master.RtsDeassertDelayMs = _rtsDeassertDelayMs;
+                master.EchoSuppression = _echoSuppression;
+                transport = master;
+            }
+            else // "DF1"
+            {
+                var full = new DF1FullDuplexTransport(port);
+                full.ChecksumType = m_CheckSum;
+                full.MaxTicks = responseTimeoutMs / 20;
+                transport = full;
+            }
             _currentTransport = transport;
             AttachTransportEvents();
             transport.Open();
@@ -1272,7 +1372,7 @@ public class PCCCComm : IDisposable
         {
             // Unsolicited write: send a PCCC reply only for DF1 serial.
             // EtherNet/IP uses request-response; no explicit reply is needed.
-            if (_currentTransport is DF1FullDuplexTransport)
+            if (_currentTransport is DF1BaseTransport)
             {
                 int replyTns = innerFrame[5] * 256 + innerFrame[4];
                 SendResponse(innerFrame[2] + 0x40, replyTns);
