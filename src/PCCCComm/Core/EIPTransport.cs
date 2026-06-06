@@ -117,6 +117,8 @@ public class EIPTransport : ITransport
     private CancellationTokenSource? _rxCts;
 
     public event EventHandler<byte[]>? FrameReceived;
+    public event EventHandler<byte[]>? RawFrameSent;
+    public event EventHandler<byte[]>? RawFrameReceived;
 
     /// <summary>
     /// Returns true when the TCP connection is established and the transport
@@ -243,6 +245,8 @@ public class EIPTransport : ITransport
             throw new ArgumentException("Inner frame cannot be null or empty.", nameof(innerFrame));
 
         byte[] eipPacket = BuildSendRRDataPacket(innerFrame);
+
+        RawFrameSent?.Invoke(this, eipPacket);
 
         lock (_sendLock)
         {
@@ -592,6 +596,8 @@ public class EIPTransport : ITransport
                     byte[] packet = new byte[totalLen];
                     Array.Copy(header,  0, packet, 0,          EipHeaderLen);
                     Array.Copy(payload, 0, packet, EipHeaderLen, length);
+
+                    RawFrameReceived?.Invoke(this, packet);
 
                     // CIP service code is at offset 40.
                     if (totalLen <= CipPayloadOffset) continue;

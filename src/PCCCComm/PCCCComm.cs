@@ -63,9 +63,30 @@ public class PCCCComm : IDisposable
     private readonly string? _eipHost = null;
     private readonly int    _eipPort  = 0;
 
-    // Named methods for forwarding raw frame events (to allow unsubscribe)
-    private void ForwardRawFrameSent(object? sender, byte[] data) => RawFrameSent?.Invoke(sender, data);
-    private void ForwardRawFrameReceived(object? sender, byte[] data) => RawFrameReceived?.Invoke(sender, data);
+    /// <summary>
+    /// Subscribes to all events of the current transport.
+    /// </summary>
+    private void AttachTransportEvents()
+    {
+        if (_currentTransport == null) return;
+        _currentTransport.FrameReceived += OnFrameReceived;
+        _currentTransport.RawFrameSent += OnRawFrameSent;
+        _currentTransport.RawFrameReceived += OnRawFrameReceived;
+    }
+
+    /// <summary>
+    /// Unsubscribes from all events of the current transport.
+    /// </summary>
+    private void DetachTransportEvents()
+    {
+        if (_currentTransport == null) return;
+        _currentTransport.FrameReceived -= OnFrameReceived;
+        _currentTransport.RawFrameSent -= OnRawFrameSent;
+        _currentTransport.RawFrameReceived -= OnRawFrameReceived;
+    }
+
+    private void OnRawFrameSent(object? sender, byte[] e) => RawFrameSent?.Invoke(this, e);
+    private void OnRawFrameReceived(object? sender, byte[] e) => RawFrameReceived?.Invoke(this, e);
 
     // ─── Properties (exactly as original) ──────────────────────────────────
     public int MyNode { get; set; }
@@ -186,7 +207,7 @@ public class PCCCComm : IDisposable
         _eipHost = host;
         _eipPort = port;
         _currentTransport = new EIPTransport(host, port, timeoutMs);
-        _currentTransport.FrameReceived += OnFrameReceived;
+        AttachTransportEvents();
         // EIPTransport has no checksum type or raw frame diagnostic events.
     }
 
@@ -198,15 +219,13 @@ public class PCCCComm : IDisposable
     {
         TNS = (ushort)((rnd.Next() & 0x7F) + 1);
         _currentTransport = transport ?? throw new ArgumentNullException(nameof(transport));
-        _currentTransport.FrameReceived += OnFrameReceived;
+        AttachTransportEvents();
 
         if (_currentTransport is DF1Transport df1)
         {
             df1.ChecksumType = m_CheckSum;
             df1.MaxTicks = responseTimeoutMs / 20; // Sync timeout
             // Forward raw frame events if the transport is DF1Transport
-            df1.RawFrameSent += ForwardRawFrameSent;
-            df1.RawFrameReceived += ForwardRawFrameReceived;
         }
     }
 
@@ -1009,9 +1028,9 @@ public class PCCCComm : IDisposable
             try
             {
                 var eip = new EIPTransport(_eipHost, _eipPort, responseTimeoutMs);
-                eip.FrameReceived += OnFrameReceived;
-                eip.Open();
                 _currentTransport = eip;
+                AttachTransportEvents();
+                eip.Open();
                 return 0;
             }
             catch (Exception ex)
@@ -1026,12 +1045,10 @@ public class PCCCComm : IDisposable
             var port = new SerialPortWrapper(m_ComPort, m_BaudRate, m_Parity);
             var transport = new DF1Transport(port);
             transport.ChecksumType = m_CheckSum;
-            transport.FrameReceived += OnFrameReceived;
-            transport.RawFrameSent += ForwardRawFrameSent;
-            transport.RawFrameReceived += ForwardRawFrameReceived;
             transport.MaxTicks = responseTimeoutMs / 20;
-            transport.Open();
             _currentTransport = transport;
+            AttachTransportEvents();
+            transport.Open();
             return 0;
         }
         catch (Exception ex)
@@ -1047,13 +1064,7 @@ public class PCCCComm : IDisposable
     {
         if (_currentTransport != null)
         {
-            _currentTransport.FrameReceived -= OnFrameReceived;
-            // Unsubscribe raw frame events if applicable
-            if (_currentTransport is DF1Transport df1)
-            {
-                df1.RawFrameSent -= ForwardRawFrameSent;
-                df1.RawFrameReceived -= ForwardRawFrameReceived;
-            }
+            DetachTransportEvents();
             _currentTransport.Close();
             _currentTransport.Dispose();
             _currentTransport = null;

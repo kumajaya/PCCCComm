@@ -66,6 +66,16 @@ public interface ITransport : IDisposable
     event EventHandler<byte[]> FrameReceived;
 
     /// <summary>
+    /// Raised when a raw transport frame is sent (before any processing).
+    /// </summary>
+    event EventHandler<byte[]>? RawFrameSent;
+
+    /// <summary>
+    /// Raised when a raw transport frame is received (before any processing).
+    /// </summary>
+    event EventHandler<byte[]>? RawFrameReceived;
+
+    /// <summary>
     /// Indicates whether the transport is open and ready for communication.
     /// </summary>
     bool IsOpen { get; }
