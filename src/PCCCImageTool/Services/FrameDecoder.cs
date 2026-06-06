@@ -4,6 +4,7 @@ using System.Text;
 using System.Collections.Generic;
 
 using PCCCImageTool.Models;
+
 namespace PCCCImageTool.Services;
 
 public static class FrameDecoder
@@ -28,6 +29,35 @@ public static class FrameDecoder
         return list.ToArray();
     }
 
+    /// <summary>
+    /// Converts a byte array to a hex string with space separators.
+    /// Optimised using string.Create to allocate the final string directly.
+    /// </summary>
+    public static string Hex(byte[] bytes)
+    {
+        if (bytes == null || bytes.Length == 0) return string.Empty;
+
+        int length = (bytes.Length * 3) - 1;
+
+        return string.Create(length, bytes, (chars, state) =>
+        {
+            int pos = 0;
+            for (int i = 0; i < state.Length; i++)
+            {
+                byte b = state[i];
+                chars[pos++] = ToHexChar(b >> 4);
+                chars[pos++] = ToHexChar(b & 0x0F);
+                if (i < state.Length - 1)
+                    chars[pos++] = ' ';
+            }
+        });
+    }
+
+    private static char ToHexChar(int nibble) => (char)(nibble < 10 ? '0' + nibble : 'A' + nibble - 10);
+
+    /// <summary>
+    /// Decodes a raw DF1 or EIP frame into a human-readable description.
+    /// </summary>
     public static string Decode(byte[] raw)
     {
         // EIP frame detection (first byte is not DLE 0x10, and length >= 24)
@@ -86,8 +116,9 @@ public static class FrameDecoder
         return sb.ToString().TrimEnd();
     }
 
-    public static string Hex(byte[] bytes) => BitConverter.ToString(bytes).Replace('-', ' ');
-
+    /// <summary>
+    /// Decodes an EIP encapsulation header into a one‑line summary.
+    /// </summary>
     private static string DecodeEip(byte[] raw)
     {
         if (raw.Length < 24) return $"EIP (truncated): {Hex(raw)}";
