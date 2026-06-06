@@ -54,12 +54,12 @@ dotnet run --project Example.csproj -- COM1
 ### EtherNet/IP Mode
 
 ```bash
-dotnet run --project Example.csproj -- --transport eip --host 192.168.1.10
+dotnet run --project Example.csproj -- --mode eip --host 192.168.1.10
 ```
 
 Optional timeout (default 5000 ms):
 ```bash
-dotnet run --project Example.csproj -- --transport eip --host 192.168.1.10 --timeout 3000
+dotnet run --project Example.csproj -- --mode eip --host 192.168.1.10 --timeout 3000
 ```
 
 ### Command line options
@@ -67,7 +67,7 @@ dotnet run --project Example.csproj -- --transport eip --host 192.168.1.10 --tim
 | Option | Description | Default |
 |--------|-------------|---------|
 | `[port]` | Serial port name (DF1 mode) | `COM1` |
-| `--transport df1\|eip` | Transport mode | `df1` |
+| `--mode df1\|eip` | Transport mode | `df1` |
 | `--baud <n>` | Baud rate (DF1) | `19200` |
 | `--parity <none/odd/even>` | Parity mode (DF1) | `none` |
 | `--target <n>` | Target PLC node ID (DF1) | `1` |
@@ -138,7 +138,7 @@ dotnet run --project ../PCCCEmulator/PCCCEmulator.csproj -- --mode eip --port 44
 
 Then run the example client:
 ```bash
-dotnet run --project Example.csproj -- --transport eip --host 127.0.0.1 --eip-port 44818
+dotnet run --project Example.csproj -- --mode eip --host 127.0.0.1 --eip-port 44818
 ```
 
 ### Stress test example
@@ -150,7 +150,7 @@ dotnet run --project Example.csproj -- COM1 --stress-test 500
 
 EIP:
 ```bash
-dotnet run --project Example.csproj -- --transport eip --host 192.168.1.10 --stress-test 500
+dotnet run --project Example.csproj -- --mode eip --host 192.168.1.10 --stress-test 500
 ```
 
 Runs 500 continuous reads of `F8:0` (or another address), then prints communication statistics.

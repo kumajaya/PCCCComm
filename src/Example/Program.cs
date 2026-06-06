@@ -176,6 +176,10 @@ class Program
         string portName = "COM1";
         int baud = 19200;
         Parity parity = Parity.None;
+        string rs485Mode = "auto";
+        bool echoSuppression = false;
+        int rs485AssertDelay = 1;
+        int rs485DeassertDelay = 5;
         string eipHost = "";
         int eipPort = 44818;
         int timeoutMs = 5000;
@@ -194,7 +198,7 @@ class Program
 
             if (i == 0 && !a.StartsWith("--"))
                 portName = args[i];
-            else if (a == "--transport" && i + 1 < args.Length)
+            else if (a == "--mode" && i + 1 < args.Length)
             {
                 transport = args[++i].ToLowerInvariant();
             }
@@ -210,6 +214,22 @@ class Program
                     "even" => Parity.Even,
                     _ => Parity.None
                 };
+            }
+            else if (a == "--rs485-mode" && i + 1 < args.Length)
+            {
+                rs485Mode = args[++i].ToLowerInvariant();
+            }
+            else if (a == "--echo-suppression")
+            {
+                echoSuppression = true;
+            }
+            else if (a == "--rs485-assert-delay" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[++i], out var d)) rs485AssertDelay = d;
+            }
+            else if (a == "--rs485-deassert-delay" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[++i], out var d)) rs485DeassertDelay = d;
             }
             else if (a == "--host" && i + 1 < args.Length)
             {
@@ -272,6 +292,23 @@ class Program
                 MyNode = myNode
             };
             Console.WriteLine($"EIP: Connecting to {eipHost}:{eipPort} (timeout {timeoutMs} ms)");
+        }
+        else if (transport == "df1master")
+        {
+            pccc = new Comm.PCCCComm(portName, baud, parity)
+            {
+                Protocol = "DF1Master",
+                SlaveAddress = targetNode,
+                Rs485Mode = rs485Mode switch
+                {
+                    "rts" => Comm.Core.DF1HalfDuplexTransport.Rs485ControlMode.Rts,
+                    "dtr" => Comm.Core.DF1HalfDuplexTransport.Rs485ControlMode.Dtr,
+                    _ => Comm.Core.DF1HalfDuplexTransport.Rs485ControlMode.Auto
+                },
+                EchoSuppression = echoSuppression,
+                Rs485AssertDelayMs = rs485AssertDelay,
+                Rs485DeassertDelayMs = rs485DeassertDelay
+            };
         }
         else // DF1 serial
         {
@@ -561,20 +598,23 @@ class Program
         Console.WriteLine("  [port]               Serial port name (default COM1)");
         Console.WriteLine();
         Console.WriteLine("Options:");
-        Console.WriteLine("  --baud <n>           Baud rate (default 19200)");
-        Console.WriteLine("  --parity <none|odd|even>  Parity mode (default none)");
-        Console.WriteLine("EtherNet/IP Options:");
-        Console.WriteLine("  --transport eip      Use EtherNet/IP transport");
-        Console.WriteLine("  --host <IP>          PLC IP address (required for EIP)");
-        Console.WriteLine("  --eip-port <n>       EIP port (default 44818)");
-        Console.WriteLine("  --timeout <n>        Connection and response timeout in ms (default 5000)");
-        Console.WriteLine("  --target <n>         Target PLC node id (default 1)");
-        Console.WriteLine("  --mynode <n>         Local/master node id (default 0)");
-        Console.WriteLine("  --checksum <crc|bcc> DF1 checksum mode (default crc)");
-        Console.WriteLine("  --interactive-only   Skip the demo and go straight to interactive CLI");
-        Console.WriteLine("  --no-interactive     Run only the demo, then exit");
-        Console.WriteLine("  --stress-test [n]    Run stress test (n = loop count, default infinite)");
-        Console.WriteLine("  --help, -h           Show this help");
+        Console.WriteLine("  --mode <df1|df1master|eip>   Transport mode (default df1)");
+        Console.WriteLine("  --baud <n>                   Baud rate (default 19200)");
+        Console.WriteLine("  --parity <none|odd|even>     Parity mode (default none)");
+        Console.WriteLine("  --rs485-mode <auto|rts|dtr>  RS-485 direction control (default auto)");
+        Console.WriteLine("  --echo-suppression           Discard echoed bytes (for RS-485 without auto cancellation)");
+        Console.WriteLine("  --rs485-assert-delay <ms>    Delay after enabling driver (default 1)");
+        Console.WriteLine("  --rs485-deassert-delay <ms>  Delay after last byte before disabling (default 5)");
+        Console.WriteLine("  --host <IP>                  PLC IP address (required for EtherNet/IP)");
+        Console.WriteLine("  --eip-port <n>               EIP port (default 44818)");
+        Console.WriteLine("  --timeout <n>                EIP Connection and response timeout in ms (default 5000)");
+        Console.WriteLine("  --target <n>                 Target PLC node id (default 1, slave address for DF1 master mode)");
+        Console.WriteLine("  --mynode <n>                 Local/master node id (default 0)");
+        Console.WriteLine("  --checksum <crc|bcc>         DF1 checksum mode (default crc)");
+        Console.WriteLine("  --interactive-only           Skip the demo and go straight to interactive CLI");
+        Console.WriteLine("  --no-interactive             Run only the demo, then exit");
+        Console.WriteLine("  --stress-test [n]            Run stress test (n = loop count, default infinite)");
+        Console.WriteLine("  --help, -h                   Show this help");
         Console.WriteLine();
         Console.WriteLine("Interactive Commands:");
         Console.WriteLine("  read <addr> [cnt]    Read value(s) from address");
@@ -594,8 +634,9 @@ class Program
         Console.WriteLine("  dotnet run -- COM1");
         Console.WriteLine("  dotnet run -- COM1 --interactive-only");
         Console.WriteLine("  dotnet run -- COM1 --stress-test 500");
-        Console.WriteLine("  dotnet run -- --transport eip --host 192.168.1.10");
-        Console.WriteLine("  dotnet run -- --transport eip --host 192.168.1.10 --stress-test 500");
+        Console.WriteLine("  dotnet run -- COM1 --mode df1master --baud 19200 --target 3");
+        Console.WriteLine("  dotnet run -- --mode eip --host 192.168.1.10");
+        Console.WriteLine("  dotnet run -- --mode eip --host 192.168.1.10 --stress-test 500");
     }
 
     static void PrintInteractiveHelp()
