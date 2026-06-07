@@ -2,6 +2,7 @@ namespace PCCCImageTool.Models;
 
 public enum TransportType
 {
-    Df1Serial,
+    Df1FullDuplex,
+    Df1HalfDuplex,
     Eip
 }

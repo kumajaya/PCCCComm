@@ -5,8 +5,8 @@
         x:Class="PCCCImageTool.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="PCCC Image Transfer Tool"
-        Width="580" Height="680"
-        CanResize="True" MinWidth="580" MinHeight="580">
+        Width="600" Height="800"
+        CanResize="True" MinWidth="600" MinHeight="800">
 
     <Design.DataContext>
         <vm:MainWindowViewModel />
@@ -54,10 +54,11 @@
                          All three Grids share the same ColumnDefinitions so
                          labels and fields stay aligned regardless of which
                          transport panel is visible. -->
-                    <Grid ColumnDefinitions="2*,3*,2*,3*" Margin="0,0,0,4">
+                    <Grid ColumnDefinitions="3*,3*,3*,3*" Margin="0,0,0,4">
                         <TextBlock Grid.Column="0" Text="Transport:"
                                    VerticalAlignment="Center" Margin="0,3,8,3" />
                         <ComboBox  Grid.Column="1"
+                                   IsEnabled="{Binding !IsConnected}"
                                    ItemsSource="{Binding TransportOptions}"
                                    SelectedItem="{Binding TransportType}"
                                    HorizontalAlignment="Stretch" Margin="0,3,10,3">
@@ -67,14 +68,30 @@
                                 </DataTemplate>
                             </ComboBox.ItemTemplate>
                         </ComboBox>
+
+                        <!-- Connect / Disconnect buttons -->
+                        <StackPanel Grid.Column="2" Grid.ColumnSpan="2"
+                                    Orientation="Horizontal" Spacing="3"
+                                    HorizontalAlignment="Right" Margin="0,3,0,3">
+                            <Button Content="Refresh"
+                                    IsEnabled="{Binding !IsConnected}"
+                                    Command="{Binding RefreshPortsCommand}" />
+                            <Button Content="Connect"
+                                    Command="{Binding ConnectCommand}"
+                                    IsVisible="{Binding !IsConnected}" />
+                            <Button Content="Disconnect"
+                                    Command="{Binding DisconnectCommand}"
+                                    IsVisible="{Binding IsConnected}" />
+                        </StackPanel>
                     </Grid>
 
-                    <!-- DF1 serial settings (collapsed when TransportType != Df1Serial) -->
-                    <Grid ColumnDefinitions="2*,3*,2*,3*"
+                    <!-- DF1 serial settings (collapsed when TransportType != Df1FullDuplex) -->
+                    <Grid ColumnDefinitions="3*,3*,3*,3*"
                           RowDefinitions="Auto,Auto,Auto"
+                          IsEnabled="{Binding !IsConnected}"
                           IsVisible="{Binding TransportType,
                               Converter={StaticResource EnumToBooleanConverter},
-                              ConverterParameter=Df1Serial}">
+                              ConverterParameter=Df1FullDuplex}">
 
                         <TextBlock Grid.Row="0" Grid.Column="0" Text="COM Port:"
                                    VerticalAlignment="Center" Margin="0,3,8,3" />
@@ -118,9 +135,91 @@
                                        HorizontalAlignment="Stretch" Margin="0,3,0,3" />
                     </Grid>
 
+                    <!-- DF1 half‑duplex master settings (collapsed when TransportType != Df1HalfDuplex) -->
+                    <Grid ColumnDefinitions="3*,3*,3*,3*"
+                          RowDefinitions="Auto,Auto,Auto,Auto,Auto"
+                          IsEnabled="{Binding !IsConnected}"
+                          IsVisible="{Binding TransportType,
+                              Converter={StaticResource EnumToBooleanConverter},
+                              ConverterParameter=Df1HalfDuplex}">
+
+                        <!-- Row 0: COM Port & Baud Rate -->
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="COM Port:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <ComboBox  Grid.Row="0" Grid.Column="1"
+                                   ItemsSource="{Binding AvailablePorts}"
+                                   SelectedItem="{Binding SelectedPort}"
+                                   HorizontalAlignment="Stretch" Margin="0,3,10,3" />
+                        <TextBlock Grid.Row="0" Grid.Column="2" Text="Baud Rate:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <ComboBox  Grid.Row="0" Grid.Column="3"
+                                   ItemsSource="{Binding BaudRates}"
+                                   SelectedItem="{Binding SelectedBaud}"
+                                   HorizontalAlignment="Stretch" Margin="0,3,0,3" />
+
+                        <!-- Row 1: Parity & Checksum -->
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Parity:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <ComboBox  Grid.Row="1" Grid.Column="1"
+                                   ItemsSource="{Binding ParityOptions}"
+                                   SelectedItem="{Binding SelectedParity}"
+                                   HorizontalAlignment="Stretch" Margin="0,3,10,3" />
+                        <TextBlock Grid.Row="1" Grid.Column="2" Text="Checksum:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <ComboBox  Grid.Row="1" Grid.Column="3"
+                                   ItemsSource="{Binding ChecksumOptions}"
+                                   SelectedItem="{Binding SelectedChecksum}"
+                                   HorizontalAlignment="Stretch" Margin="0,3,0,3" />
+
+                        <!-- Row 2: My Node & Target Node (Slave) -->
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="My Node:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <NumericUpDown Grid.Row="2" Grid.Column="1"
+                                       Value="{Binding MyNode}"
+                                       Minimum="0" Maximum="31" Increment="1"
+                                       FormatString="0"
+                                       HorizontalAlignment="Stretch" Margin="0,3,10,3" />
+                        <TextBlock Grid.Row="2" Grid.Column="2" Text="Target Node:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <NumericUpDown Grid.Row="2" Grid.Column="3"
+                                       Value="{Binding TargetNode}"
+                                       Minimum="1" Maximum="254" Increment="1"
+                                       FormatString="0"
+                                       HorizontalAlignment="Stretch" Margin="0,3,0,3" />
+
+                        <!-- Row 3: RS-485 Mode & Echo Suppression -->
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="RS-485 Mode:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <ComboBox  Grid.Row="3" Grid.Column="1"
+                                   ItemsSource="{Binding Rs485Modes}"
+                                   SelectedItem="{Binding Rs485Mode}"
+                                   HorizontalAlignment="Stretch" Margin="0,3,10,3" />
+                        <CheckBox  Grid.Row="3" Grid.Column="2" Grid.ColumnSpan="2"
+                                   Content="Echo Suppression"
+                                   IsChecked="{Binding EchoSuppression}"
+                                   VerticalAlignment="Center" Margin="0,3,0,3" />
+
+                        <!-- Row 4: RTS Assert Delay & RTS Deassert Delay -->
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="RTS Assert:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <NumericUpDown Grid.Row="4" Grid.Column="1"
+                                       Value="{Binding RtsAssertDelay}"
+                                       Minimum="0" Maximum="100" Increment="1"
+                                       FormatString="0"
+                                       HorizontalAlignment="Stretch" Margin="0,3,10,3" />
+                        <TextBlock Grid.Row="4" Grid.Column="2" Text="RTS Deassert:"
+                                   VerticalAlignment="Center" Margin="0,3,8,3" />
+                        <NumericUpDown Grid.Row="4" Grid.Column="3"
+                                       Value="{Binding RtsDeassertDelay}"
+                                       Minimum="0" Maximum="100" Increment="1"
+                                       FormatString="0"
+                                       HorizontalAlignment="Stretch" Margin="0,3,0,3" />
+                    </Grid>
+
                     <!-- EIP settings (collapsed when TransportType != Eip) -->
-                    <Grid ColumnDefinitions="2*,3*,2*,3*"
+                    <Grid ColumnDefinitions="3*,3*,3*,3*"
                           RowDefinitions="Auto,Auto,Auto"
+                          IsEnabled="{Binding !IsConnected}"
                           IsVisible="{Binding TransportType,
                               Converter={StaticResource EnumToBooleanConverter},
                               ConverterParameter=Eip}">
@@ -161,20 +260,6 @@
                                        FormatString="0"
                                        HorizontalAlignment="Stretch" Margin="0,3,0,3" />
                     </Grid>
-
-                    <!-- Connect / Disconnect buttons -->
-                    <StackPanel Orientation="Horizontal" Spacing="6"
-                                HorizontalAlignment="Right" Margin="0,10,0,0">
-                        <Button Content="Refresh"
-                                Command="{Binding RefreshPortsCommand}" />
-                        <Button Content="Connect"
-                                Command="{Binding ConnectCommand}"
-                                IsVisible="{Binding !IsConnected}" />
-                        <Button Content="Disconnect"
-                                Command="{Binding DisconnectCommand}"
-                                IsVisible="{Binding IsConnected}" />
-                    </StackPanel>
-
                 </StackPanel>
             </Border>
 

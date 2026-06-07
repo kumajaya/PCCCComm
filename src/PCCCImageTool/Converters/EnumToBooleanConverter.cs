@@ -11,7 +11,7 @@ public class EnumToBooleanConverter : IValueConverter
     {
         if (value == null || parameter == null) return false;
         
-        // parameter is expected to be string like "Df1Serial" or "Eip"
+        // parameter is expected to be string like "Df1FullDuplex", "Df1HalfDuplex" or "Eip"
         string paramStr = parameter.ToString()!;
         if (Enum.TryParse(typeof(TransportType), paramStr, true, out var enumValue))
         {

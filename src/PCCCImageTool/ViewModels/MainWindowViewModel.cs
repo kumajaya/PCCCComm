@@ -10,6 +10,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using PCCCComm;
+using PCCCComm.Core;
 using PCCCImageTool.Models;
 using PCCCImageTool.Services;
 using ReactiveUI;
@@ -48,8 +49,20 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
     private int    _eipPort    = 44818;
     private int    _eipTimeout = 5000;
 
-    private TransportType _transportType = TransportType.Df1Serial;
-    public List<TransportType> TransportOptions { get; } = new() { TransportType.Df1Serial, TransportType.Eip };
+    private TransportType _transportType = TransportType.Df1FullDuplex;
+    public List<TransportType> TransportOptions { get; } = new() 
+    { 
+        TransportType.Df1FullDuplex, 
+        TransportType.Df1HalfDuplex,
+        TransportType.Eip 
+    };
+
+    // ─── Half-duplex specific ────────────────────────────────────────────────
+    private string _rs485Mode = "Auto";
+    private bool _echoSuppression = false;
+    private int _rtsAssertDelay = 1;
+    private int _rtsDeassertDelay = 5;
+    public List<string> Rs485Modes { get; } = new() { "Auto", "Rts", "Dtr" };
 
     // ─── Log throttling fields ──────────────────────────────────────────────
     private readonly StringBuilder _pendingLogBatch = new();
@@ -140,6 +153,31 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         set => this.RaiseAndSetIfChanged(ref _myNode, value);
     }
 
+    // ─── Half-duplex properties ──────────────────────────────────────────────
+    public string Rs485Mode
+    {
+        get => _rs485Mode;
+        set => this.RaiseAndSetIfChanged(ref _rs485Mode, value);
+    }
+
+    public bool EchoSuppression
+    {
+        get => _echoSuppression;
+        set => this.RaiseAndSetIfChanged(ref _echoSuppression, value);
+    }
+
+    public int RtsAssertDelay
+    {
+        get => _rtsAssertDelay;
+        set => this.RaiseAndSetIfChanged(ref _rtsAssertDelay, value);
+    }
+
+    public int RtsDeassertDelay
+    {
+        get => _rtsDeassertDelay;
+        set => this.RaiseAndSetIfChanged(ref _rtsDeassertDelay, value);
+    }
+
     public bool IsBusy
     {
         get => _isBusy;
@@ -204,7 +242,7 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
     public ReactiveCommand<Unit, Unit> DownloadCommand     { get; }
     public ReactiveCommand<Unit, Unit> ClearLogCommand     { get; }
     public ReactiveCommand<Unit, Unit> CompareCommand      { get; }
-    public ReactiveCommand<Unit, Unit> AboutCommand    { get; }
+    public ReactiveCommand<Unit, Unit> AboutCommand        { get; }
 
     private void OnRawFrameSent(object? sender, byte[] frame)     => AppendLog($"TX  {FrameDecoder.Hex(frame)}\n    {FrameDecoder.Decode(frame)}");
     private void OnRawFrameReceived(object? sender, byte[] frame) => AppendLog($"RX  {FrameDecoder.Hex(frame)}\n    {FrameDecoder.Decode(frame)}");
@@ -222,9 +260,9 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
 
         RefreshPortsCommand = ReactiveCommand.Create(RefreshPorts, notBusy);
         ConnectCommand      = ReactiveCommand.CreateFromTask(ConnectAsync, canConnect);
-        DisconnectCommand = ReactiveCommand.Create(Disconnect,
-                        this.WhenAnyValue(x => x.IsConnected, x => x.IsBusy,
-                            (connected, busy) => connected && !busy));
+        DisconnectCommand   = ReactiveCommand.Create(Disconnect,
+                            this.WhenAnyValue(x => x.IsConnected, x => x.IsBusy,
+                                (connected, busy) => connected && !busy));
         UploadCommand       = ReactiveCommand.CreateFromTask(UploadAsync,   canUpload);
         DownloadCommand     = ReactiveCommand.CreateFromTask(DownloadAsync, canDownload);
         ClearLogCommand     = ReactiveCommand.Create(ClearLog);
@@ -358,7 +396,12 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
     // ─── Connect / Disconnect ────────────────────────────────────────────────
     private async Task ConnectAsync()
     {
-        if (TransportType == TransportType.Df1Serial && string.IsNullOrEmpty(SelectedPort))
+        if (TransportType == TransportType.Df1FullDuplex && string.IsNullOrEmpty(SelectedPort))
+        {
+            await _dialogService.ShowMessageAsync("Error", "Select a COM port first.");
+            return;
+        }
+        if (TransportType == TransportType.Df1HalfDuplex && string.IsNullOrEmpty(SelectedPort))
         {
             await _dialogService.ShowMessageAsync("Error", "Select a COM port first.");
             return;
@@ -372,8 +415,10 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         IsBusy = true;
         StatusText = "Connecting…";
 
-        if (TransportType == TransportType.Df1Serial)
+        if (TransportType == TransportType.Df1FullDuplex)
             AppendLog($"Connecting to {SelectedPort} @ {SelectedBaud} baud ({SelectedParity} parity, {SelectedChecksum} checksum)…");
+        else if (TransportType == TransportType.Df1HalfDuplex)
+            AppendLog($"Connecting to {SelectedPort} @ {SelectedBaud} baud ({SelectedParity} parity, {SelectedChecksum} checksum) as DF1 half-duplex master…");
         else
             AppendLog($"Connecting to {EipHost}:{EipPort} via EtherNet/IP (timeout {EipTimeout} ms)…");
 
@@ -381,7 +426,7 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         {
             DisposeDF1();
 
-            if (TransportType == TransportType.Df1Serial)
+            if (TransportType == TransportType.Df1FullDuplex)
             {
                 Parity parity = SelectedParity switch
                 {
@@ -396,6 +441,35 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
                     MyNode     = (int)MyNode,
                     CheckSum   = SelectedChecksum == "Crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc,
                     Protocol   = "DF1"
+                };
+            }
+            else if (TransportType == TransportType.Df1HalfDuplex)
+            {
+                Parity parity = SelectedParity switch
+                {
+                    "Even" => Parity.Even,
+                    "Odd"  => Parity.Odd,
+                    _      => Parity.None
+                };
+
+                var rs485ModeEnum = Rs485Mode switch
+                {
+                    "Rts" => DF1HalfDuplexTransport.Rs485ControlMode.Rts,
+                    "Dtr" => DF1HalfDuplexTransport.Rs485ControlMode.Dtr,
+                    _     => DF1HalfDuplexTransport.Rs485ControlMode.Auto
+                };
+
+                _df1 = new global::PCCCComm.PCCCComm(SelectedPort, SelectedBaud, parity)
+                {
+                    TargetNode = (int)TargetNode,
+                    MyNode     = (int)MyNode,
+                    CheckSum   = SelectedChecksum == "Crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc,
+                    Protocol   = "DF1Master",
+                    SlaveAddress = (int)TargetNode,
+                    Rs485Mode = rs485ModeEnum,
+                    EchoSuppression = EchoSuppression,
+                    Rs485AssertDelayMs = RtsAssertDelay,
+                    Rs485DeassertDelayMs = RtsDeassertDelay
                 };
             }
             else // EIP
@@ -415,7 +489,12 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
             AppendLog($"Identified: {plcInfo.Name} (0x{plcInfo.ProcessorType:X2}) " +
                       $"Upload/Download={plcInfo.SupportsUploadDownload}");
 
-            string transportName = TransportType == TransportType.Df1Serial ? "DF1 Serial" : "EtherNet/IP";
+            string transportName = TransportType switch
+            {
+                TransportType.Df1FullDuplex => "DF1 Full-Duplex",
+                TransportType.Df1HalfDuplex => "DF1 Half-Duplex",
+                _ => "EtherNet/IP"
+            };
 
             if (plcInfo.SupportsUploadDownload)
             {
@@ -471,7 +550,12 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
                 byte modeByte = data[18];
                 string modeStr = PlcIdentifier.DecodeModeString(modeByte);
                 CurrentPlcInfo = CurrentPlcInfo with { ModeStr = modeStr };
-                string transportName = TransportType == TransportType.Df1Serial ? "DF1 Serial" : "EtherNet/IP";
+                string transportName = TransportType switch
+                {
+                    TransportType.Df1FullDuplex => "DF1 Full-Duplex",
+                    TransportType.Df1HalfDuplex => "DF1 Half-Duplex",
+                    _ => "EtherNet/IP"
+                };
                 StatusText = $"{transportName} Connected | {_currentPlcInfo.Name} (0x{_currentPlcInfo.ProcessorType:X2}) | {modeStr}";
             }
             else

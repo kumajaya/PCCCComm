@@ -11,7 +11,13 @@ public class TransportTypeToStringConverter : IValueConverter
     {
         if (value is TransportType type)
         {
-            return type == TransportType.Df1Serial ? "DF1 Serial" : "EtherNet/IP";
+            return type switch
+            {
+                TransportType.Df1FullDuplex => "DF1 Full Duplex",
+                TransportType.Df1HalfDuplex => "DF1 Half Duplex",
+                TransportType.Eip => "EtherNet/IP",
+                _ => value.ToString()
+            };
         }
         return value?.ToString();
     }

@@ -17,6 +17,8 @@ Cross‑platform desktop GUI (Avalonia UI) that uploads the complete program fro
 - **Compare** – compares a backup file against current PLC program, shows mismatches in file structure and CRC32 data.
 - **Supports** SLC 5/01, 5/02, 5/03, 5/04, 5/05 and MicroLogix 1000/1500.
 - **Graphical COM port selection** – baud rate, parity, and node address configurable.
+- **DF1 half‑duplex master** support for RS‑485 multi‑drop networks (selectable in transport dropdown).
+- **RS‑485 direction control** (Auto / RTS / DTR) and echo suppression configurable in GUI.
 - **Progress indication** – shows current file being transferred.
 - **Self‑contained** – uses only the PCCCComm library, no external UI dependencies.
 - **⚠️ Download overwrites PLC memory** – use with extreme caution on real hardware
@@ -54,6 +56,24 @@ dotnet run --project src/PCCCImageTool
 
 **Command line options** – none (all settings are configured in the GUI).
 
+## Transport Modes
+
+The tool supports three transport modes, selectable from the **Transport** dropdown:
+
+| Mode | Description |
+|------|-------------|
+| **DF1 Full Duplex** | Standard point‑to‑point RS‑232 communication (default). |
+| **DF1 Half Duplex (Master)** | RS‑485 multi‑drop master. Polls a specific slave address. |
+| **EtherNet/IP** | TCP/IP communication over port 44818. |
+
+When **DF1 Half Duplex (Master)** is selected, additional settings appear:
+- **RS‑485 Mode** – Auto (hardware auto‑direction), RTS, or DTR.
+- **Echo Suppression** – Discard echoed bytes when using full‑duplex loopback (e.g., virtual serial pairs).
+- **RTS Assert Delay (ms)** – Delay after enabling driver before writing.
+- **RTS Deassert Delay (ms)** – Delay after last byte before disabling driver.
+
+The **Target Node** field is reused as the slave address (1‑254) in half‑duplex master mode.
+
 ## Linux-specific notes
 
 ### Permissions
@@ -83,6 +103,8 @@ Then select `/dev/ttyS31` from the port list in the GUI.
 
 ## Testing with the PCCCEmulator
 
+### DF1 Full‑Duplex (default)
+
 1. Create a virtual serial pair (e.g. `COM1` ↔ `COM2` on Windows, or `ttyV0` ↔ `ttyV1` using `socat` on Linux).
 2. Start the emulator on one end:
    ```bash
@@ -90,6 +112,31 @@ Then select `/dev/ttyS31` from the port list in the GUI.
    ```
 3. Start PCCCImageTool and connect to the **other** end (`COM1` or `ttyV1`).
 4. Upload, then download – the emulator behaves like a real SLC 5/03.
+
+### DF1 Half‑Duplex Master ↔ Slave
+
+1. Create a virtual serial pair (e.g. `COM3` ↔ `COM4`).
+2. Start the emulator as **slave** on one end (e.g., COM4):
+   ```bash
+   dotnet run --project src/PCCCEmulator -- COM4 --mode df1slave --node 1 --baud 19200
+   ```
+3. Start PCCCImageTool, select **DF1 Half Duplex (Master)** in the Transport dropdown, set:
+   - COM Port: the other end (e.g., COM3)
+   - Target Node: same as slave node (1)
+   - RS‑485 Mode: Auto (or RTS/DTR if needed)
+   - Echo Suppression: **unchecked** (for real RS‑485 or null modem cable; enable only if using a full‑duplex loopback)
+4. Click Connect, then upload/download/compare as usual.
+
+> **Note:** For virtual serial pairs (which are full‑duplex), enable **Echo Suppression** on the master side to discard self‑echo. For real RS‑485 hardware with auto‑direction, leave it disabled.
+
+### EtherNet/IP Loopback
+
+Start the emulator in EIP mode:
+```bash
+dotnet run --project src/PCCCEmulator -- --mode eip --port 44818
+```
+
+Then in PCCCImageTool, select **EtherNet/IP**, enter `127.0.0.1` as host, and connect.
 
 ## File format
 
@@ -141,6 +188,8 @@ The resulting `.bin` file can be downloaded to a real PLC or the PCCCEmulator.
 | **PLC stopped working after download** | You downloaded a program file that is not compatible with your PLC. Restore the original backup using RSLogix or this tool if a correct backup exists. |
 | **Compare shows mismatches** | Normal if the PLC program has changed since the backup was created. Use Upload to create a fresh backup. |
 | **EIP connection timeout** | Check firewall (TCP/UDP 44818). Ensure emulator or PLC is reachable. |
+| **Half‑duplex master cannot communicate** | Verify that the emulator is in `--mode df1slave` with matching node ID. For virtual serial pairs, enable **Echo Suppression**. Check RS‑485 direction control settings. |
+| **No communication in half‑duplex mode** | Ensure both sides use the same baud rate, parity, and checksum. For real RS‑485, the converter may need `--rs485-mode rts` and appropriate delays. |
 
 ## Project structure
 The following class diagram illustrates the main components of PCCCImageTool and their relationships, following the MVVM pattern with ReactiveUI:
@@ -152,7 +201,8 @@ classDiagram
 
     class TransportType {
         <<enumeration>>
-        Df1Serial
+        Df1FullDuplex
+        Df1HalfDuplex
         Eip
     }
 
@@ -204,6 +254,11 @@ classDiagram
         +ObservableCollection~int~ BaudRates
         +ObservableCollection~string~ ParityOptions
         +ObservableCollection~string~ ChecksumOptions
+        +List~string~ Rs485Modes
+        +string Rs485Mode
+        +bool EchoSuppression
+        +int RtsAssertDelay
+        +int RtsDeassertDelay
         +List~TransportType~ TransportOptions
         +ReactiveCommand~Unit,Unit~ RefreshPortsCommand
         +ReactiveCommand~Unit,Unit~ ConnectCommand
@@ -362,7 +417,7 @@ classDiagram
 | `Models/CompareResult.cs` | Comparison result data structure |
 | `Models/FileTypeHelper.cs` | PCCC file type to string conversion |
 | `Models/PlcInfo.cs` | PLC type information |
-| `Models/TransportType.cs` | Transport type information |
+| `Models/TransportType.cs` | Transport type enumeration |
 | `Services/AvaloniaDialogService.cs` | Dialog service implementation for Avalonia |
 | `Services/FrameDecoder.cs` | PCCC transport frame decoder for logging |
 | `Services/IDialogService.cs` | Dialog service interface |

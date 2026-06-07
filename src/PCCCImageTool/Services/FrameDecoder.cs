@@ -9,9 +9,11 @@ namespace PCCCImageTool.Services;
 
 public static class FrameDecoder
 {
+    private const string Indent = "          "; // 10 spaces prefix
+
     /// <summary>
     /// Remove DLE stuffing: 0x10 0x10 → single 0x10.
-    /// </summary>
+    /// </summary>    
     private static byte[] RemoveDleStuffing(byte[] stuffed)
     {
         var list = new List<byte>(stuffed.Length);
@@ -66,21 +68,47 @@ public static class FrameDecoder
             return DecodeEip(raw);
         }
 
+        // 2-byte control frames: ACK, NAK, ENQ
         if (raw.Length == 2 && raw[0] == 0x10)
-            return raw[1] == 0x06 ? "ACK" : raw[1] == 0x15 ? "NAK" : raw[1] == 0x05 ? "ENQ" : $"DLE 0x{raw[1]:X2}";
+        {
+            string type = raw[1] switch
+            {
+                0x06 => "ACK",
+                0x15 => "NAK",
+                0x05 => "ENQ",
+                _ => $"DLE 0x{raw[1]:X2}"
+            };
+            return $"{Indent}{type}";
+        }
 
+        // 3-byte poll frame (DLE ENQ + address) for half-duplex master
+        if (raw.Length == 3 && raw[0] == 0x10 && raw[1] == 0x05)
+        {
+            return $"{Indent}ENQ (poll) addr=0x{raw[2]:X2}";
+        }
+
+        // Normal DF1 data frame
         if (raw.Length < 6 || raw[0] != 0x10 || raw[1] != 0x02)
-            return $"Invalid: {Hex(raw)}";
+        {
+            return $"{Indent}Invalid: {Hex(raw)}";
+        }
 
         // Locate DLE ETX (skip stuffed DLE DLE)
         int etx = -1;
         for (int i = 2; i < raw.Length - 1; i++)
-            if (raw[i] == 0x10 && raw[i+1] == 0x10) i++;
-            else if (raw[i] == 0x10 && raw[i+1] == 0x03) { etx = i; break; }
-        if (etx == -1) return "No ETX";
+        {
+            if (raw[i] == 0x10 && raw[i + 1] == 0x10)
+                i++;
+            else if (raw[i] == 0x10 && raw[i + 1] == 0x03)
+            {
+                etx = i;
+                break;
+            }
+        }
+        if (etx == -1) return $"{Indent}No ETX";
 
         byte[] unstuffed = RemoveDleStuffing(raw.Skip(2).Take(etx - 2).ToArray());
-        if (unstuffed.Length < 6) return "Payload too short";
+        if (unstuffed.Length < 6) return $"{Indent}Payload too short";
 
         int dst = unstuffed[0], src = unstuffed[1], cmd = unstuffed[2], sts = unstuffed[3];
         int tns = unstuffed[4] | (unstuffed[5] << 8);
@@ -89,14 +117,18 @@ public static class FrameDecoder
         // Note: Length == 7 means there is an FNC but no data — valid for some response frames
 
         var sb = new StringBuilder();
-        sb.AppendLine($"          DST={dst} SRC={src} TNS={tns} CMD=0x{cmd:X2} FNC=0x{fnc:X2} STS={sts}");
+        sb.AppendLine($"{Indent}DST={dst} SRC={src} TNS={tns} CMD=0x{cmd:X2} FNC=0x{fnc:X2} STS={sts}");
 
         if (cmd == 0x0F && (fnc == 0xA1 || fnc == 0xA2 || fnc == 0xAA || fnc == 0xAB) && data.Length >= 4)
         {
             int size = data[0], fileNum = data[1], fileType = data[2];
             string typeStr = FileTypeHelper.GetFileTypeName(fileType);
             int elem = data[3], idx = 4;
-            if (elem == 0xFF && data.Length >= idx+2) { elem = data[idx] | (data[idx+1] << 8); idx += 2; }
+            if (elem == 0xFF && data.Length >= idx + 2)
+            {
+                elem = data[idx] | (data[idx + 1] << 8);
+                idx += 2;
+            }
 
             // size is the number of bytes requested in this transaction — not the total file size.
             // For large files (e.g. T4=468 bytes) PCCCComm splits into multiple transactions
@@ -106,12 +138,14 @@ public static class FrameDecoder
             sb.Append($"              Size={size} bytes ({wordsRequested} {(bpe == 2 ? "words" : "elements")}), File={fileNum}, Type={typeStr}, Element={elem}");
             if ((fnc == 0xA2 || fnc == 0xAB) && data.Length > idx)
                 sb.Append($", SubElem={data[idx]}");
-            if (fnc == 0xAB && data.Length >= idx+4)
-                sb.Append($", Mask=0x{(data[idx] | (data[idx+1] << 8)):X4}");
+            if (fnc == 0xAB && data.Length >= idx + 4)
+                sb.Append($", Mask=0x{(data[idx] | (data[idx + 1] << 8)):X4}");
             sb.AppendLine();
         }
         else if (cmd == 0x06 && fnc == 0x03)
+        {
             sb.AppendLine("              (Diagnostic status data)");
+        }
 
         return sb.ToString().TrimEnd();
     }
@@ -121,7 +155,7 @@ public static class FrameDecoder
     /// </summary>
     private static string DecodeEip(byte[] raw)
     {
-        if (raw.Length < 24) return $"EIP (truncated): {Hex(raw)}";
+        if (raw.Length < 24) return $"{Indent}EIP (truncated): {Hex(raw)}";
         ushort cmd = (ushort)(raw[0] | (raw[1] << 8));
         ushort len = (ushort)(raw[2] | (raw[3] << 8));
         uint session = BitConverter.ToUInt32(raw, 4);
@@ -133,6 +167,6 @@ public static class FrameDecoder
             0x006F => "SendRRData",
             _ => $"0x{cmd:X4}"
         };
-        return $"          EIP {cmdName} (session=0x{session:X8}, status=0x{status:X8}, len={len})";
+        return $"{Indent}EIP {cmdName} (session=0x{session:X8}, status=0x{status:X8}, len={len})";
     }
 }
