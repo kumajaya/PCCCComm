@@ -351,13 +351,12 @@ public class PCCCComm : IDisposable
                     int strLen = BitConverter.ToInt16(returnedData, i * 84);
                     if (strLen > 82) strLen = 82;
                     var sb = new StringBuilder();
-                    int j = 2;
-                    while (j < strLen + 2 && (i * 84) + j + 1 < returnedData.Length && returnedData[(i * 84) + j + 1] > 0)
+                    // Read characters sequentially from offset 2 (after length word)
+                    for (int j = 0; j < strLen; j++)
                     {
-                        sb.Append(Encoding.ASCII.GetString(new byte[] { returnedData[(i * 84) + j + 1] }));
-                        if (j < strLen + 1 && returnedData[(i * 84) + j] > 0)
-                            sb.Append(Encoding.ASCII.GetString(new byte[] { returnedData[(i * 84) + j] }));
-                        j += 2;
+                        char c = (char)returnedData[(i * 84) + 2 + j];
+                        if (c == 0) break;
+                        sb.Append(c);
                     }
                     result[i] = sb.ToString();
                 }
@@ -492,23 +491,45 @@ public class PCCCComm : IDisposable
         return WriteRawDataWithChunking(p, converted);
     }
 
+    /// <summary>
+    /// Writes a string to an ST file (type 0x8D) or to an integer file using word-packed encoding.
+    /// For ST files, the format is: 2-byte length (little-endian) followed by raw ASCII characters.
+    /// For other file types (e.g., N7 string storage), the original word-packed method is used.
+    /// </summary>
     public int WriteData(string startAddress, string dataToWrite)
     {
         if (string.IsNullOrEmpty(dataToWrite)) return 0;
         if (dataToWrite.Length > 82) dataToWrite = dataToWrite[..82];
 
         DataAddress p = AddressParser.Parse(startAddress);
-        int[]? words = StringConverter.StringToWords(dataToWrite);
-        if (words == null) return -1;
-
-        byte[] converted = new byte[words.Length * 2 + 2];
-        converted[0] = (byte)dataToWrite.Length;
-        for (int i = 0; i < words.Length; i++)
+        
+        // ST file (SLC 500 String file, type 0x8D)
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
         {
-            converted[i * 2 + 2] = (byte)((words[i] >> 8) & 0xFF);
-            converted[i * 2 + 3] = (byte)(words[i] & 0xFF);
+            // ST element is exactly 84 bytes: 2-byte length (LE) + up to 82 characters
+            byte[] stElement = new byte[84];
+            int len = dataToWrite.Length;
+            stElement[0] = (byte)(len & 0xFF);
+            stElement[1] = (byte)((len >> 8) & 0xFF);
+            for (int i = 0; i < len; i++)
+                stElement[2 + i] = (byte)dataToWrite[i];
+            // Remaining bytes already zero
+            return WriteRawDataWithChunking(p, stElement);
         }
-        return WriteRawDataWithChunking(p, converted);
+        else
+        {
+            // Original logic for non‑ST files (integer, float, etc.) using word packing
+            int[]? words = StringConverter.StringToWords(dataToWrite);
+            if (words == null) return -1;
+            byte[] converted = new byte[words.Length * 2 + 2];
+            converted[0] = (byte)dataToWrite.Length;
+            for (int i = 0; i < words.Length; i++)
+            {
+                converted[i * 2 + 2] = (byte)((words[i] >> 8) & 0xFF);
+                converted[i * 2 + 3] = (byte)(words[i] & 0xFF);
+            }
+            return WriteRawDataWithChunking(p, converted);
+        }
     }
 
     // ─── Data Memory ───────────────────────────────────────────────────────

@@ -64,7 +64,8 @@ using System.Runtime.CompilerServices;
 ///     15  B     41    82     B15:0–B15:40
 ///     16  B     41    82     B16:0–B16:40
 ///     17  N     26    52     N17:0–N17:25
-///  18–28  —     —     —      Inactive slots (require INCLUDE_INACTIVE_FILES)
+///     18  ST    10   840     ST18:0–ST18:9, 84 bytes/elem (2-byte len + 82 chars)
+///  19–28  —     —     —      Inactive slots (require INCLUDE_INACTIVE_FILES)
 ///     29  B     26    52     B29:0–B29:25
 ///     30  B     26    52     B30:0–B30:25
 ///     31  B     26    52     B31:0–B31:25
@@ -203,9 +204,9 @@ public class PlcMemory
         const int numProgramFiles = 24;    // SYS×2 + LAD×22
         const int numDataFiles = 32;       // 32 data file slots
 #else
-        const int dirSize = 409;           // 79 + (33 × 10) for active-only layout
+        const int dirSize = 419;           // 79 + (34 × 10) for active-only layout (22 data + 12 prog)
         const int numProgramFiles = 12;    // SYS×2 + LAD×10
-        const int numDataFiles = 21;       // 21 active data files
+        const int numDataFiles = 22;       // 22 active data files (added ST18)
 #endif
         var dir = new byte[dirSize];
 
@@ -288,6 +289,7 @@ public class PlcMemory
         Register(0x85,  82, 15);       // B15 — Binary file, 41 words
         Register(0x85,  82, 16);       // B16 — Binary file, 41 words
         Register(0x89,  52, 17);       // N17 — Integer file, 26 words
+        Register(0x8D, 840, 18, 84);   // ST18 — String file, 10 strings × 84 bytes/elem
 
 #if INCLUDE_INACTIVE_FILES
         // Inactive data files 18-28 (type 0x85 = Binary, size 0)
@@ -448,6 +450,17 @@ public class PlcMemory
         CreateDataFile(0x85, 15,  82, 2);   // B15 — 41 words
         CreateDataFile(0x85, 16,  82, 2);   // B16 — 41 words
         CreateDataFile(0x89, 17,  52, 2);   // N17 — 26 words
+
+        // ST18 — String file (10 strings × 84 bytes/elem)
+        // SLC 500 string format per AB Publication 1770-6.5.16:
+        //   Byte 0-1  : length word (little-endian, 0-82)
+        //   Bytes 2-83: character data (ASCII, one char per byte, unused bytes = 0x00)
+        // Note: PCCCComm library packs chars as words (little-endian), so char 0 → byte 2,
+        //       char 1 → byte 3, etc. The length field is bytes 0-1 as a 16-bit word.
+        CreateDataFile(0x8D, 18, 840, 84);
+        // Seed ST18:0 with a default string "EMULATOR OK" for self-test verification
+        byte[] st18 = _files[(0x8D, 18)];
+        WriteStString(st18, 0, "EMULATOR OK");
         CreateDataFile(0x85, 29,  52, 2);   // B29 — 26 words
         CreateDataFile(0x85, 30,  52, 2);   // B30 — 26 words
         CreateDataFile(0x85, 31,  52, 2);   // B31 — 26 words
@@ -831,6 +844,38 @@ public class PlcMemory
         buf[offset + 1] = (byte)((value >> 8) & 0xFF);
     }
 
+    /// <summary>
+    /// Writes an ASCII string into an ST file element buffer at the given element offset.
+    /// SLC 500 string format: bytes 0-1 = length (LE word), bytes 2-83 = char data.
+    /// Strings longer than 82 characters are truncated.
+    /// </summary>
+    /// <param name="buf">ST file byte array</param>
+    /// <param name="elementIndex">Element index (0-based)</param>
+    /// <param name="value">String to write</param>
+    private static void WriteStString(byte[] buf, int elementIndex, string value)
+    {
+        const int elemSize = 84;
+        const int maxChars = 82;
+        int offset = elementIndex * elemSize;
+        if (offset + elemSize > buf.Length) return;
+
+        // Clamp to max 82 chars
+        if (value.Length > maxChars) value = value[..maxChars];
+        int len = value.Length;
+
+        // Write length word (little-endian)
+        buf[offset]     = (byte)(len & 0xFF);
+        buf[offset + 1] = (byte)((len >> 8) & 0xFF);
+
+        // Write char data (one ASCII byte per byte, starting at offset+2)
+        for (int i = 0; i < len; i++)
+            buf[offset + 2 + i] = (byte)(value[i] & 0x7F);
+
+        // Zero-fill remaining char bytes
+        for (int i = len; i < maxChars; i++)
+            buf[offset + 2 + i] = 0x00;
+    }
+
     // =========================================================================
     // EMBEDDED PROGRAM LOADER
     // =========================================================================
@@ -922,6 +967,7 @@ public class PlcMemory
                 {
                     0x8B or 0x8C or 0x86 or 0x87 or 0x88 => 6,  // I/O, Timer, Counter, Control
                     0x8A => 4,  // Float
+                    0x8D => 84, // String (ST): 2-byte length + 82 chars
                     _ => 2       // Default word
                 };
                 _files[(fileType, fileNumber)] = new byte[numberOfBytes];
