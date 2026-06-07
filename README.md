@@ -72,6 +72,7 @@ PCCCComm/
 
 ### PCCCComm Library
 - **DF1 full‑duplex** serial framing (DLE stuffing, CRC-16/BCC, ACK/NAK, ENQ)
+- **DF1 half‑duplex master** over RS‑485 multi‑drop (polling, selective addressing)
 - **EtherNet/IP (EIP)** transport over TCP (CIP Unconnected Send, Execute PCCC)
 - Read/write any data type: integers, floats, bits, strings, timers, counters
 - Switch processor between RUN and PROGRAM modes
@@ -82,13 +83,14 @@ PCCCComm/
 
 ### PCCCEmulator (Standalone Tool)
 - Emulates an SLC 5/03 (processor type `0x49`) with DF1 and EIP interfaces
+- **DF1 half‑duplex slave** emulation for RS‑485 multi‑drop networks
 - Loads real PLC program from embedded .bin resource (converted from APS .ACH archive)
-- Full DF1 link layer: ACK/NAK, ENQ, checksum
+- Full DF1 link layer: ACK/NAK, ENQ, checksum, and half‑duplex polling support
 - Full EtherNet/IP server: TCP port 44818, UDP broadcast ListIdentity, Forward Open/Close, Connected/Unconnected Send
 - In‑memory file system with pre‑defined data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, and additional files up to file 31)
 - Responds to Get Status (CMD 0x06 FNC 0x03) with realistic 24‑byte payload
 - Handles Protected Typed Logical Read/Write (0xA1, 0xA2, 0xAA, 0xAB)
-- Configurable node ID, checksum, baud rate, parity via command line
+- Configurable node ID, checksum, baud rate, parity, RS‑485 direction control via command line
 - Console hex logging for debugging
 
 ### Example Client
@@ -103,7 +105,7 @@ PCCCComm/
 - Upload entire PLC program to a binary file
 - Download previously saved program back to the PLC
 - Compares a backup file against current PLC program
-- Supports SLC 5/01–5/05 and MicroLogix 1000/1500
+- Supports SLC 5/01‑5/05 and MicroLogix 1000/1500
 - Automatic PLC detection and descriptive filename generation
 - Progress indication during transfer
 
@@ -149,7 +151,7 @@ dotnet build -c Release src/PCCCImageTool/PCCCImageTool.csproj
 
 ## Usage
 
-### 1. Using the PCCCComm Library (DF1 serial)
+### 1. Using the PCCCComm Library (DF1 serial full‑duplex)
 
 ```csharp
 using PCCCComm;
@@ -180,7 +182,24 @@ comm.SetRunMode();
 comm.CloseComms();
 ```
 
-### 2. Using the PCCCComm Library (EtherNet/IP)
+### 2. Using the PCCCComm Library (DF1 half‑duplex master for RS‑485)
+
+```csharp
+using PCCCComm;
+
+var comm = new PCCCComm("COM2", 19200, Parity.None);
+comm.Protocol = "DF1Master";
+comm.SlaveAddress = 1;  // node address of the slave to poll
+comm.Rs485Mode = DF1HalfDuplexTransport.Rs485ControlMode.Auto;
+comm.EchoSuppression = false; // enable if your adapter echoes back its own transmission
+comm.OpenComms();
+
+string value = comm.ReadAny("N7:0");
+comm.WriteData("N7:1", 12345);
+comm.CloseComms();
+```
+
+### 3. Using the PCCCComm Library (EtherNet/IP)
 
 ```csharp
 using PCCCComm;
@@ -194,35 +213,41 @@ Console.WriteLine(value);
 comm.CloseComms();
 ```
 
-### 3. Running the Emulator (DF1)
+### 4. Running the Emulator (DF1 full‑duplex)
 
 ```bash
 dotnet run --project src/PCCCEmulator -- COM2 --baud 19200 --checksum crc
 ```
 
-### 4. Running the Emulator (EtherNet/IP)
+### 5. Running the Emulator (DF1 half‑duplex slave)
+
+```bash
+dotnet run --project src/PCCCEmulator -- COM2 --mode df1slave --node 1 --rs485-mode auto
+```
+
+### 6. Running the Emulator (EtherNet/IP)
 
 ```bash
 dotnet run --project src/PCCCEmulator -- --mode eip --port 44818
 ```
 
-### 5. Running the Example Client
+### 7. Running the Example Client
 
 ```bash
 dotnet run --project src/Example -- COM1 --target 1 --checksum crc
 ```
 
-### 6. Testing Emulator + Client Together (DF1)
+### 8. Testing Emulator + Client Together (DF1)
 
 - Create a virtual serial pair (e.g. `COM1` ↔ `COM2`).
 - Start emulator on `COM2` and client on `COM1`.
 
-### 7. Testing Emulator + Client Together (EIP)
+### 9. Testing Emulator + Client Together (EIP)
 
 - Start emulator: `dotnet run --project src/PCCCEmulator -- --mode eip`
 - Start example client (if extended to EIP) or use any EIP client (RSLinx, libplctag, pycomm3).
 
-### 8. Running the GUI Tool (PCCCImageTool)
+### 10. Running the GUI Tool (PCCCImageTool)
 
 ```bash
 dotnet run --project src/PCCCImageTool
@@ -264,6 +289,7 @@ EtherNet/IP encapsulation:
 | `Processor is in Program mode` | Normal – writes may be restricted. Use `SetRunMode()` to change. |
 | `Port busy` | Only one application can open a COM port at a time. Close other programs (RSLinx, etc.). |
 | `EIP connection timeout` | Check firewall (TCP 44818), verify emulator or PLC is reachable, and that `--mode eip` is used. |
+| `No communication in half‑duplex mode` | For testing with full‑duplex serial cables or virtual pairs, enable `--echo-suppression`. For real RS‑485, disable it unless your adapter echoes. Ensure both sides use same baud rate, parity, and checksum. |
 
 ---
 

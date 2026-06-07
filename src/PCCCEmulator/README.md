@@ -5,6 +5,7 @@ Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an
 
 ## Features
 - **DF1 full‑duplex framing** with DLE STX / DLE ETX and DLE stuffing
+- **DF1 half‑duplex slave** for RS‑485 multi‑drop networks (polling, address filtering)
 - **EtherNet/IP (EIP/PCCC)** support – TCP port 44818, UDP broadcast ListIdentity
 - CRC‑16 (calculation as per AB specification) **default** – BCC (two's complement of byte sum) also supported
 - Get Status response crafted for SLC 5/03 (processor code `0x49`)
@@ -12,6 +13,7 @@ Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an
 - In‑memory PLC file store with pre‑defined files (O, I, S, B, N, F, T, C, R)
 - Configurable serial settings via command line
 - Configurable EIP transport mode with TCP/UDP support
+- Configurable RS‑485 direction control (Auto/Rts/Dtr) for half‑duplex slave
 - Console logging of RX/TX hex for debugging
 - Independent – no external dependencies except `System.IO.Ports`
 - **Loads real SLC 5/03 program** from embedded .bin resource (converted from APS .ACH archive)
@@ -63,6 +65,20 @@ dotnet run --project PCCCEmulator.csproj -- COM3 --baud 9600 --parity even
 
 # Quiet mode (high performance, no logging)
 dotnet run --project PCCCEmulator.csproj -- COM2 --quiet
+```
+
+### DF1 Half‑Duplex Slave Mode (RS‑485 multi‑drop)
+
+Emulator acts as a passive slave on an RS‑485 bus:
+
+```bash
+dotnet run --project PCCCEmulator.csproj -- COM2 --mode df1slave --node 1 --baud 19200 --rs485-mode auto
+```
+
+Optional RS‑485 direction control (if converter lacks auto‑direction):
+
+```bash
+dotnet run --project PCCCEmulator.csproj -- COM2 --mode df1slave --node 1 --rs485-mode rts --rts-assert-delay 2 --rts-deassert-delay 5
 ```
 
 ### EtherNet/IP (EIP) Mode
@@ -118,7 +134,10 @@ Output:
 | `--parity <none/odd/even>` | Parity mode (DF1/UIC mode only) | `none` |
 | `--node <n>` | Emulator node ID | `1` |
 | `--checksum <crc/bcc>` | Checksum mode (DF1 mode only) | `crc` |
-| `--mode <df1\|uic\|eip>` | Transport mode | `df1` |
+| `--mode <df1\|df1slave\|uic\|eip>` | Transport mode | `df1` |
+| `--rs485-mode <auto\|rts\|dtr>` | RS‑485 direction control (df1slave mode) | `auto` |
+| `--rts-assert-delay <ms>` | Delay after enabling driver (df1slave mode) | `1` |
+| `--rts-deassert-delay <ms>` | Delay after last byte before disabling (df1slave mode) | `5` |
 | `--port <n>` | EIP port number (EIP mode only) | `44818` |
 | `--quiet, -q` | Disable logging for maximum performance | `false` |
 | `--help, -h` | Show usage | – |
@@ -179,6 +198,16 @@ sudo usermod -a -G dialout $USER
    dotnet run --project PCCCEmulator.csproj -- ttyV0
    ```
 3. Connect your DF1 client to `ttyV1`.
+
+### DF1 half‑duplex (RS‑485) with virtual pair
+Start the emulator as slave on COM2:
+```bash
+dotnet run --project PCCCEmulator.csproj -- COM2 --mode df1slave --node 3
+```
+Then run the [Example client](../Example) as master on COM3:
+```bash
+dotnet run --project ../Example/Example.csproj -- COM1 --mode df1master --target 3
+```
 
 ## RSLinx Integration
 
@@ -295,6 +324,7 @@ classDiagram
     class TransportMode {
         <<enumeration>>
         DF1
+        DF1Slave
         UIC
         EIP
     }
@@ -419,7 +449,9 @@ classDiagram
 |-------------------|-------------|
 | `Program.cs`      | CLI entry point, argument parsing, usage help |
 | `PCCCEmulator.cs` | Transport factory, PDU dispatcher, command handlers, timers |
-| `DF1Transport.cs` | DF1 serial framing, DLE stuffing, CRC/BCC, circular buffer |
+| `DF1BaseTransport.cs` | Abstract base for DF1 transports |
+| `DF1FullDuplexTransport.cs` | DF1 full‑duplex slave |
+| `DF1HalfDuplexTransport.cs` | DF1 half‑duplex slave (RS‑485) |
 | `EIPTransport.cs` | EtherNet/IP server, session management, CPF/CIP framing |
 | `EIPClient.cs`    | Per-connection EIP state, Forward Open/Close, PCCC dispatch |
 | `ILinkTransport.cs` | Transport abstraction interface |
@@ -442,6 +474,7 @@ classDiagram
 | **No response after ENQ (DF1)** | Make sure the emulator is running on the correct COM port and the baud rate/parity matches the client. The emulator automatically replies with ACK to ENQ. |
 | **RSLinx cannot find device on network (EIP)** | Ensure UDP port 44818 is not blocked by firewall. Emulator answers broadcast ListIdentity for auto-browse. |
 | **pycomm3 / libplctag connection timeout (EIP)** | Verify `--mode eip` is active. Check firewall allows TCP 44818. |
+| **Half‑duplex communication fails** | Ensure client uses `--mode df1master` and emulator uses `--mode df1slave` with same node ID. For virtual serial loops, enable `--echo-suppression`. |
 
 ## License
 Same as the DF1Comm library.

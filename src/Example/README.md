@@ -1,7 +1,7 @@
 # PCCCComm Example Client
 
 **Purpose**  
-Enhanced PCCC client for testing `PCCCComm` against a real PLC or the PCCCEmulator. Supports DF1 serial and EtherNet/IP (EIP) transports, interactive CLI, communication statistics, and stress testing.
+Enhanced PCCC client for testing `PCCCComm` against a real PLC or the PCCCEmulator. Supports DF1 serial, DF1 half‑duplex master, and EtherNet/IP (EIP) transports, interactive CLI, communication statistics, and stress testing.
 
 > **⚠️ CAUTION – REAL PLC HAZARD**  
 > This example client **writes data** to the connected PLC (N7, F8, B3, and mode switching).  
@@ -10,7 +10,7 @@ Enhanced PCCC client for testing `PCCCComm` against a real PLC or the PCCCEmulat
 > For safe testing, use the [PCCCEmulator](../PCCCEmulator) instead.
 
 ## Features
-- **Dual‑transport support**: DF1 serial and EtherNet/IP (EIP) over TCP.
+- **Multi‑transport support**: DF1 full‑duplex, DF1 half‑duplex master (RS‑485), and EtherNet/IP (EIP) over TCP.
 - Reads processor type (Get Status, CMD 0x06 FNC 0x03)
 - Reads/writes integers (`N7`, `O0`, `I1`, `B3`)
 - Reads/writes floating‑point values (`F8`)
@@ -20,7 +20,7 @@ Enhanced PCCC client for testing `PCCCComm` against a real PLC or the PCCCEmulat
 - **Interactive CLI** (`PCCC>` prompt) with read, write, writestring, sendhex, mode, stats, and more
 - **Communication statistics** – total requests, successes, timeouts, NAKs, other errors, error rate
 - **Stress test mode** – continuous read loop with configurable iteration count
-- Configurable settings for serial (port, baud, parity, node IDs, checksum) and EIP (host, port, timeout)
+- Configurable settings for serial (port, baud, parity, node IDs, checksum), EIP (host, port, timeout), and half‑duplex master (RS‑485 direction control, echo suppression)
 
 ![Example client](Images/Screenshots/Example.png)
 
@@ -30,7 +30,8 @@ Enhanced PCCC client for testing `PCCCComm` against a real PLC or the PCCCEmulat
 - .NET 8 SDK or later
 - `PCCCComm` library (referenced via project or DLL)
 - A target PLC or emulator:
-  - For DF1: a real SLC 5/03 or MicroLogix with DF1 port, or the **PCCCEmulator** connected via virtual serial pair
+  - For DF1 full‑duplex: a real SLC 5/03 or MicroLogix with DF1 port, or the **PCCCEmulator** connected via virtual serial pair
+  - For DF1 half‑duplex master: the **PCCCEmulator** in `df1slave` mode over an RS‑485 link (or a virtual pair with echo suppression)
   - For EIP: a real SLC 5/05 / CompactLogix / MicroLogix 1100/1400, or the **PCCCEmulator** (EIP mode)
 
 ## Build
@@ -51,6 +52,17 @@ If `PCCCComm` is a separate project in the same solution, ensure the solution in
 dotnet run --project Example.csproj -- COM1
 ```
 
+### DF1 Half‑Duplex Master Mode (RS‑485)
+
+```bash
+dotnet run --project Example.csproj -- COM2 --mode df1master --target 1 --baud 19200 --rs485-mode auto
+```
+
+With manual RTS control and echo suppression (for full‑duplex loopback):
+```bash
+dotnet run --project Example.csproj -- COM2 --mode df1master --target 1 --rs485-mode rts --echo-suppression
+```
+
 ### EtherNet/IP Mode
 
 ```bash
@@ -66,13 +78,17 @@ dotnet run --project Example.csproj -- --mode eip --host 192.168.1.10 --timeout 
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `[port]` | Serial port name (DF1 mode) | `COM1` |
-| `--mode df1\|eip` | Transport mode | `df1` |
+| `[port]` | Serial port name (DF1 modes) | `COM1` |
+| `--mode <df1\|df1master\|eip>` | Transport mode | `df1` |
 | `--baud <n>` | Baud rate (DF1) | `19200` |
 | `--parity <none/odd/even>` | Parity mode (DF1) | `none` |
-| `--target <n>` | Target PLC node ID (DF1) | `1` |
-| `--mynode <n>` | Local/master node ID (DF1) | `0` |
+| `--target <n>` | Target PLC node ID (slave address for DF1 master) | `1` |
+| `--mynode <n>` | Local/master node ID | `0` |
 | `--checksum <crc/bcc>` | Checksum mode (DF1) | `crc` |
+| `--rs485-mode <auto\|rts\|dtr>` | RS‑485 direction control (DF1 master mode) | `auto` |
+| `--echo-suppression` | Discard echoed bytes (for full‑duplex loopback) | `false` |
+| `--rs485-assert-delay <ms>` | Delay after enabling driver (DF1 master) | `1` |
+| `--rs485-deassert-delay <ms>` | Delay after last byte before disabling (DF1 master) | `5` |
 | `--host <IP>` | PLC IP address (EIP, required) | – |
 | `--eip-port <n>` | EIP port (EIP) | `44818` |
 | `--timeout <n>` | EIP connection timeout ms (EIP) | `5000` |
@@ -102,7 +118,7 @@ If the specified port is not found, the client will display a list of available 
 
 ### Example with PCCCEmulator
 
-#### DF1 virtual pair
+#### DF1 full‑duplex virtual pair
 
 **Windows** (using com0com):
 1. Create a virtual COM pair, e.g. `COM1` ↔ `COM2`.
@@ -128,6 +144,18 @@ If the specified port is not found, the client will display a list of available 
    ```bash
    dotnet run --project Example.csproj -- ttyV1 --target 1 --checksum crc
    ```
+
+#### DF1 half‑duplex master ↔ slave
+
+Start the emulator as slave on COM2:
+```bash
+dotnet run --project ../PCCCEmulator/PCCCEmulator.csproj -- COM2 --mode df1slave --node 1
+```
+Then run the example client as master on COM3:
+```bash
+dotnet run --project Example.csproj -- COM1 --mode df1master --target 1
+```
+> **Note:** For virtual serial pairs, which are full‑duplex, add `--echo-suppression` to both sides (or at least to the master) to discard self‑echo.
 
 #### EIP (EtherNet/IP) loopback
 
@@ -252,6 +280,7 @@ PCCC>
 | `Access denied` | Some DF1 targets have command protection. Not supported by this example. |
 | `PrefixAndSend method not found` | `sendhex` uses reflection on a private method. Ensure `PCCCComm` library version matches. |
 | **EIP connection refused / timeout** | Verify the emulator or PLC is running in EIP mode, firewall allows TCP port 44818, and `--host`/`--eip-port` are correct. |
+| **Half‑duplex master does not communicate** | Ensure emulator is in `--mode df1slave` with matching node ID. For virtual serial pairs, use `--echo-suppression`. Check RS‑485 direction control settings. |
 
 ## License
 
