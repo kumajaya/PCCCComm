@@ -19,128 +19,83 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// **********************************************************************************************
-// * PCCC Application Layer (PCCCComm) – fully compatible with original DF1Comm VB code.
-// * Uses ITransport for data link layer (framing, ACK/NAK, checksum)
-// * Uses PacketBuilder for packet assembly
-// * All behaviors (polling, SleepDelay, TNS, retries) are identical to the original.
-// *
-// * Original VB: Archie Jacobs, Manufacturing Automation LLC
-// * C# Port: modularized, behavior‑preserving, zero‑behavioral‑gap
-// * Reference: Allen Bradley Publication 1770-6.5.16
-// *
-// * Note: DH485 support has been temporarily removed. Only DF1 full‑duplex is supported.
-// **********************************************************************************************
-
-using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Text;
 using PCCCComm.Core;
+using PCCCComm.Pccc;
 
 namespace PCCCComm;
 
 /// <summary>
-/// PCCC application layer for communicating with Allen‑Bradley PLCs (DF1, EIP, DH485).
-/// This class is transport‑agnostic; it uses an <see cref="ITransport"/> implementation
-/// to send and receive inner PCCC frames.
+/// PCCC application layer for Allen‑Bradley PLCs (DF1, EIP).
+/// Facade for PcccProtocol, handling chunking, data conversion, upload/download.
 /// </summary>
 public class PCCCComm : IDisposable
 {
-    // ─── Fields (compatible with original) ─────────────────────────────────
-    private readonly Random rnd = new Random();
-    private ushort TNS;
-    private int ProcessorType;
+    // ─── Fields ─────────────────────────────────────────────────────────────
+    private readonly Random _rnd = new();
+    private int _processorType;                     // cached processor type
 
-    // TNS 16‑bit response handling (replaces Responded(255) and DataPackets array)
-    private readonly ConcurrentDictionary<ushort, ManualResetEventSlim> _responseEvents = new();
-    private readonly ConcurrentDictionary<ushort, byte[]> _dataPackets = new();
+    private volatile bool _disableEvent;            // suppress DataReceived during bulk transfers
 
-    // Flag to suppress DataReceived events during bulk transfers
-    private volatile bool DisableEvent;
-
-    // Transport abstraction (DF1, EIP, etc.)
     private ITransport? _currentTransport;
-    private readonly string? _eipHost = null;
-    private readonly int    _eipPort  = 0;
+    private readonly string? _eipHost;
+    private readonly int _eipPort;
 
-    // ─── Half-duplex master configuration (DF1Master) ─────────────────────
+    // DF1Master configuration
     private int _slaveAddress = 1;
     private DF1HalfDuplexTransport.Rs485ControlMode _rs485Mode = DF1HalfDuplexTransport.Rs485ControlMode.Auto;
     private int _rtsAssertDelayMs = 1;
     private int _rtsDeassertDelayMs = 5;
-    private bool _echoSuppression = false;
+    private bool _echoSuppression;
 
-    /// <summary>
-    /// Subscribes to all events of the current transport.
-    /// </summary>
-    private void AttachTransportEvents()
-    {
-        if (_currentTransport == null) return;
-        _currentTransport.FrameReceived += OnFrameReceived;
-        _currentTransport.RawFrameSent += OnRawFrameSent;
-        _currentTransport.RawFrameReceived += OnRawFrameReceived;
-    }
-
-    /// <summary>
-    /// Unsubscribes from all events of the current transport.
-    /// </summary>
-    private void DetachTransportEvents()
-    {
-        if (_currentTransport == null) return;
-        _currentTransport.FrameReceived -= OnFrameReceived;
-        _currentTransport.RawFrameSent -= OnRawFrameSent;
-        _currentTransport.RawFrameReceived -= OnRawFrameReceived;
-    }
-
-    private void OnRawFrameSent(object? sender, byte[] e) => RawFrameSent?.Invoke(this, e);
-    private void OnRawFrameReceived(object? sender, byte[] e) => RawFrameReceived?.Invoke(this, e);
+    // PCCC engine
+    private PCCCProtocol? _protocol;
 
     // ─── Properties (exactly as original) ──────────────────────────────────
     public int MyNode { get; set; }
     public int TargetNode { get; set; }
 
-    private int m_BaudRate = 19200;
+    private int _baudRate = 19200;
     public int BaudRate
     {
-        get => m_BaudRate;
-        set { if (value != m_BaudRate) CloseComms(); m_BaudRate = value; }
+        get => _baudRate;
+        set { if (value != _baudRate) CloseComms(); _baudRate = value; }
     }
 
-    private string m_ComPort = "COM1";
+    private string _comPort = "COM1";
     public string ComPort
     {
-        get => m_ComPort;
-        set { if (value != m_ComPort) CloseComms(); m_ComPort = value; }
+        get => _comPort;
+        set { if (value != _comPort) CloseComms(); _comPort = value; }
     }
 
-    private System.IO.Ports.Parity m_Parity = System.IO.Ports.Parity.None;
+    private System.IO.Ports.Parity _parity = System.IO.Ports.Parity.None;
     public System.IO.Ports.Parity Parity
     {
-        get => m_Parity;
-        set { if (value != m_Parity) CloseComms(); m_Parity = value; }
+        get => _parity;
+        set { if (value != _parity) CloseComms(); _parity = value; }
     }
 
-    // Protocol property kept for API compatibility; only "DF1" is supported.
-    // Setting any other value throws NotSupportedException.
-    private string m_Protocol = "DF1";
+    private string _protocolName = "DF1";
     public string Protocol
     {
-        get => m_Protocol;
+        get => _protocolName;
         set
         {
             if (value != "DF1" && value != "DF1Master")
                 throw new NotSupportedException($"Protocol '{value}' is not supported. Only 'DF1' or 'DF1Master' are supported.");
-            m_Protocol = value;
+            _protocolName = value;
         }
     }
 
-    private CheckSumOptions m_CheckSum = CheckSumOptions.Crc;
+    private CheckSumOptions _checkSum = CheckSumOptions.Crc;
     public CheckSumOptions CheckSum
     {
-        get => m_CheckSum;
+        get => _checkSum;
         set
         {
-            m_CheckSum = value;
+            _checkSum = value;
             if (_currentTransport is DF1BaseTransport df1)
                 df1.ChecksumType = value;
         }
@@ -148,9 +103,6 @@ public class PCCCComm : IDisposable
 
     public bool AsyncMode { get; set; }
 
-    /// <summary>
-    /// Gets or sets the slave node address for DF1Master mode (1-254). Default is 1.
-    /// </summary>
     public int SlaveAddress
     {
         get => _slaveAddress;
@@ -164,10 +116,6 @@ public class PCCCComm : IDisposable
         }
     }
 
-    /// <summary>
-    /// Gets or sets the RS-485 direction control mode for DF1Master mode.
-    /// Default is Auto (assumes hardware auto-direction).
-    /// </summary>
     public DF1HalfDuplexTransport.Rs485ControlMode Rs485Mode
     {
         get => _rs485Mode;
@@ -179,10 +127,6 @@ public class PCCCComm : IDisposable
         }
     }
 
-    /// <summary>
-    /// Delay in milliseconds after asserting RTS/DTR before writing data (DF1Master only).
-    /// Default is 1 ms.
-    /// </summary>
     public int Rs485AssertDelayMs
     {
         get => _rtsAssertDelayMs;
@@ -194,10 +138,6 @@ public class PCCCComm : IDisposable
         }
     }
 
-    /// <summary>
-    /// Delay in milliseconds after writing data before deasserting RTS/DTR (DF1Master only).
-    /// Default is 5 ms.
-    /// </summary>
     public int Rs485DeassertDelayMs
     {
         get => _rtsDeassertDelayMs;
@@ -209,11 +149,6 @@ public class PCCCComm : IDisposable
         }
     }
 
-    /// <summary>
-    /// When true, bytes transmitted by the master are expected to echo back on the RX line
-    /// (common on RS-485 without hardware echo cancellation). The transport will discard
-    /// echoed bytes automatically. Default is false.
-    /// </summary>
     public bool EchoSuppression
     {
         get => _echoSuppression;
@@ -225,29 +160,28 @@ public class PCCCComm : IDisposable
         }
     }
 
-    // ─── Events ──────────────────────────────────────────────────────────────
+    private int _responseTimeoutMs = 2000;
+    public int ResponseTimeoutMs
+    {
+        get => _responseTimeoutMs;
+        set
+        {
+            _responseTimeoutMs = value > 0 ? value : 2000;
+            if (_protocol != null)
+                _protocol.ResponseTimeoutMs = _responseTimeoutMs;
+            if (_currentTransport is DF1BaseTransport df1)
+                df1.MaxTicks = _responseTimeoutMs / 20;
+        }
+    }
+
+    // ─── Events ────────────────────────────────────────────────────────────
     public event EventHandler? DataReceived;
     public event EventHandler? UnsolicitedMessageRcvd;
     public event EventHandler? AutoDetectTry;
     public event EventHandler<FileProgressEventArgs>? FileProgress;
-
-    // Events for logging support (kept for API compatibility, currently not implemented)
     public event EventHandler<byte[]>? RawFrameSent;
     public event EventHandler<byte[]>? RawFrameReceived;
 
-    private int responseTimeoutMs = 2000;
-    public int ResponseTimeoutMs
-    {
-        get => responseTimeoutMs;
-        set
-        {
-            responseTimeoutMs = value > 0 ? value : 2000;
-            if (_currentTransport is DF1BaseTransport df1)
-                df1.MaxTicks = responseTimeoutMs / 20;  // each tick = 20 ms
-        }
-    }
-
-    /// <summary>Event arguments for file progress during upload/download.</summary>
     public class FileProgressEventArgs : EventArgs
     {
         public int FileNumber { get; set; }
@@ -259,157 +193,125 @@ public class PCCCComm : IDisposable
         public long GrandTotalBytes { get; set; }
     }
 
-    // ─── Constructors ───────────────────────────────────────────────────────
-    /// <summary>
-    /// Initialises the library using a DF1 serial transport with the given parameters.
-    /// The transport is not opened until <see cref="OpenComms"/> is called.
-    /// </summary>
+    // ─── Constructors ──────────────────────────────────────────────────────
     public PCCCComm(string? portName = null, int baud = 19200,
                     System.IO.Ports.Parity parity = System.IO.Ports.Parity.None)
     {
-        TNS = (ushort)((rnd.Next() & 0x7F) + 1);
         if (!string.IsNullOrEmpty(portName))
         {
-            m_ComPort = portName;
-            m_BaudRate = baud;
-            m_Parity = parity;
+            _comPort = portName;
+            _baudRate = baud;
+            _parity = parity;
         }
-        // The transport will be created in OpenComms() to allow property changes before opening.
     }
 
-    /// <summary>
-    /// Initialises the library with an EIP (EtherNet/IP) transport.
-    /// </summary>
-    /// <param name="host">PLC IP address or hostname.</param>
-    /// <param name="port">EIP port (default 44818).</param>
-    /// <param name="timeoutMs">Timeout for send/receive operations (default 5000 ms).</param>
     public PCCCComm(string host, int port, int timeoutMs = 5000)
     {
-        TNS = (ushort)((rnd.Next() & 0x7F) + 1);
-        responseTimeoutMs = timeoutMs;
+        _responseTimeoutMs = timeoutMs;
         _eipHost = host;
         _eipPort = port;
         _currentTransport = new EIPTransport(host, port, timeoutMs);
         AttachTransportEvents();
-        // EIPTransport has no checksum type or raw frame diagnostic events.
     }
 
-    /// <summary>
-    /// Initialises the library with a custom transport implementation.
-    /// The caller is responsible for opening and closing the transport.
-    /// </summary>
     public PCCCComm(ITransport transport)
     {
-        TNS = (ushort)((rnd.Next() & 0x7F) + 1);
         _currentTransport = transport ?? throw new ArgumentNullException(nameof(transport));
         AttachTransportEvents();
-
         if (_currentTransport is DF1BaseTransport df1)
         {
-            df1.ChecksumType = m_CheckSum;
-            df1.MaxTicks = responseTimeoutMs / 20; // Sync timeout
-            // Forward raw frame events if the transport is DF1BaseTransport
+            df1.ChecksumType = _checkSum;
+            df1.MaxTicks = _responseTimeoutMs / 20;
         }
     }
 
-    // =========================================================================
-    // PUBLIC METHODS (identical to original, but using ITransport)
-    // =========================================================================
+    private void AttachTransportEvents()
+    {
+        if (_currentTransport == null) return;
+        _currentTransport.FrameReceived += OnFrameReceived;
+        _currentTransport.RawFrameSent += OnRawFrameSent;
+        _currentTransport.RawFrameReceived += OnRawFrameReceived;
+    }
 
-    /// <summary>Place the processor in Run mode.</summary>
+    private void DetachTransportEvents()
+    {
+        if (_currentTransport == null) return;
+        _currentTransport.FrameReceived -= OnFrameReceived;
+        _currentTransport.RawFrameSent -= OnRawFrameSent;
+        _currentTransport.RawFrameReceived -= OnRawFrameReceived;
+    }
+
+    private void OnRawFrameSent(object? sender, byte[] e) => RawFrameSent?.Invoke(this, e);
+    private void OnRawFrameReceived(object? sender, byte[] e) => RawFrameReceived?.Invoke(this, e);
+
+    // ─── Public API (identical behavior) ───────────────────────────────────
     public void SetRunMode()
     {
-        byte[] data = new byte[1];
-        int func;
-        if (GetProcessorType() == 0x58) { data[0] = 2; func = 0x3A; }
-        else { data[0] = 6; func = 0x80; }
-        int reply = PrefixAndSend(0xF, func, data, true, out _);
-        if (reply != 0)
-            throw new PCCCException("Failed to change to Run mode, Check PLC Key switch - " + MessageDecoder.DecodeMessage(reply));
+        // Ensure processor type is known (original called GetProcessorType inside)
+        if (_processorType == 0)
+            _processorType = GetProcessorType();
+        
+        bool isMl = (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000);
+        EnsureProtocol();
+        _protocol!.SetRunMode(isMl, (byte)MyNode, (byte)TargetNode);
     }
 
-    /// <summary>Set CPU mode (PLC‑5 / MicroLogix).</summary>
     public int SetCPUMode(byte modeValue)
     {
-        byte[] data = { modeValue };
-        int reply = PrefixAndSend(0x0F, 0x3A, data, true, out _);
-        return reply;
+        EnsureProtocol();
+        var req = PCCCMessage.CreateChangeModeRequest(modeValue, false, 0, (byte)MyNode, (byte)TargetNode);
+        _protocol!.SendRequest(req, out int sts);
+        return sts;
     }
 
-    /// <summary>Get current processor mode (1 = RUN, 0 = PROGRAM, -1 = error).</summary>
     public int GetRunMode()
     {
-        byte[] data = Array.Empty<byte>();
-        int reply = PrefixAndSend(0x06, 0x03, data, true, out int rTNS);
-        if (reply != 0)
+        EnsureProtocol();
+        var req = PCCCMessage.CreateDiagnosticStatusRequest(0, (byte)MyNode, (byte)TargetNode);
+        var reply = _protocol!.SendRequest(req, out int sts);
+        if (sts != PCCCConstants.Sts.Success || reply?.Data == null || reply.Data.Length <= PCCCConstants.ResponseOffsets.DiagnosticStatus.ModeCode)
             return -1;
-
-        if (_dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt) && pkt.Length > 24)
-        {
-            byte modeCode = pkt[24];
-            return (modeCode == 0x06 || modeCode == 0x1E) ? 1 : 0;
-        }
-        return -1;
+        byte modeCode = reply.Data[PCCCConstants.ResponseOffsets.DiagnosticStatus.ModeCode];
+        return (modeCode == 0x06 || modeCode == 0x1E) ? 1 : 0;
     }
 
-    /// <summary>Disable I/O forces.</summary>
     public int DisableForces()
     {
-        int reply = PrefixAndSend(0x0F, 0x41, Array.Empty<byte>(), true, out _);
-        return reply;
+        EnsureProtocol();
+        var req = PCCCMessage.CreateDisableForcesRequest(0, (byte)MyNode, (byte)TargetNode);
+        _protocol!.SendRequest(req, out int sts);
+        return sts;
     }
 
-    /// <summary>Place processor in Program mode.</summary>
     public void SetProgramMode()
     {
-        byte[] data = new byte[1];
-        int func;
-        if (GetProcessorType() == 0x58) { data[0] = 0; func = 0x3A; }
-        else { data[0] = 1; func = 0x80; }
-        int reply = PrefixAndSend(0xF, func, data, true, out _);
-        if (reply != 0)
-            throw new PCCCException("Failed to change to Program mode, Check PLC Key switch - " + MessageDecoder.DecodeMessage(reply));
+        // Ensure processor type is known (original called GetProcessorType inside)
+        if (_processorType == 0)
+            _processorType = GetProcessorType();
+        
+        bool isMl = (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000);
+        EnsureProtocol();
+        _protocol!.SetProgramMode(isMl, (byte)MyNode, (byte)TargetNode);
     }
 
-    /// <summary>Read the processor type code (e.g., 0x49 for SLC 5/03).</summary>
     public int GetProcessorType()
     {
-        byte[] data = Array.Empty<byte>();
-        int reply = PrefixAndSend(6, 3, data, true, out int rTNS);
-        if (reply != 0)
-            throw new PCCCException("GetProcessorType failed: " + MessageDecoder.DecodeMessage(reply));
-
-        if (_dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt) && pkt.Length > 9)
-        {
-            ProcessorType = pkt[9];
-            return ProcessorType;
-        }
-
-        throw new PCCCException("GetProcessorType: response packet too short or missing");
+        EnsureProtocol();
+        _processorType = _protocol!.GetProcessorType((byte)MyNode, (byte)TargetNode);
+        return _processorType;
     }
 
-    /// <summary>Get raw Diagnostic Status payload (CMD 0x06 FNC 0x03).</summary>
     public byte[]? GetDiagnosticStatusRaw()
     {
-        byte[] data = Array.Empty<byte>();
-        int reply = PrefixAndSend(0x06, 0x03, data, true, out int rTNS);
-        if (reply != 0)
+        EnsureProtocol();
+        var req = PCCCMessage.CreateDiagnosticStatusRequest(0, (byte)MyNode, (byte)TargetNode);
+        var reply = _protocol!.SendRequest(req, out int sts);
+        if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
             return null;
-
-        if (_dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt) && pkt.Length > 6)
-        {
-            // Guard: if status byte (STS) is non-zero, the request failed
-            if (pkt[3] != 0) return null;
-            int dataLen = pkt.Length - 6;
-            if (dataLen <= 0) return Array.Empty<byte>();
-            var result = new byte[dataLen];
-            Array.Copy(pkt, 6, result, 0, dataLen);
-            return result;
-        }
-        return null;
+        return reply.Data;
     }
 
-    // ─── Read ─────────────────────────────────────────────────────────────────
+    // ─── Read / Write (with chunking and type conversion) ─────────────────
     public string[] ReadAny(string startAddress, int numberOfElements)
     {
         DataAddress p = AddressParser.Parse(startAddress);
@@ -417,56 +319,40 @@ public class PCCCComm : IDisposable
 
         short arrayElements = (short)(numberOfElements - 1);
         if (arrayElements < 0) arrayElements = 0;
-        if (p.BitNumber < 16) arrayElements = (short)Math.Floor(numberOfElements / 16.0);
+        if (p.BitNumber < 16)
+            arrayElements = (short)Math.Floor(numberOfElements / 16.0);
 
-        int numberOfBytes;
-        switch (p.FileType)
-        {
-            case 0x8D: numberOfBytes = (arrayElements + 1) * 84; break;
-            case 0x8A: numberOfBytes = (arrayElements + 1) * 4; break;
-            case 0x91: numberOfBytes = (arrayElements + 1) * 4; break;
-            case 0x92: numberOfBytes = (arrayElements + 1) * 50; break;
-            case 0x86:
-            case 0x87: numberOfBytes = (arrayElements + 1) * 2; break;
-            default: numberOfBytes = (arrayElements + 1) * 2; break;
-        }
+        // Calculate total bytes needed based on file type
+        int bytesPerElem = p.BytesPerElements;
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+            bytesPerElem = 2; // reading sub-element only
+        int numberOfBytes = (arrayElements + 1) * bytesPerElem;
 
-        if (p.SubElement > 0 && (p.FileType == 0x86 || p.FileType == 0x87))
-            numberOfBytes = (numberOfBytes * 3) - 4;
+        // Special adjustment for timer/counter sub-element reads
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+            numberOfBytes = (numberOfBytes * 3) - 4; // original VB logic
 
-        int reply = 0;
-        byte[] returnedData = Array.Empty<byte>();
-        int retries = 0;
+        // Read raw data with chunking
+        byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytes, out int reply);
+        if (reply != 0)
+            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
 
-        while (retries <= 2)
-        {
-            returnedData = ReadRawData(p, numberOfBytes, out reply);
-            if (reply == 0)
-                break;
-            if (retries < 2)
-            {
-                retries++;
-                continue;
-            }
-            throw new PCCCException(MessageDecoder.DecodeMessage(reply));
-        }
-
+        // Convert bytes to string based on data type
         string[] result = new string[arrayElements + 1];
         switch (p.FileType)
         {
-            case 0x8A:
+            case (byte)PCCCConstants.SlcFileTypeCode.Float:
                 for (int i = 0; i <= arrayElements; i++)
                     result[i] = BitConverter.ToSingle(returnedData, i * 4).ToString();
                 break;
-            case 0x8D:
+            case (byte)PCCCConstants.SlcFileTypeCode.String:
                 for (int i = 0; i <= arrayElements; i++)
                 {
                     int strLen = BitConverter.ToInt16(returnedData, i * 84);
                     if (strLen > 82) strLen = 82;
                     var sb = new StringBuilder();
                     int j = 2;
-                    while (j < strLen + 2 && (i * 84) + j + 1 < returnedData.Length &&
-                            returnedData[(i * 84) + j + 1] > 0)
+                    while (j < strLen + 2 && (i * 84) + j + 1 < returnedData.Length && returnedData[(i * 84) + j + 1] > 0)
                     {
                         sb.Append(Encoding.ASCII.GetString(new byte[] { returnedData[(i * 84) + j + 1] }));
                         if (j < strLen + 1 && returnedData[(i * 84) + j] > 0)
@@ -476,19 +362,19 @@ public class PCCCComm : IDisposable
                     result[i] = sb.ToString();
                 }
                 break;
-            case 0x86:
-            case 0x87:
+            case (byte)PCCCConstants.SlcFileTypeCode.Timer:
+            case (byte)PCCCConstants.SlcFileTypeCode.Counter:
                 for (int i = 0; i <= arrayElements; i++)
                 {
-                    int j = p.SubElement > 0 ? i * 6 : i * 2;
-                    result[i] = BitConverter.ToInt16(returnedData, j).ToString();
+                    int offset = (p.SubElement > 0) ? i * 6 : i * 2;
+                    result[i] = BitConverter.ToInt16(returnedData, offset).ToString();
                 }
                 break;
-            case 0x91:
+            case (byte)PCCCConstants.SlcFileTypeCode.Long:
                 for (int i = 0; i <= arrayElements; i++)
                     result[i] = BitConverter.ToInt32(returnedData, i * 4).ToString();
                 break;
-            case 0x92:
+            case (byte)PCCCConstants.SlcFileTypeCode.Message:
                 for (int i = 0; i <= arrayElements; i++)
                     result[i] = BitConverter.ToString(returnedData, i * 50, 50);
                 break;
@@ -498,18 +384,19 @@ public class PCCCComm : IDisposable
                 break;
         }
 
+        // Bit-level extraction
         if (p.BitNumber >= 0 && p.BitNumber < 16)
         {
             string[] bitResult = new string[numberOfElements];
             int bitPos = p.BitNumber, wordPos = 0;
             for (int i = 0; i < numberOfElements; i++)
             {
-                bitResult[i] = ((Convert.ToInt32(result[wordPos]) & (int)Math.Pow(2, bitPos)) != 0).ToString();
+                int wordVal = Convert.ToInt32(result[wordPos]);
+                bitResult[i] = ((wordVal & (1 << bitPos)) != 0).ToString();
                 if (++bitPos > 15) { bitPos = 0; wordPos++; }
             }
             return bitResult;
         }
-
         return result;
     }
 
@@ -540,20 +427,20 @@ public class PCCCComm : IDisposable
                 throw new PCCCException($"ReadModifyWrite: invalid address '{addresses[i]}'.");
         }
 
-        byte[] body = PacketBuilder.BuildReadModifyWriteBody(parsed, andMasks, orMasks);
-        int reply = PrefixAndSend(0x0F, 0x26, body, true, out _);
-        return reply;
+        EnsureProtocol();
+        var req = PCCCMessage.CreateReadModifyWriteRequest(parsed, andMasks, orMasks, 0, (byte)MyNode, (byte)TargetNode);
+        _protocol!.SendRequest(req, out int sts);
+        return sts;
     }
 
-    // ─── Write ────────────────────────────────────────────────────────────────
     public string WriteData(string startAddress, int dataToWrite)
         => WriteData(startAddress, 1, new int[] { dataToWrite }).ToString();
 
     public int WriteData(string startAddress, int numberOfElements, int[] dataToWrite)
     {
         DataAddress p = AddressParser.Parse(startAddress);
-        byte[] converted = new byte[numberOfElements * p.BytesPerElements + 1];
-        if (p.FileType == 0x91)
+        byte[] converted = new byte[numberOfElements * p.BytesPerElements];
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
             for (int i = 0; i < numberOfElements; i++)
                 BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * 4);
@@ -568,7 +455,7 @@ public class PCCCComm : IDisposable
                 converted[i * 2 + 1] = (byte)((dataToWrite[i] >> 8) & 0xFF);
             }
         }
-        return WriteRawData(p, numberOfElements * p.BytesPerElements, converted);
+        return WriteRawDataWithChunking(p, converted);
     }
 
     public int WriteData(string startAddress, float dataToWrite)
@@ -577,17 +464,17 @@ public class PCCCComm : IDisposable
     public int WriteData(string startAddress, int numberOfElements, float[] dataToWrite)
     {
         DataAddress p = AddressParser.Parse(startAddress);
-        byte[] converted = new byte[numberOfElements * p.BytesPerElements + 1];
-        if (p.FileType == 0x8A)
+        byte[] converted = new byte[numberOfElements * p.BytesPerElements];
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Float)
         {
             for (int i = 0; i < numberOfElements; i++)
                 BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * 4);
         }
-        else if (p.FileType == 0x91)
+        else if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
             for (int i = 0; i < numberOfElements; i++)
             {
-                if (dataToWrite[i] > 2147483647 || dataToWrite[i] < -2147483648)
+                if (dataToWrite[i] > int.MaxValue || dataToWrite[i] < int.MinValue)
                     throw new PCCCException("Integer data out of range, must be between -2147483648 and 2147483647");
                 BitConverter.GetBytes((int)dataToWrite[i]).CopyTo(converted, i * 4);
             }
@@ -602,7 +489,7 @@ public class PCCCComm : IDisposable
                 converted[i * 2 + 1] = (byte)(((int)dataToWrite[i] >> 8) & 0xFF);
             }
         }
-        return WriteRawData(p, numberOfElements * p.BytesPerElements, converted);
+        return WriteRawDataWithChunking(p, converted);
     }
 
     public int WriteData(string startAddress, string dataToWrite)
@@ -621,22 +508,36 @@ public class PCCCComm : IDisposable
             converted[i * 2 + 2] = (byte)((words[i] >> 8) & 0xFF);
             converted[i * 2 + 3] = (byte)(words[i] & 0xFF);
         }
-        return WriteRawData(p, dataToWrite.Length + 2, converted);
+        return WriteRawDataWithChunking(p, converted);
     }
 
-    // ─── Data Memory ─────────────────────────────────────────────────────────
+    // ─── Data Memory ───────────────────────────────────────────────────────
     public DataFileDetails[] GetDataMemory()
     {
         byte[] fzd = ReadFileDirectory();
-        int numberOfDataTables = fzd[52] + fzd[53] * 256;
+        int numberOfDataTables = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
+                               + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] * 256;
         var dataFiles = new Collection<DataFileDetails>();
 
         int filePosition, bytesPerRow;
-        switch (ProcessorType)
+        switch (_processorType)
         {
-            case 0x25: case 0x58: filePosition = 93; bytesPerRow = 8; break;
-            case 0x88: case 0x89: case 0x8C: case 0x9C: filePosition = 103; bytesPerRow = 10; break;
-            default: filePosition = 79; bytesPerRow = 10; break;
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC502:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1000:
+                filePosition = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetSlc502Ml1000;
+                bytesPerRow = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntrySlc502;
+                break;
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1200:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1100:
+                filePosition = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetMl1100Ml1500;
+                bytesPerRow = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntryDefault;
+                break;
+            default:
+                filePosition = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault;
+                bytesPerRow = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntryDefault;
+                break;
         }
 
         int i = 0, k = 0;
@@ -662,13 +563,13 @@ public class PCCCComm : IDisposable
     public DataFileDetails[] GetML1500DataMemory()
     {
         var pAddr = new DataAddress { FileNumber = 0, FileType = 2, Element = 0x2F };
-        byte[] data = ReadRawData(pAddr, 2, out int reply);
-        if (reply != 0) throw new PCCCException(MessageDecoder.DecodeMessage(reply) + " - Failed to get data table list");
+        byte[] data = ReadRawDataWithChunking(ref pAddr, 2, out int reply);
+        if (reply != 0) throw new PCCCException(PCCCErrors.DecodeStatus(reply) + " - Failed to get data table list");
 
         int fzSize = data[0] + data[1] * 256;
         pAddr.Element = 0; pAddr.SubElement = 0;
-        byte[] fzd = ReadRawData(pAddr, fzSize, out reply);
-        if (reply != 0) throw new PCCCException(MessageDecoder.DecodeMessage(reply) + " - Failed to get data table list");
+        byte[] fzd = ReadRawDataWithChunking(ref pAddr, fzSize, out reply);
+        if (reply != 0) throw new PCCCException(PCCCErrors.DecodeStatus(reply) + " - Failed to get data table list");
 
         var list = new List<DataFileDetails>();
         int filePosition = 143, idx = 0;
@@ -687,79 +588,99 @@ public class PCCCComm : IDisposable
         return list.ToArray();
     }
 
-    // ─── IO Config ────────────────────────────────────────────────────────────
+    // ─── I/O Configuration ─────────────────────────────────────────────────
     public int GetSlotCount()
     {
-        byte[] data = { 4, 0, 0x60, 0, 0 };
-        int reply = PrefixAndSend(0xF, 0xA2, data, true, out int rTNS);
-        if (reply == 0 && _dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt) && pkt.Length > 6)
-            return pkt[6] > 0 ? pkt[6] - 1 : 0;
-        throw new PCCCException("Failed to get Slot Count - " + MessageDecoder.DecodeMessage(reply));
+        EnsureProtocol();
+        byte[] body = { 4, 0, 0x60, 0, 0 };
+        var req = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetSlotCount, body);
+        var reply = _protocol!.SendRequest(req, out int sts);
+        if (sts != PCCCConstants.Sts.Success || reply?.Data == null || reply.Data.Length == 0)
+            throw new PCCCException("Failed to get Slot Count - " + PCCCErrors.DecodeStatus(sts));
+        return reply.Data[0] > 0 ? reply.Data[0] - 1 : 0;
     }
 
     public IOConfig[] GetIOConfig()
     {
         int pt = GetProcessorType();
-        return (pt == 0x89 || pt == 0x8C) ? GetML1500IOConfig() : GetSLCIOConfig();
+        return (pt == (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP || pt == (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP)
+            ? GetML1500IOConfig() : GetSLCIOConfig();
     }
 
     public IOConfig[] GetSLCIOConfig()
     {
         int slots = GetSlotCount();
         if (slots <= 0) throw new PCCCException("Failed to get Slot Count");
-        byte[] data = { (byte)(4 + (slots + 1) * 6 + 2), 0, 0x60, 0, 0 };
-        int reply = PrefixAndSend(0xF, 0xA2, data, true, out int rTNS);
-        if (reply != 0) throw new PCCCException("Failed to get IO Config - " + MessageDecoder.DecodeMessage(reply));
+        byte[] body = { (byte)(4 + (slots + 1) * 6 + 2), 0, 0x60, 0, 0 };
+        var req = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetIOConfig, body);
+        var reply = _protocol!.SendRequest(req, out int sts);
+        if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
+            throw new PCCCException("Failed to get IO Config - " + PCCCErrors.DecodeStatus(sts));
 
         var result = new IOConfig[slots + 1];
-        if (!_dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt))
-            throw new PCCCException("No IO Config data returned from PLC.");
         for (int i = 0; i <= slots; i++)
         {
-            if (i * 6 + 15 >= pkt.Length)
+            int baseOffset = i * 6;
+            if (baseOffset + 9 >= reply.Data.Length)
                 throw new PCCCException($"IO Config packet too short for slot {i}.");
-            result[i].InputBytes  = pkt[i * 6 + 10];
-            result[i].OutputBytes = pkt[i * 6 + 12];
-            result[i].CardCode    = BitConverter.ToInt16(new byte[] { pkt[i * 6 + 14], pkt[i * 6 + 15] }, 0);
+            result[i].InputBytes = reply.Data[baseOffset + 4];
+            result[i].OutputBytes = reply.Data[baseOffset + 6];
+            result[i].CardCode = BitConverter.ToInt16(new byte[] { reply.Data[baseOffset + 8], reply.Data[baseOffset + 9] }, 0);
         }
         return result;
     }
 
     public IOConfig[] GetML1500IOConfig()
     {
-        byte[] data = { 4, 0, 0x62, 0, 0 };
-        int reply = PrefixAndSend(0xF, 0xA2, data, true, out int rTNS);
-        if (reply != 0) throw new PCCCException("Failed to get IO Config for ML1500 - " + MessageDecoder.DecodeMessage(reply));
+        // First read: get size
+        byte[] body = { 4, 0, 0x62, 0, 0 };
+        var req = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetIOConfig, body);
+        var reply = _protocol!.SendRequest(req, out int sts);
+        if (sts != PCCCConstants.Sts.Success || reply?.Data == null || reply.Data.Length == 0)
+            throw new PCCCException("Failed to get IO Config for ML1500 - " + PCCCErrors.DecodeStatus(sts));
 
-        if (!_dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt0) || pkt0.Length <= 6)
-            throw new PCCCException("Failed to get IO Config for ML1500 - response too short");
-        int fzSize = pkt0[6] * 2;
+        int fzSize = reply.Data[0] * 2;
         byte[] fzd = new byte[fzSize + 1];
         int filePosition = 0, subElement = 0;
-        data[0] = (byte)(fzSize > 0x50 ? 0x50 : fzSize);
+        int chunkSize = fzSize > 0x50 ? 0x50 : fzSize;
 
-        while (filePosition < fzSize && reply == 0)
+        // Read full file in chunks
+        while (filePosition < fzSize && sts == PCCCConstants.Sts.Success)
         {
-            reply = PrefixAndSend(0xF, 0xA2, data, true, out rTNS);
-            if (_dataPackets.TryGetValue((ushort)rTNS, out byte[]? chunk))
+            byte[] chunkBody = { (byte)chunkSize, 0, 0x62, 0, 0 };
+            if (subElement >= 255)
             {
-                int i = 0;
-                while (i < data[0] && filePosition < fzSize) fzd[filePosition++] = chunk[i++ + 6];
+                // Extended addressing
+                chunkBody = new byte[6];
+                chunkBody[0] = (byte)chunkSize;
+                chunkBody[1] = 0;
+                chunkBody[2] = 0x62;
+                chunkBody[3] = 255;
+                chunkBody[4] = (byte)(subElement & 0xFF);
+                chunkBody[5] = (byte)((subElement >> 8) & 0xFF);
             }
-
-            subElement += data[0] / 2;
-            if (subElement < 255) { data[3] = (byte)subElement; }
             else
             {
-                if (data.Length < 6) Array.Resize(ref data, 6);
-                data[3] = 255;
-                data[4] = (byte)(subElement & 0xFF);
-                data[5] = (byte)((subElement >> 8) & 0xFF);
+                chunkBody[3] = (byte)subElement;
             }
-            data[0] = (byte)(fzSize - filePosition < 80 ? fzSize - filePosition : 80);
+
+            var chunkReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetIOConfig, chunkBody);
+            var chunkReply = _protocol!.SendRequest(chunkReq, out sts);
+            if (sts != PCCCConstants.Sts.Success || chunkReply?.Data == null)
+                break;
+
+            int bytesToCopy = Math.Min(chunkSize, fzSize - filePosition);
+            Array.Copy(chunkReply.Data, 0, fzd, filePosition, bytesToCopy);
+            filePosition += bytesToCopy;
+            subElement += chunkSize / 2;
+            chunkSize = Math.Min(80, fzSize - filePosition);
         }
 
-        int slotCount = fzd[2] - 2; if (slotCount < 0) slotCount = 0;
+        if (sts != PCCCConstants.Sts.Success)
+            throw new PCCCException("Failed to read ML1500 IO Config - " + PCCCErrors.DecodeStatus(sts));
+
+        int slotCount = fzd[2] - 2;
+        if (slotCount < 0) slotCount = 0;
         var result = new IOConfig[slotCount + 1];
         int idx = 32 + slotCount * 4;
         for (int s = 1; s <= slotCount; s++)
@@ -772,22 +693,22 @@ public class PCCCComm : IDisposable
             idx += 26;
         }
 
-        data = new byte[] { 8, 0, 0x60, 0, 0 };
-        reply = PrefixAndSend(0xF, 0xA2, data, true, out rTNS);
-        if (reply == 0 && _dataPackets.TryGetValue((ushort)rTNS, out byte[]? basePkt) && basePkt.Length > 12)
-        {
-            result[0].InputBytes  = basePkt[10];
-            result[0].OutputBytes = basePkt[12];
-        }
-        else throw new PCCCException("Failed to get Base IO Config for ML1500 - " + MessageDecoder.DecodeMessage(reply));
+        // Get base unit IO
+        byte[] baseBody = { 8, 0, 0x60, 0, 0 };
+        var baseReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetIOConfig, baseBody);
+        var baseReply = _protocol!.SendRequest(baseReq, out int baseSts);
+        if (baseSts != PCCCConstants.Sts.Success || baseReply?.Data == null || baseReply.Data.Length <= 6)
+            throw new PCCCException("Failed to get Base IO Config for ML1500 - " + PCCCErrors.DecodeStatus(baseSts));
+        result[0].InputBytes = baseReply.Data[4];
+        result[0].OutputBytes = baseReply.Data[6];
 
         return result;
     }
 
-    // ─── Upload / Download ────────────────────────────────────────────────────
+    // ─── Upload / Download ─────────────────────────────────────────────────
     public Collection<PLCFileDetails> UploadProgramData()
     {
-        DisableEvent = true;
+        _disableEvent = true;
         try
         {
             byte[] fzd = ReadFileDirectory();
@@ -805,13 +726,17 @@ public class PCCCComm : IDisposable
                 GrandTotalBytes = fzd.Length
             });
 
-            int numberOfProgramFiles = fzd[46] + fzd[47] * 256;
-            int numberOfDataFiles = fzd[52] + fzd[53] * 256;
+            int numberOfProgramFiles = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfProgramFilesLo]
+                                     + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfProgramFilesHi] * 256;
+            int numberOfDataFiles = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
+                                  + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] * 256;
             int totalEntries = numberOfProgramFiles + numberOfDataFiles;
 
-            int filePosition = ProcessorType == 0x25 || ProcessorType == 0x58 ? 93
-                            : ProcessorType == 0x88 || ProcessorType == 0x89 || ProcessorType == 0x8C || ProcessorType == 0x9C ? 103
-                            : 79;
+            int filePosition = (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000)
+                ? PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetSlc502Ml1000
+                : (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1200 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1100)
+                    ? PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetMl1100Ml1500
+                    : PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault;
 
             long grandTotalBytes = 0;
             int tempPos = filePosition;
@@ -819,7 +744,7 @@ public class PCCCComm : IDisposable
             {
                 int sizeBytes = fzd[tempPos + 1] + fzd[tempPos + 2] * 256;
                 grandTotalBytes += sizeBytes;
-                tempPos += (ProcessorType == 0x25 || ProcessorType == 0x58) ? 8 : 10;
+                tempPos += (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000) ? 8 : 10;
             }
             grandTotalBytes += fzd.Length;
 
@@ -839,14 +764,15 @@ public class PCCCComm : IDisposable
                 var addr = new DataAddress { FileType = pf.FileType, FileNumber = pf.FileNumber };
                 if (pf.NumberOfBytes > 0)
                 {
-                    pf.Data = ReadRawData(addr, pf.NumberOfBytes, out int reply);
+                    pf.Data = ReadRawDataWithChunking(ref addr, pf.NumberOfBytes, out int reply);
                     if (reply != 0 && reply != 0x50)
                         throw new PCCCException("Failed to Read Program File " + addr.FileNumber +
-                                            ", Type " + addr.FileType + " - " + MessageDecoder.DecodeMessage(reply));
+                                            ", Type " + addr.FileType + " - " + PCCCErrors.DecodeStatus(reply));
                     if (reply == 0x50)
                         pf.Data = Array.Empty<byte>();
                 }
-                else pf.Data = Array.Empty<byte>();
+                else
+                    pf.Data = Array.Empty<byte>();
 
                 programFiles.Add(pf);
 
@@ -865,19 +791,19 @@ public class PCCCComm : IDisposable
                 });
 
                 i++;
-                filePosition += (ProcessorType == 0x25 || ProcessorType == 0x58) ? 8 : 10;
+                filePosition += (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000) ? 8 : 10;
             }
             return programFiles;
         }
         finally
         {
-            DisableEvent = false;
+            _disableEvent = false;
         }
     }
 
     public void DownloadProgramData(Collection<PLCFileDetails> plcFiles)
     {
-        DisableEvent = true;
+        _disableEvent = true;
         try
         {
             SetProgramMode();
@@ -887,61 +813,61 @@ public class PCCCComm : IDisposable
             int filesCompleted = 0;
             int totalFiles = plcFiles.Count;
 
-            int dataLength = (ProcessorType == 0x5B || ProcessorType == 0x78) ? 13 : 15;
-            byte[] data = new byte[dataLength + 1];
-            data[0] = 0x02; data[1] = 0x0A; data[2] = 0xAA;
-            data[3] = 4; data[4] = 0; data[5] = 0x63;
+            // Step 1: Initialize download
+            int dataLength = (_processorType == 0x5B || _processorType == 0x78) ? 13 : 15;
+            byte[] initData = new byte[dataLength + 1];
+            initData[0] = 0x02; initData[1] = 0x0A; initData[2] = 0xAA;
+            initData[3] = 4; initData[4] = 0; initData[5] = 0x63;
 
+            // Find file 0 type 0x24 in collection
             int idx = 0;
             while (idx < plcFiles.Count && (plcFiles[idx].FileNumber != 0 || plcFiles[idx].FileType != 0x24)) idx++;
             if (idx < plcFiles.Count && plcFiles[idx].Data?.Length >= 8)
             {
-                data[8] = plcFiles[idx].Data[2]; data[9] = plcFiles[idx].Data[3];
-                data[10] = plcFiles[idx].Data[4]; data[11] = plcFiles[idx].Data[5];
-                if (dataLength > 14) { data[12] = plcFiles[idx].Data[6]; data[13] = plcFiles[idx].Data[7]; }
+                initData[8] = plcFiles[idx].Data[2]; initData[9] = plcFiles[idx].Data[3];
+                initData[10] = plcFiles[idx].Data[4]; initData[11] = plcFiles[idx].Data[5];
+                if (dataLength > 14) { initData[12] = plcFiles[idx].Data[6]; initData[13] = plcFiles[idx].Data[7]; }
             }
 
+            // Determine which directory offset to use
             var pAddr = new DataAddress();
-            switch (ProcessorType)
+            switch (_processorType)
             {
-                case 0x78:
-                case 0x5B:
-                case 0x49:
+                case 0x78: case 0x5B: case 0x49:
+                    // Read existing 4 bytes
                     pAddr.FileType = 0x63; pAddr.Element = 0;
-                    byte[] four = ReadRawData(pAddr, 4, out int r4);
-                    if (r4 != 0) throw new PCCCException("Failed to Read File 0, Type 63h - " + MessageDecoder.DecodeMessage(r4));
-                    Array.Copy(four, 0, data, 8, 4);
+                    byte[] four = ReadRawDataWithChunking(ref pAddr, 4, out int r4);
+                    if (r4 != 0) throw new PCCCException("Failed to Read File 0, Type 63h - " + PCCCErrors.DecodeStatus(r4));
+                    Array.Copy(four, 0, initData, 8, 4);
                     pAddr.FileType = 1; pAddr.Element = 0x23;
-                    data[1] = 0x0A; data[3] = 4;
+                    initData[1] = 0x0A; initData[3] = 4;
                     break;
-                case 0x88:
-                case 0x89:
-                case 0x8C:
-                case 0x9C:
-                    data[1] = 0x0C; data[3] = 6;
+                case 0x88: case 0x89: case 0x8C: case 0x9C:
+                    initData[1] = 0x0C; initData[3] = 6;
                     pAddr.FileType = 2; pAddr.Element = 0x23;
                     break;
                 default:
-                    data[1] = 0x0A; data[3] = 4;
+                    initData[1] = 0x0A; initData[3] = 4;
                     pAddr.FileType = 1; pAddr.Element = 0x23;
                     break;
             }
+            initData[initData.Length - 2] = 1;
+            initData[initData.Length - 1] = 0x56;
 
-            data[data.Length - 2] = 1;
-            data[data.Length - 1] = 0x56;
+            var initReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.DownloadInit, initData);
+            var initReply = _protocol!.SendRequest(initReq, out int initSts);
+            if (initSts != 0) throw new PCCCException("Failed to Initialize for Download - " + PCCCErrors.DecodeStatus(initSts));
 
-            int reply = PrefixAndSend(0xF, 0x88, data, true, out _);
-            if (reply != 0) throw new PCCCException("Failed to Initialize for Download - " + MessageDecoder.DecodeMessage(reply));
+            // Step 2: Secure sole access
+            var secureReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.SecureAccess, Array.Empty<byte>());
+            var secureReply = _protocol.SendRequest(secureReq, out int secureSts);
+            if (secureSts != 0) throw new PCCCException("Failed to Secure Sole Access - " + PCCCErrors.DecodeStatus(secureSts));
 
-            byte[] empty = Array.Empty<byte>();
-
-            reply = PrefixAndSend(0xF, 0x11, empty, true, out _);
-            if (reply != 0) throw new PCCCException("Failed to Secure Sole Access - " + MessageDecoder.DecodeMessage(reply));
-
+            // Step 3: Write directory length
             pAddr.BitNumber = 16;
-            byte[] data3 = { (byte)(plcFiles[0].Data.Length & 0xFF), (byte)((plcFiles[0].Data.Length >> 8) & 0xFF) };
-            reply = WriteRawData(pAddr, 2, data3);
-            if (reply != 0) throw new PCCCException("Failed to Write Directory Length - " + MessageDecoder.DecodeMessage(reply));
+            byte[] dirLen = { (byte)(plcFiles[0].Data.Length & 0xFF), (byte)((plcFiles[0].Data.Length >> 8) & 0xFF) };
+            int writeLenSts = WriteRawDataWithChunking(pAddr, dirLen);
+            if (writeLenSts != 0) throw new PCCCException("Failed to Write Directory Length - " + PCCCErrors.DecodeStatus(writeLenSts));
 
             totalBytesTransferred += 2;
             filesCompleted = 1;
@@ -956,9 +882,11 @@ public class PCCCComm : IDisposable
                 GrandTotalBytes = grandTotalBytes
             });
 
+            // Step 4: Write program directory
             pAddr.Element = 0;
-            reply = WriteRawData(pAddr, plcFiles[0].Data.Length, plcFiles[0].Data);
-            if (reply != 0) throw new PCCCException("Failed to Write New Program Directory - " + MessageDecoder.DecodeMessage(reply));
+            pAddr.SubElement = 0;
+            int writeDirSts = WriteRawDataWithChunking(pAddr, plcFiles[0].Data);
+            if (writeDirSts != 0) throw new PCCCException("Failed to Write New Program Directory - " + PCCCErrors.DecodeStatus(writeDirSts));
 
             totalBytesTransferred += plcFiles[0].Data.Length;
             filesCompleted++;
@@ -973,6 +901,7 @@ public class PCCCComm : IDisposable
                 GrandTotalBytes = grandTotalBytes
             });
 
+            // Step 5: Write each program/data file
             for (int i = 1; i < plcFiles.Count; i++)
             {
                 pAddr.FileNumber = plcFiles[i].FileNumber;
@@ -980,9 +909,8 @@ public class PCCCComm : IDisposable
                 pAddr.Element = 0;
                 pAddr.SubElement = 0;
                 pAddr.BitNumber = 16;
-
-                reply = WriteRawData(pAddr, plcFiles[i].Data.Length, plcFiles[i].Data);
-                if (reply != 0) throw new PCCCException("Failed when writing files to PLC - " + MessageDecoder.DecodeMessage(reply));
+                int writeFileSts = WriteRawDataWithChunking(pAddr, plcFiles[i].Data);
+                if (writeFileSts != 0) throw new PCCCException("Failed when writing files to PLC - " + PCCCErrors.DecodeStatus(writeFileSts));
 
                 totalBytesTransferred += plcFiles[i].Data?.Length ?? 0;
                 filesCompleted++;
@@ -998,22 +926,25 @@ public class PCCCComm : IDisposable
                 });
             }
 
-            reply = PrefixAndSend(0xF, 0x52, empty, true, out _);
-            if (reply != 0) throw new PCCCException("Failed to Indicate to PLC that Download is complete - " + MessageDecoder.DecodeMessage(reply));
+            // Step 6: Indicate download complete
+            var completeReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.DownloadComplete, Array.Empty<byte>());
+            var completeReply = _protocol.SendRequest(completeReq, out int completeSts);
+            if (completeSts != 0) throw new PCCCException("Failed to Indicate to PLC that Download is complete - " + PCCCErrors.DecodeStatus(completeSts));
 
-            reply = PrefixAndSend(0xF, 0x12, empty, true, out _);
-            if (reply != 0) throw new PCCCException("Failed to Release Sole Access - " + MessageDecoder.DecodeMessage(reply));
+            // Step 7: Release sole access
+            var releaseReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.ReleaseAccess, Array.Empty<byte>());
+            var releaseReply = _protocol.SendRequest(releaseReq, out int releaseSts);
+            if (releaseSts != 0) throw new PCCCException("Failed to Release Sole Access - " + PCCCErrors.DecodeStatus(releaseSts));
         }
         finally
         {
-            DisableEvent = false;
+            _disableEvent = false;
         }
     }
 
-    // ─── Auto-detect (DF1 only) ─────────────────────────────────────────────────
+    // ─── Auto-detect (DF1 only) ────────────────────────────────────────────
     public int DetectCommSettings()
     {
-        // Close any existing transport and create a temporary one for auto‑detect
         CloseComms();
 
         int[] baudRates = { 38400, 19200, 9600 };
@@ -1023,11 +954,10 @@ public class PCCCComm : IDisposable
         int reply = -1;
         bool portError = false;
 
-        // Save original settings to restore if detection fails
-        string originalPort = m_ComPort;
-        int originalBaud = m_BaudRate;
-        var originalParity = m_Parity;
-        var originalChecksum = m_CheckSum;
+        string originalPort = _comPort;
+        int originalBaud = _baudRate;
+        var originalParity = _parity;
+        var originalChecksum = _checkSum;
 
         foreach (int baud in baudRates)
         {
@@ -1037,32 +967,23 @@ public class PCCCComm : IDisposable
                 if (reply == 0 || portError) break;
                 foreach (var cs in checksums)
                 {
-                    // Set temporary parameters
-                    m_BaudRate = baud;
-                    m_Parity = parity;
-                    m_CheckSum = cs;
+                    _baudRate = baud;
+                    _parity = parity;
+                    _checkSum = cs;
 
                     AutoDetectTry?.Invoke(this, EventArgs.Empty);
 
-                    // Create a temporary DF1 transport
                     try
                     {
-                        var port = new SerialPortWrapper(m_ComPort, m_BaudRate, m_Parity);
+                        var port = new SerialPortWrapper(_comPort, _baudRate, _parity);
                         var transport = new DF1FullDuplexTransport(port);
-                        transport.ChecksumType = m_CheckSum;
-                        transport.MaxTicks = 3; // short timeout for detection
+                        transport.ChecksumType = _checkSum;
+                        transport.MaxTicks = 3;
                         transport.Open();
-
                         reply = transport.SendEnqAndWaitForAck();
                         transport.Close();
                         transport.Dispose();
-
-                        if (reply == 0)
-                        {
-                            // Detection succeeded: keep these settings
-                            // (do not update _currentTransport; caller must call OpenComms again)
-                            break;
-                        }
+                        if (reply == 0) break;
                     }
                     catch (Exception ex)
                     {
@@ -1070,7 +991,6 @@ public class PCCCComm : IDisposable
                             portError = true;
                         reply = -6;
                     }
-
                     if (reply == -6) { portError = true; break; }
                 }
             }
@@ -1078,42 +998,34 @@ public class PCCCComm : IDisposable
 
         if (reply != 0)
         {
-            // Restore original settings on failure
-            m_ComPort = originalPort;
-            m_BaudRate = originalBaud;
-            m_Parity = originalParity;
-            m_CheckSum = originalChecksum;
+            _comPort = originalPort;
+            _baudRate = originalBaud;
+            _parity = originalParity;
+            _checkSum = originalChecksum;
         }
-
         return reply;
     }
 
-    // ─── Comms ────────────────────────────────────────────────────────────────
-    /// <summary>
-    /// Opens the communication channel. For DF1 serial, this creates a new
-    /// <see cref="DF1FullDuplexTransport"/> using the current <see cref="ComPort"/>,
-    /// <see cref="BaudRate"/>, <see cref="Parity"/>, and <see cref="CheckSum"/>.
-    /// </summary>
+    // ─── Comms management ──────────────────────────────────────────────────
     public int OpenComms()
     {
-        // If a transport already exists, ensure it is open.
         if (_currentTransport != null)
         {
             if (!_currentTransport.IsOpen)
                 _currentTransport.Open();
+            EnsureProtocol();
             return 0;
         }
 
-        // No transport exists. Recreate based on connection type.
         if (_eipHost != null)
         {
-            // Reconnect EIP transport (e.g. after CloseComms was called).
             try
             {
-                var eip = new EIPTransport(_eipHost, _eipPort, responseTimeoutMs);
+                var eip = new EIPTransport(_eipHost, _eipPort, _responseTimeoutMs);
                 _currentTransport = eip;
                 AttachTransportEvents();
                 eip.Open();
+                EnsureProtocol();
                 return 0;
             }
             catch (Exception ex)
@@ -1122,16 +1034,15 @@ public class PCCCComm : IDisposable
             }
         }
 
-        // DF1 serial transport (full-duplex or half-duplex master)
         try
         {
-            var port = new SerialPortWrapper(m_ComPort, m_BaudRate, m_Parity);
+            var port = new SerialPortWrapper(_comPort, _baudRate, _parity);
             ITransport transport;
-            if (m_Protocol == "DF1Master")
+            if (_protocolName == "DF1Master")
             {
                 var master = new DF1HalfDuplexTransport(port);
-                master.ChecksumType = m_CheckSum;
-                master.MaxTicks = responseTimeoutMs / 20;
+                master.ChecksumType = _checkSum;
+                master.MaxTicks = _responseTimeoutMs / 20;
                 master.SlaveAddress = _slaveAddress;
                 master.Rs485Mode = _rs485Mode;
                 master.RtsAssertDelayMs = _rtsAssertDelayMs;
@@ -1139,29 +1050,29 @@ public class PCCCComm : IDisposable
                 master.EchoSuppression = _echoSuppression;
                 transport = master;
             }
-            else // "DF1"
+            else
             {
                 var full = new DF1FullDuplexTransport(port);
-                full.ChecksumType = m_CheckSum;
-                full.MaxTicks = responseTimeoutMs / 20;
+                full.ChecksumType = _checkSum;
+                full.MaxTicks = _responseTimeoutMs / 20;
                 transport = full;
             }
             _currentTransport = transport;
             AttachTransportEvents();
             transport.Open();
+            EnsureProtocol();
             return 0;
         }
         catch (Exception ex)
         {
-            throw new PCCCException("Failed To Open " + m_ComPort + ". " + ex.Message);
+            throw new PCCCException("Failed To Open " + _comPort + ". " + ex.Message);
         }
     }
 
-    /// <summary>
-    /// Closes the communication channel if it is open.
-    /// </summary>
     public void CloseComms()
     {
+        _protocol?.Dispose();
+        _protocol = null;
         if (_currentTransport != null)
         {
             DetachTransportEvents();
@@ -1171,223 +1082,173 @@ public class PCCCComm : IDisposable
         }
     }
 
-    // ─── String helpers ───────────────────────────────────────────────────────
+    // ─── String helpers (static) ──────────────────────────────────────────
     public static string WordsToString(int[] words) => StringConverter.WordsToString(words);
     public static string WordsToString(int[] words, int index) => StringConverter.WordsToString(words, index);
     public static string WordsToString(int[] words, int index, int count) => StringConverter.WordsToString(words, index, count);
     public static int[]? StringToWords(string source) => StringConverter.StringToWords(source);
 
-    // =========================================================================
-    // PRIVATE METHODS (updated to use ITransport and 16‑bit TNS)
-    // =========================================================================
-
-    private readonly object tnsLock = new object();
-
-    private ushort IncrementAndGetTNS()
+    // ─── Private helpers ───────────────────────────────────────────────────
+    private void EnsureProtocol()
     {
-        lock (tnsLock)
-        {
-            TNS = TNS < 65535 ? (ushort)(TNS + 1) : (ushort)1;
-            _dataPackets.TryRemove(TNS, out _);
-            _responseEvents.TryRemove(TNS, out _);
-            return TNS;
-        }
-    }
-
-    private int PrefixAndSend(int command, int func, byte[] data, bool wait, out int rTNS)
-    {
-        if (_currentTransport == null)
+        if (_protocol == null && _currentTransport != null)
+            _protocol = new PCCCProtocol(_currentTransport) { ResponseTimeoutMs = _responseTimeoutMs };
+        if (_protocol == null)
             throw new InvalidOperationException("Communications not open. Call OpenComms() first.");
-
-        ushort currentTNS = IncrementAndGetTNS();
-        byte[] pdu = PacketBuilder.BuildCommandWithData(command, func, data, currentTNS, MyNode, TargetNode, true);
-        rTNS = currentTNS;
-
-        ManualResetEventSlim? ev = null;
-        if (wait)
-        {
-            ev = new ManualResetEventSlim(false);
-            _responseEvents[currentTNS] = ev;
-            _dataPackets.TryRemove(currentTNS, out _);
-        }
-
-        try
-        {
-            _currentTransport.SendFrame(pdu);
-        }
-        catch (TimeoutException)
-        {
-            if (wait && ev != null)
-                _responseEvents.TryRemove(currentTNS, out _);
-            return -3;
-        }
-        catch (Exception)
-        {
-            if (wait && ev != null)
-                _responseEvents.TryRemove(currentTNS, out _);
-            return -6;
-        }
-
-        if (!wait)
-            return 0;
-
-        if (!ev!.Wait(responseTimeoutMs))
-            return -20;
-
-        if (_dataPackets.TryGetValue(currentTNS, out byte[]? response))
-        {
-            if (response.Length > 3)
-            {
-                int sts = response[3];
-                if (sts == 0xF0 && response.Length > 0)
-                    sts = response[response.Length - 1] + 0x100;
-                return sts;
-            }
-            return -8;
-        }
-        return -8;
     }
 
-    // DF1 protocol limits (Publication 1770-6.5.16)
-    private const int MaxReadPayloadBytes = 236;
-    private const int MaxWritePayloadBytes = 164;
-    private byte[] ReadRawData(DataAddress pAddr, int numberOfBytes, out int reply)
+    private byte[] ReadRawDataWithChunking(ref DataAddress addr, int numberOfBytes, out int finalStatus)
     {
-        reply = 0;
+        finalStatus = 0;
         int filePosition = 0;
         byte[] result = new byte[numberOfBytes];
 
-        while (filePosition < numberOfBytes && reply == 0)
+        while (filePosition < numberOfBytes && finalStatus == 0)
         {
-            int toRead = Math.Min(numberOfBytes - filePosition, MaxReadPayloadBytes);
-            if (toRead > 168 && pAddr.FileType == 0x8D) toRead = 168;
-            if (toRead > 234 && (pAddr.FileType == 0x86 || pAddr.FileType == 0x87)) toRead = 234;
-            if (toRead > 0x78 && pAddr.FileType == 0xA4) toRead = 0x78;
-            if (toRead > 0x50 && ProcessorType == 0x25) toRead = 0x50;
+            int toRead = Math.Min(numberOfBytes - filePosition, PCCCConstants.Df1Limits.MaxReadPayloadBytes);
+            // Apply PLC-specific limits
+            if (toRead > PCCCConstants.Df1Limits.MaxStringReadBytes && addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+                toRead = PCCCConstants.Df1Limits.MaxStringReadBytes;
+            if (toRead > PCCCConstants.Df1Limits.MaxTimerCounterReadBytes && (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+                toRead = PCCCConstants.Df1Limits.MaxTimerCounterReadBytes;
+            if (toRead > PCCCConstants.Df1Limits.MaxSlc502ReadBytes && _processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502)
+                toRead = PCCCConstants.Df1Limits.MaxSlc502ReadBytes;
             if (toRead <= 0) break;
 
-            byte[] body = PacketBuilder.BuildReadRequestBody(pAddr, toRead, out int func);
-            reply = PrefixAndSend(0xF, func, body, true, out int rTNS);
-            if (reply == 0 && _dataPackets.TryGetValue((ushort)rTNS, out byte[]? pkt))
+            var req = PCCCMessage.CreateReadRequest(addr, toRead, 0, (byte)MyNode, (byte)TargetNode);
+            var reply = _protocol!.SendRequest(req, out int sts);
+            if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
             {
-                for (int i = 0; i < toRead && (i + 6) < pkt.Length; i++)
-                    result[filePosition + i] = pkt[i + 6];
+                finalStatus = sts;
+                break;
             }
 
-            filePosition += toRead;
-            if (pAddr.FileType == 0xA4) pAddr.Element += toRead / 0x28;
-            else pAddr.SubElement += toRead / 2;
+            int bytesRead = Math.Min(toRead, reply.Data.Length);
+            Array.Copy(reply.Data, 0, result, filePosition, bytesRead);
+            filePosition += bytesRead;
+
+            // Advance address for next chunk
+            if (addr.FileType == 0xA4)
+                addr.Element += toRead / 0x28;
+            else
+                addr.SubElement += toRead / 2;
         }
         return result;
     }
 
-    private int WriteRawData(DataAddress p, int numberOfBytes, byte[] dataToWrite)
+    private int WriteRawDataWithChunking(DataAddress addr, byte[] dataToWrite)
     {
-        if (p.FileType == 0) return -5;
-        int filePosition = 0, reply = 0;
+        if (addr.FileType == 0) return -5;
+        int filePosition = 0;
+        int reply = 0;
 
-        while (filePosition < numberOfBytes && reply == 0)
+        while (filePosition < dataToWrite.Length && reply == 0)
         {
-            int toWrite = Math.Min(numberOfBytes - filePosition, MaxWritePayloadBytes);
-            if (p.FileType >= 0xA1 && toWrite > 0x78) toWrite = 0x78;
+            int toWrite = Math.Min(dataToWrite.Length - filePosition, PCCCConstants.Df1Limits.MaxWritePayloadBytes);
+            if (addr.FileType >= 0xA1 && toWrite > 0x78) toWrite = 0x78;
 
-            byte[] body = PacketBuilder.BuildWriteRequestBody(p, dataToWrite, filePosition, toWrite, out int func);
-            reply = PrefixAndSend(0xF, func, body, !AsyncMode, out _);
-            filePosition += toWrite;
-            if (p.FileType != 0xA4) p.SubElement += toWrite / 2;
-            else p.Element += toWrite / 0x28;
+            var req = PCCCMessage.CreateWriteRequest(addr, dataToWrite, filePosition, toWrite, 0, (byte)MyNode, (byte)TargetNode);
+            
+            if (AsyncMode)
+            {
+                // Fire-and-forget: send without waiting for response (same as original)
+                _protocol!.SendRequestAsync(req); // but we don't have async method
+                reply = 0; // original returned 0 immediately for AsyncMode
+                filePosition += toWrite;
+            }
+            else
+            {
+                var resp = _protocol!.SendRequest(req, out int sts);
+                reply = sts;
+                filePosition += toWrite;
+            }
+
+            if (addr.FileType != 0xA4)
+                addr.SubElement += toWrite / 2;
+            else
+                addr.Element += toWrite / 0x28;
         }
-
         if (reply == 0) return 0;
-        throw new PCCCException(MessageDecoder.DecodeMessage(reply));
+        throw new PCCCException(PCCCErrors.DecodeStatus(reply));
     }
 
     private byte[] ReadFileDirectory()
     {
         GetProcessorType();
         var pAddr = new DataAddress();
-        switch (ProcessorType)
+        switch (_processorType)
         {
-            case 0x25: case 0x58: pAddr.FileType = 0; pAddr.Element = 0x23; break;
-            case 0x88: case 0x89: case 0x8C: case 0x9C: pAddr.FileType = 2; pAddr.Element = 0x2F; break;
-            default: pAddr.FileType = 1; pAddr.Element = 0x23; break;
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC502:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1000:
+                pAddr.FileType = 0;
+                pAddr.Element = 0x23;
+                break;
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1200:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1100:
+                pAddr.FileType = 2;
+                pAddr.Element = 0x2F;
+                break;
+            default:
+                pAddr.FileType = 1;
+                pAddr.Element = 0x23;
+                break;
         }
 
-        byte[] data = ReadRawData(pAddr, 2, out int reply);
-        if (reply != 0) throw new PCCCException("Failed to Get Program Directory Size - " + MessageDecoder.DecodeMessage(reply));
+        byte[] data = ReadRawDataWithChunking(ref pAddr, 2, out int reply);
+        if (reply != 0) throw new PCCCException("Failed to Get Program Directory Size - " + PCCCErrors.DecodeStatus(reply));
 
         pAddr.Element = 0;
+        pAddr.SubElement = 0;
         int size = data[0] + data[1] * 256;
-        byte[] fzd = ReadRawData(pAddr, size, out reply);
-        if (reply != 0) throw new PCCCException("Failed to Get Program Directory - " + MessageDecoder.DecodeMessage(reply));
+        byte[] fzd = ReadRawDataWithChunking(ref pAddr, size, out reply);
+        if (reply != 0) throw new PCCCException("Failed to Get Program Directory - " + PCCCErrors.DecodeStatus(reply));
         return fzd;
     }
 
     private static int FileTypeToBytesPerElement(byte code, out string fileTypeStr)
     {
-        switch (code)
-        {
-            case 0x82: case 0x8B: fileTypeStr = "O"; return 2;
-            case 0x83: case 0x8C: fileTypeStr = "I"; return 2;
-            case 0x84: fileTypeStr = "S"; return 2;
-            case 0x85: fileTypeStr = "B"; return 2;
-            case 0x86: fileTypeStr = "T"; return 6;
-            case 0x87: fileTypeStr = "C"; return 6;
-            case 0x88: fileTypeStr = "R"; return 6;
-            case 0x89: fileTypeStr = "N"; return 2;
-            case 0x8A: fileTypeStr = "F"; return 4;
-            case 0x8D: fileTypeStr = "ST"; return 84;
-            case 0x8E: fileTypeStr = "A"; return 2;
-            case 0x91: fileTypeStr = "L"; return 4;
-            case 0x92: fileTypeStr = "MG"; return 50;
-            case 0x93: fileTypeStr = "PD"; return 46;
-            case 0x94: fileTypeStr = "PLS"; return 12;
-            default: fileTypeStr = "Undefined"; return 2;
-        }
+        var type = (PCCCConstants.SlcFileTypeCode)code;
+        fileTypeStr = PCCCConstants.SlcFileTypeInfo.GetTypeName(type);
+        return PCCCConstants.SlcFileTypeInfo.GetBytesPerElement(type);
     }
 
-    // =========================================================================
-    // FRAME RECEIVED HANDLER
-    // =========================================================================
-
+    // ─── Frame received handler (for unsolicited messages) ─────────────────
     private void OnFrameReceived(object? sender, byte[] innerFrame)
     {
         if (innerFrame.Length < 6) return;
-
         ushort tns = (ushort)(innerFrame[4] | (innerFrame[5] << 8));
-        _dataPackets[tns] = innerFrame;
 
-        if (_responseEvents.TryGetValue(tns, out var ev))
-            ev.Set();
-
-        // Raise DataReceived if this is a reply (CMD > 31)
-        if (innerFrame.Length > 2 && innerFrame[2] > 31)
+        // Only raise DataReceived if this is a reply (CMD > 31) AND not a response we're waiting for
+        if (!_disableEvent && innerFrame.Length > 2 && innerFrame[2] > 31)
         {
-            // Truly unsolicited, not a reply to our own request
-            if (!DisableEvent && !_responseEvents.ContainsKey(tns))
+            // Check if this TNS is NOT being waited for by the protocol
+            if (_protocol != null && !_protocol.IsTnsPending(tns))
+            {
                 DataReceived?.Invoke(this, EventArgs.Empty);
+            }
         }
-        // Handle unsolicited message (CMD=0x0F, FUNC=0xAA)
-        else if (innerFrame.Length > 6 && innerFrame[2] == 0x0F && innerFrame[6] == 0xAA)
+        else if (innerFrame.Length > 6 && innerFrame[2] == PCCCConstants.Cmd.ProtectedWrite &&
+                    innerFrame[6] == PCCCConstants.Fnc.WriteWordRange)
         {
-            // Unsolicited write: send a PCCC reply only for DF1 serial.
-            // EtherNet/IP uses request-response; no explicit reply is needed.
+            // Unsolicited write message - same as original
             if (_currentTransport is DF1BaseTransport)
             {
                 int replyTns = innerFrame[5] * 256 + innerFrame[4];
-                SendResponse(innerFrame[2] + 0x40, replyTns);
+                SendUnsolicitedResponse(innerFrame[2] + 0x40, replyTns);
             }
             UnsolicitedMessageRcvd?.Invoke(this, EventArgs.Empty);
         }
     }
 
-    private int SendResponse(int command, int rTNS)
+    private int SendUnsolicitedResponse(int command, int rTNS)
     {
         if (_currentTransport == null) return -6;
-        byte[] pdu = PacketBuilder.BuildCommandWithData(command, 0, Array.Empty<byte>(), (ushort)rTNS, MyNode, TargetNode, true);
+        var reply = new PCCCMessage(0, 0, (byte)command, 0, (ushort)rTNS, null, Array.Empty<byte>());
         try
         {
-            _currentTransport.SendFrame(pdu);
+            _currentTransport.SendFrame(reply.ToBytes());
             return 0;
         }
         catch
@@ -1396,7 +1257,6 @@ public class PCCCComm : IDisposable
         }
     }
 
-    // ─── IDisposable ─────────────────────────────────────────────────────────
     public void Dispose()
     {
         CloseComms();

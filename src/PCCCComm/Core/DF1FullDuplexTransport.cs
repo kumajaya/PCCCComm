@@ -275,13 +275,13 @@ public class DF1FullDuplexTransport : DF1BaseTransport
                     bool valid;
                     if (ChecksumType == CheckSumOptions.Crc)
                     {
-                        ushort calc = MessageDecoder.CalculateChecksum(innerFrame, CheckSumOptions.Crc);
+                        ushort calc = CalculateChecksum(innerFrame, CheckSumOptions.Crc);
                         ushort recv = (ushort)(frame[etxIndex + 2] | (frame[etxIndex + 3] << 8));
                         valid = calc == recv;
                     }
                     else // BCC
                     {
-                        byte calc = (byte)MessageDecoder.CalculateChecksum(innerFrame, CheckSumOptions.Bcc);
+                        byte calc = (byte)CalculateChecksum(innerFrame, CheckSumOptions.Bcc);
                         byte recv = frame[etxIndex + 2];
                         valid = calc == recv;
                     }
