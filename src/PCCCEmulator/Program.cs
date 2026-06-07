@@ -128,7 +128,7 @@ class Program
             "df1slave" => PCCCEmulator.TransportMode.DF1Slave,
             "uic"      => PCCCEmulator.TransportMode.UIC,
             "eip"      => PCCCEmulator.TransportMode.EIP,
-            _          => PCCCEmulator.TransportMode.DF1
+            _          => throw new ArgumentException($"Unknown mode: '{mode}'. Valid: df1, df1slave, uic, eip")
         };
 
         // Warning for serial parameters when using EIP mode

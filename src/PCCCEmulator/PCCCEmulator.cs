@@ -127,7 +127,7 @@ public class PCCCEmulator : IDisposable
     private ProcessorMode ProcessorModeValue
     {
         get => (ProcessorMode)_processorModeRaw;
-        set => _processorModeRaw = (int)value;
+        set => Interlocked.Exchange(ref _processorModeRaw, (int)value);
     }
 
     private bool IsRunMode => ProcessorModeValue == ProcessorMode.LocalRun ||
@@ -148,7 +148,7 @@ public class PCCCEmulator : IDisposable
     private int _duplicatePacketsReceived = 0;
     private int _dcdRecoveryCount         = 0;
     private int _lostModemCount           = 0;
-    private ushort _modemStatus = 0x001F;
+    private volatile ushort _modemStatus = 0x001F;
 
     // ─── Timers ──────────────────────────────────────────────────────────────
     private Timer? _timer;           // Updates S2 date/time registers (every 1 sec)
@@ -186,6 +186,10 @@ public class PCCCEmulator : IDisposable
     private int _rtsAssertDelayMs = 1;
     private int _rtsDeassertDelayMs = 5;
 
+    /// <summary>
+    /// Gets or sets the RS-485 direction control mode.
+    /// Must be set before calling <see cref="Start()"/>.
+    /// </summary>
     public DF1HalfDuplexTransport.Rs485ControlMode Rs485Mode
     {
         get => _rs485Mode;
@@ -309,6 +313,7 @@ public class PCCCEmulator : IDisposable
         // EIPTransport does not implement IDisposable; Stop() above already drains
         // in-flight requests and closes all resources via its StopAsync() path.
         (_transport as IDisposable)?.Dispose();
+        _transport = null;
         GC.SuppressFinalize(this);
     }
 
@@ -923,6 +928,7 @@ public class PCCCEmulator : IDisposable
     private void SendDiagnosticCountersResponse(int dst, int tns, int replyCmd, object clientContext)
     {
         UpdateModemStatus();
+        ushort modemSnap = _modemStatus;
 
         // Read all counters atomically via Volatile.Read
         int sent        = Volatile.Read(ref _totalPacketsSent);
@@ -949,7 +955,7 @@ public class PCCCEmulator : IDisposable
             }
         }
 
-        W(0,  _modemStatus);  // Bytes 0-1:   RS-232 modem line status
+        W(0,  modemSnap);     // Bytes 0-1:   RS-232 modem line status
         W(2,  sent);          // Bytes 2-3:   total packets sent
         W(4,  received);      // Bytes 4-5:   total packets received
         W(6,  undelivered);   // Bytes 6-7:   undelivered packets
@@ -1044,16 +1050,17 @@ public class PCCCEmulator : IDisposable
     /// </summary>
     private void UpdateProcessorMode()
     {
+        byte mode = (byte)ProcessorModeValue;  // snapshot sekali
         byte[] current = _memory.ReadRaw(0x84, 2, 2, 2, out int status);
         if (status == 0 && current.Length == 2)
         {
-            current[0] = (byte)ProcessorModeValue;
+            current[0] = mode;
             _memory.Write(0x84, 2, 1, 0, 2, current);
         }
 
         lock (_cacheLock)
         {
-            _cachedGetStatusPayload[18] = (byte)ProcessorModeValue;
+            _cachedGetStatusPayload[18] = mode;
         }
     }
 
