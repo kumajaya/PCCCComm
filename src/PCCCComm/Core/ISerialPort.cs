@@ -19,6 +19,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+using System.IO.Ports;
+
 namespace PCCCComm.Core;
 
 /// <summary>
@@ -34,4 +36,5 @@ public interface ISerialPort : IDisposable
     bool RtsEnable { get; set; }
     bool DtrEnable { get; set; }
     int BaudRate { get; }
+    Parity Parity { get; }
 }

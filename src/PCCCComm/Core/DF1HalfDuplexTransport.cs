@@ -387,7 +387,9 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
 
             _port.Write(data, 0, data.Length);
 
-            int transmitTimeMs = (data.Length * 10 * 1000) / _port.BaudRate;
+            // bits per byte: start(1) + data(8) + parity(0 or 1) + stop(1)
+            int bitsPerByte = 1 + 8 + (_port.Parity == Parity.None ? 0 : 1) + 1;
+            int transmitTimeMs = (data.Length * bitsPerByte * 1000) / _port.BaudRate;
             int totalDelay = Math.Max(1, transmitTimeMs + _rtsDeassertDelayMs);
             Thread.Sleep(totalDelay);
 

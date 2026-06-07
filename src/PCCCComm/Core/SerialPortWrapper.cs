@@ -35,6 +35,8 @@ public class SerialPortWrapper : ISerialPort
 
     public int BaudRate => _port.BaudRate;
 
+    public Parity Parity => _port.Parity;
+
     public SerialPortWrapper(string portName, int baudRate, Parity parity)
     {
         _port = new SerialPort(portName, baudRate, parity, 8, StopBits.One)
