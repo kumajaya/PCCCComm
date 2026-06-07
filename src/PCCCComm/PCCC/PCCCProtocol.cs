@@ -182,6 +182,15 @@ namespace PCCCComm.Pccc
             return reply.Data[ResponseOffsets.DiagnosticStatus.ProcessorType];
         }
 
+        internal byte[]? GetDiagnosticStatusRaw(byte myNode, byte targetNode)
+        {
+            var req = PCCCMessage.CreateDiagnosticStatusRequest(0, myNode, targetNode);
+            var reply = SendRequest(req, out int sts);
+            if (sts != Sts.Success || reply?.Data == null)
+                return null;
+            return reply.Data;
+        }
+
         /// <summary>Places the processor in Run mode.</summary>
         public void SetRunMode(bool isMicroLogix, byte myNode, byte targetNode)
         {

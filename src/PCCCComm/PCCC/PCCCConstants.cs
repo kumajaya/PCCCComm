@@ -208,6 +208,44 @@ public static class PCCCConstants
         ML1500LRP = 0x8C,
     }
 
+    /// <summary>
+    /// Processor family determined from diagnostic status reply (Chapter 10).
+    /// Used to select appropriate protocol handler.
+    /// </summary>
+    public enum ProcessorFamily
+    {
+        Unknown,
+        SlcMicroLogix,  // SLC 500, SLC 5/01–5/05, MicroLogix all series
+        Plc5,           // PLC-5 all models (1785-Lxx, 6008-LTV, 5130-RM)
+        Plc3,           // PLC-3 (1775-KA, via 1775-S5/SR5)
+        Plc2,           // PLC-2 (via 1785-KA3)
+    }
+
+    /// <summary>
+    /// Determines the processor family from raw diagnostic status data.
+    /// </summary>
+    /// <param name="diagnosticData">Raw data returned by Diagnostic Status command.</param>
+    /// <returns>Processor family, or Unknown if data is insufficient or unrecognized.</returns>
+    public static ProcessorFamily DetectFamily(byte[] diagnosticData)
+    {
+        if (diagnosticData == null || diagnosticData.Length < 4)
+            return ProcessorFamily.Unknown;
+
+        byte typeExtender = diagnosticData[ResponseOffsets.DiagnosticStatus.TypeExtender];
+
+        // SLC/MicroLogix: type extender = 0xEE
+        if (typeExtender == ResponseOffsets.DiagnosticStatus.TypeExtenderSlcMl)
+            return ProcessorFamily.SlcMicroLogix;
+
+        // PLC-5: high nibble of type extender = 0xB
+        if ((typeExtender & ResponseOffsets.DiagnosticStatus.Plc5TypeExtenderMask) == ResponseOffsets.DiagnosticStatus.Plc5TypeExtenderMask)
+            return ProcessorFamily.Plc5;
+
+        // Future: PLC-3, PLC-2 detection can be added here using other bytes
+
+        return ProcessorFamily.Unknown;
+    }
+
     // ========================================================================
     // SLC 500 Data File Types – see Chapter 7, page 7-17
     // ========================================================================
@@ -314,6 +352,20 @@ public static class PCCCConstants
             
             /// <summary>Offset of mode code within DATA payload (inner frame offset 24 → 18).</summary>
             public const int ModeCode = 18;
+
+            // --- Konstanta baru untuk deteksi keluarga processor ---
+            /// <summary>Offset of type extender (byte 2 of DATA).</summary>
+            public const int TypeExtender = 1;
+
+            /// <summary>Offset of extended interface type (byte 3 of DATA).</summary>
+            public const int ExtendedInterfaceType = 2;
+
+            /// <summary>Value of type extender for SLC and MicroLogix families.</summary>
+            public const byte TypeExtenderSlcMl = 0xEE;
+
+            /// <summary>Mask for high nibble of type extender to detect PLC-5 family.</summary>
+            /// <remarks>PLC-5 type extender high nibble = 0xB (e.g., 0xB?, 0xBE, etc.).</remarks>
+            public const byte Plc5TypeExtenderMask = 0xB0;
         }
 
         /// <summary>Offsets in the file directory (FileZeroData) after reading.</summary>
