@@ -64,6 +64,7 @@ public static class Logger
         {
             if (t == typeof(PCCCEmulator)) return "EMU";
             if (t == typeof(DF1FullDuplexTransport)) return "DFU";
+            if (t == typeof(DF1HalfDuplexTransport)) return "DFS";
             if (t == typeof(EIPTransport)) return "EIP";
             if (t.Name == "EIPClient") return "EIP";
             if (t == typeof(PlcMemory)) return "MEM";

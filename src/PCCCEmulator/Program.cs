@@ -51,6 +51,9 @@ class Program
         int node = 1;
         string checksum = "crc";
         string mode = "df1";
+        string rs485Mode = "auto";
+        int rtsAssertDelay = 1;
+        int rtsDeassertDelay = 5;
         int eipPort = 44818;
         bool quietMode = false;
 
@@ -76,6 +79,18 @@ class Program
                     "even" => Parity.Even,
                     _ => Parity.None
                 };
+            }
+            else if (a == "--rs485-mode" && i + 1 < args.Length)
+            {
+                rs485Mode = args[++i].ToLowerInvariant();
+            }
+            else if (a == "--rts-assert-delay" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[++i], out var d)) rtsAssertDelay = d;
+            }
+            else if (a == "--rts-deassert-delay" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[++i], out var d)) rtsDeassertDelay = d;
             }
             else if (a == "--node" && i + 1 < args.Length)
             {
@@ -109,10 +124,11 @@ class Program
         // Validate mode
         var emulatorMode = mode switch
         {
-            "df1" => PCCCEmulator.TransportMode.DF1,
-            "uic" => PCCCEmulator.TransportMode.UIC,
-            "eip" => PCCCEmulator.TransportMode.EIP,
-            _ => PCCCEmulator.TransportMode.DF1
+            "df1"      => PCCCEmulator.TransportMode.DF1,
+            "df1slave" => PCCCEmulator.TransportMode.DF1Slave,
+            "uic"      => PCCCEmulator.TransportMode.UIC,
+            "eip"      => PCCCEmulator.TransportMode.EIP,
+            _          => PCCCEmulator.TransportMode.DF1
         };
 
         // Warning for serial parameters when using EIP mode
@@ -128,6 +144,18 @@ class Program
             CheckSum = checksum == "crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc
         };
 
+        if (emulatorMode == PCCCEmulator.TransportMode.DF1Slave)
+        {
+            emulator.Rs485Mode = rs485Mode switch
+            {
+                "rts" => DF1HalfDuplexTransport.Rs485ControlMode.Rts,
+                "dtr" => DF1HalfDuplexTransport.Rs485ControlMode.Dtr,
+                _ => DF1HalfDuplexTransport.Rs485ControlMode.Auto
+            };
+            emulator.RtsAssertDelayMs = rtsAssertDelay;
+            emulator.RtsDeassertDelayMs = rtsDeassertDelay;
+        }
+
         // Disable logging if quiet mode is enabled
         if (quietMode)
             emulator.SetLoggingEnabled(false);
@@ -138,7 +166,8 @@ class Program
             Logger.Always(null, $"PCCC emulator running");
             Console.WriteLine($"      Mode      : {mode.ToUpper()}");
             
-            if (emulatorMode == PCCCEmulator.TransportMode.DF1)
+            if (emulatorMode == PCCCEmulator.TransportMode.DF1 ||
+                    emulatorMode == PCCCEmulator.TransportMode.DF1Slave)
             {
                 Console.WriteLine($"      Port      : {portName}");
                 Console.WriteLine($"      Baud rate : {baud}");
@@ -182,7 +211,10 @@ class Program
         Console.WriteLine("  --parity <none|odd|even>  Parity mode (default none)");
         Console.WriteLine("  --node <n>           Emulator node ID (default 1)");
         Console.WriteLine("  --checksum <crc|bcc> Checksum mode (default crc)");
-        Console.WriteLine("  --mode <df1|dh485|eip> Transport mode (default df1)");
+        Console.WriteLine("  --mode <df1|df1slave|uic|eip> Transport mode (default df1)");
+        Console.WriteLine("  --rs485-mode <auto|rts|dtr>      RS-485 direction control (default auto)");
+        Console.WriteLine("  --rts-assert-delay <ms>          Delay after enabling driver (default 1)");
+        Console.WriteLine("  --rts-deassert-delay <ms>        Delay after last byte before disabling (default 5)");
         Console.WriteLine("  --port <n>           EIP port number (default 44818)");
         Console.WriteLine("  --quiet, -q          Disable logging for maximum performance");
         Console.WriteLine("  --help, -h           Show this help");
@@ -190,6 +222,7 @@ class Program
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run -- COM2 --baud 19200 --checksum crc");
         Console.WriteLine("  dotnet run -- COM3 --baud 9600 --parity even --node 2");
+        Console.WriteLine("  dotnet run -- COM2 --mode df1slave --node 3");
         Console.WriteLine("  dotnet run -- --mode eip --port 44818");
         Console.WriteLine("  dotnet run -- COM2 --quiet                    # High performance mode");
         Console.WriteLine();
@@ -197,8 +230,9 @@ class Program
         Console.WriteLine("      significantly improves throughput under high load.");
         Console.WriteLine();
         Console.WriteLine("Transport Modes:");
-        Console.WriteLine("  df1    - Serial DF1 full-duplex (default, fully implemented)");
-        Console.WriteLine("  uic    - DH485 via 1747-UIC (implemented)");
-        Console.WriteLine("  eip    - EtherNet/IP (EIP/PCCC) via TCP (implemented)");
+        Console.WriteLine("  df1      - Serial DF1 full-duplex (default, fully implemented)");
+        Console.WriteLine("  df1slave - Serial DF1 half-duplex slave (implemented)");
+        Console.WriteLine("  uic      - DH485 via 1747-UIC (implemented)");
+        Console.WriteLine("  eip      - EtherNet/IP (EIP/PCCC) via TCP (implemented)");
     }
 }

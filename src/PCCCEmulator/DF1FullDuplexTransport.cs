@@ -163,6 +163,7 @@ public class DF1FullDuplexTransport : DF1BaseTransport
                 scanPos = _rxHead;
                 remaining = _rxCount;
 
+                Logger.Hex(this, "RX:", frame, frame.Length);
                 ProcessFrame(frame);
             }
             else

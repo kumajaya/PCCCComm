@@ -391,10 +391,7 @@ public abstract class DF1BaseTransport : ILinkTransport
             lock (_txLock)
             {
                 _port.Write(frame, 0, frame.Length);
-                if (Logger.Enabled)
-                {
-                    Logger.Hex(this, "TX:", frame, frame.Length);
-                }
+                Logger.Hex(this, "TX:", frame, frame.Length);
             }
         }
         catch (Exception ex)
@@ -423,9 +420,9 @@ public abstract class DF1BaseTransport : ILinkTransport
         int headerLen = hasFunc ? 7 : 6;
         int dataLen = Math.Max(0, innerArray.Length - headerLen);
 
-        Logger.Hex(this, "TX:", rawFrame, rawLength);
         string funcStr = hasFunc ? $"0x{innerArray[6]:X2}" : "none";
         Logger.Info(this, $"dst={dst} src={src} cmd=0x{cmd:X2} tns={tns:X4} func={funcStr} dataLen={dataLen}");
+        Logger.Hex(this, "TX:", rawFrame, rawLength);
     }
 
     /// <summary>
@@ -444,7 +441,6 @@ public abstract class DF1BaseTransport : ILinkTransport
         int dataLen = pdu.Length - headerLen;
         int func = hasFunc ? pdu[6] : 0;
 
-        Logger.Hex(this, "RX:", rawFrame, rawFrame.Length);
         Logger.Info(this, $"dst={pdu[0]} src={pdu[1]} cmd=0x{cmd:X2} tns={tns:X4} func=0x{func:X2} dataLen={dataLen}");
     }
 

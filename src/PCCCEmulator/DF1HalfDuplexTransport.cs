@@ -32,8 +32,8 @@ using System.Threading;
 /// PROTOCOL DIFFERENCES FROM FULL-DUPLEX:
 ///   - Slave never initiates transmission; it waits for a poll (DLE ENQ + address).
 ///   - Responses are queued and sent only when the master polls this node's address.
-///   - No automatic ACK after receiving a data frame; ACK is sent as a poll response
-///     when there is no pending application response.
+///   - After receiving a valid command frame, the slave sends DLE ACK immediately.
+///   - During polling, the slave sends DLE NAK if response not ready, or the response data frame when ready.
 ///   - Address filtering: polls not matching _myNode are silently ignored.
 ///   - RTS control may be required for RS-485 transceivers without auto-direction.
 /// 
@@ -66,7 +66,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
 
     private Rs485ControlMode _rs485Mode = Rs485ControlMode.Auto;
     private int _rtsAssertDelayMs = 1;      // Delay after enabling driver
-    private int _rtsDeassertDelayMs = 1;    // Delay after last byte before disabling
+    private int _rtsDeassertDelayMs = 5;    // Increased for safety margin
 
     /// <summary>
     /// Gets or sets the RS-485 direction control mode.
@@ -134,8 +134,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
         // Do NOT log "TX" here because the frame is not yet sent.
         // Logging will happen in SendWithDirectionControl when actually transmitted.
         // Optionally log a "QUEUED" message for debugging:
-        if (Logger.Enabled)
-            Logger.Info(this, "Response queued (pending poll)");
+        Logger.Info(this, "Response queued (pending poll)");
 
         lock (_pendingLock)
         {
@@ -152,9 +151,9 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
     /// <summary>
     /// Parses the circular buffer, looking for:
     ///   1. Polling packets: DLE ENQ (0x10 0x05) followed by address byte.
-    ///      If address matches _myNode, sends the pending response (or ACK/NAK).
+    ///      If address matches _myNode, sends the pending response (or NAK if none).
     ///   2. Data frames: DLE STX ... DLE ETX ... (same as full-duplex),
-    ///      but without automatic ACK; instead the response is queued.
+    ///      but with immediate ACK after validation, and response queued for later poll.
     /// </summary>
     protected override void ParseBuffer()
     {
@@ -170,19 +169,16 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
             byte b2 = _rxBuffer[(scanPos + 1) % _rxBuffer.Length];
 
             // ─── Polling Detection (DLE ENQ + address) ─────────────────────
-            if (b1 == 0x10 && b2 == 0x05 && remaining >= 3)
+            if (b1 == 0x10 && b2 == 0x05)
             {
+                if (remaining < 3) break;  // wait address byte
                 byte addr = _rxBuffer[(scanPos + 2) % _rxBuffer.Length];
                 // Remove the 3-byte poll sequence from buffer
                 _rxHead = (_rxHead + 3) % _rxBuffer.Length;
                 _rxCount -= 3;
                 scanPos = _rxHead;
                 remaining = _rxCount;
-
-                if (addr == _myNode)
-                {
-                    HandlePoll();
-                }
+                if (addr == _myNode) HandlePoll();
                 // else: poll for another node – ignore silently
                 continue;
             }
@@ -236,6 +232,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
                 scanPos = _rxHead;
                 remaining = _rxCount;
 
+                Logger.Hex(this, "RX:", frame, frame.Length);
                 ProcessDataFrame(frame);
                 continue;
             }
@@ -252,9 +249,8 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
     // ─── Poll Handling ─────────────────────────────────────────────────────
     /// <summary>
     /// Called when the master polls this node's address.
-    /// Sends the pending response if available; otherwise sends an ACK
-    /// (DLE 0x06) to indicate no data. If a NAK is pending (error state),
-    /// sends NAK instead.
+    /// Sends the pending response if available; otherwise sends a NAK
+    /// (DLE 0x15) to indicate not ready. This matches DF1 half-duplex spec §6.4.
     /// </summary>
     private void HandlePoll()
     {
@@ -275,17 +271,17 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
         }
         else
         {
-            // No pending data – send ACK
-            SendWithDirectionControl(ACK_FRAME);
-            Logger.Info(this, "Poll response: ACK (no pending data)");
+            // Not ready yet – send NAK so master will re-poll (per spec §6.4)
+            SendWithDirectionControl(NAK_FRAME);
+            Logger.Info(this, "Poll response: NAK (response not ready)");
         }
     }
 
-    // ─── Data Frame Processing (no immediate ACK) ──────────────────────────
+    // ─── Data Frame Processing (immediate ACK, then queue response) ────────
     /// <summary>
     /// Processes a complete DF1 data frame (DLE STX ... DLE ETX ... checksum).
-    /// Unlike full-duplex, this method does NOT send an ACK immediately.
-    /// Instead, it queues the response from the emulator (via SendResponse).
+    /// After validating the frame, sends an ACK immediately (link-layer acknowledgment),
+    /// then queues the application response for later polling.
     /// 
     /// IMPORTANT: RaisePduReceived is synchronous. PCCCEmulator.DispatchCommand
     /// is called inline here and will call SendResponse() before this returns.
@@ -347,6 +343,10 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
             int dst = unstuffed[0];
             if (dst != _myNode && dst != 0xFF) return;
 
+            // --- Send ACK immediately after valid command frame (link-layer ack) ---
+            // Master is waiting for this before it will begin polling (per spec §6.2)
+            SendWithDirectionControl(ACK_FRAME);
+
             // Log the received frame
             byte[] pdu = new byte[unstuffedLen];
             unstuffed.CopyTo(pdu);
@@ -396,12 +396,11 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
 
                 // Wait for transmission to finish before releasing driver
                 // Calculate approximate transmit time in ms:
-                //   bits per byte = start(1) + data(8) + parity(0 or 1) + stop(1) = 10 typical
-                //   time = (bytes * 10 * 1000) / baudRate
-                int transmitTimeMs = (data.Length * 10 * 1000) / _port.BaudRate;
-                int totalDelay = transmitTimeMs + _rtsDeassertDelayMs;
-                if (totalDelay > 0)
-                    Thread.Sleep(totalDelay);
+                //   bits per byte = start(1) + data(8) + parity(0 or 1) + stop(1)
+                int bitsPerByte = 1 + 8 + (_port.Parity == Parity.None ? 0 : 1) + 1;
+                int transmitTimeMs = (data.Length * bitsPerByte * 1000) / _port.BaudRate;
+                int totalDelay = Math.Max(1, transmitTimeMs + _rtsDeassertDelayMs);
+                Thread.Sleep(totalDelay);
 
                 // Disable driver
                 if (_rs485Mode == Rs485ControlMode.Rts)
@@ -410,8 +409,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
                     _port.DtrEnable = false;
 
                 // Log hex (if enabled)
-                if (Logger.Enabled)
-                    Logger.Hex(this, "TX:", data, data.Length);
+                Logger.Hex(this, "TX:", data, data.Length);
             }
         }
         catch (Exception ex)

@@ -298,7 +298,9 @@ class Program
             pccc = new Comm.PCCCComm(portName, baud, parity)
             {
                 Protocol = "DF1Master",
+                TargetNode = targetNode,
                 SlaveAddress = targetNode,
+                MyNode = myNode,
                 Rs485Mode = rs485Mode switch
                 {
                     "rts" => Comm.Core.DF1HalfDuplexTransport.Rs485ControlMode.Rts,

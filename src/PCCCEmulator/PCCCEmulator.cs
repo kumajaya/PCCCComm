@@ -89,7 +89,8 @@ public class PCCCEmulator : IDisposable
     {
         DF1,      // Serial DF1 full-duplex (default, fully implemented)
         UIC,      // DH485 via 1747-UIC (implemented)
-        EIP       // EtherNet/IP (EIP/PCCC) via TCP (fully implemented)
+        EIP,      // EtherNet/IP (EIP/PCCC) via TCP (fully implemented)
+        DF1Slave  // DF1 half-duplex slave (RS-485 multi-drop)
     }
 
     private readonly TransportMode _mode;
@@ -180,6 +181,44 @@ public class PCCCEmulator : IDisposable
         }
     }
 
+    // ─── RS-485 configuration for half-duplex slave ─────────────────────
+    private DF1HalfDuplexTransport.Rs485ControlMode _rs485Mode = DF1HalfDuplexTransport.Rs485ControlMode.Auto;
+    private int _rtsAssertDelayMs = 1;
+    private int _rtsDeassertDelayMs = 5;
+
+    public DF1HalfDuplexTransport.Rs485ControlMode Rs485Mode
+    {
+        get => _rs485Mode;
+        set
+        {
+            _rs485Mode = value;
+            if (_transport is DF1HalfDuplexTransport slave)
+                slave.Rs485Mode = value;
+        }
+    }
+
+    public int RtsAssertDelayMs
+    {
+        get => _rtsAssertDelayMs;
+        set
+        {
+            _rtsAssertDelayMs = Math.Max(0, value);
+            if (_transport is DF1HalfDuplexTransport slave)
+                slave.RtsAssertDelayMs = _rtsAssertDelayMs;
+        }
+    }
+
+    public int RtsDeassertDelayMs
+    {
+        get => _rtsDeassertDelayMs;
+        set
+        {
+            _rtsDeassertDelayMs = Math.Max(0, value);
+            if (_transport is DF1HalfDuplexTransport slave)
+                slave.RtsDeassertDelayMs = _rtsDeassertDelayMs;
+        }
+    }
+
     public TransportMode Mode => _mode;
 
     // ─── Constructor ─────────────────────────────────────────────────────────
@@ -205,12 +244,13 @@ public class PCCCEmulator : IDisposable
         // Create the appropriate transport handler based on mode
         _transport = mode switch
         {
-            TransportMode.DF1   => new DF1FullDuplexTransport(this, portName, baudRate, parity),
-            TransportMode.UIC   => new DF1FullDuplexTransport(this, portName, 19200, Parity.None)
+            TransportMode.DF1      => new DF1FullDuplexTransport(this, portName, baudRate, parity),
+            TransportMode.UIC      => new DF1FullDuplexTransport(this, portName, 19200, Parity.None)
             {
                 CheckSum = CheckSumOptions.Crc
             },
-            TransportMode.EIP   => new EIPTransport(this, eipPort),
+            TransportMode.EIP      => new EIPTransport(this, eipPort),
+            TransportMode.DF1Slave => new DF1HalfDuplexTransport(this, portName, baudRate, parity),
             _                   => throw new ArgumentException($"Unknown emulator mode: {mode}")
         };
 
