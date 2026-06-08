@@ -1,12 +1,89 @@
 # PCCC Protocol Subset – Implementation Guide
 
-This folder contains the core PCCC (Programmable Controller Communications Command) implementation for the **PCCCComm** library.
+This document lists all PCCC (Programmable Controller Communications Command) commands as defined in Allen‑Bradley Publication 1770‑6.5.16, and indicates which commands are currently implemented in the **PCCCComm** library.
 
 ---
 
-## Supported PCCC Subset
+## Complete PCCC Command Set
 
-The following PCCC commands are fully implemented and tested.
+The table below follows the naming and grouping conventions of the official AB specification.  
+✅ = fully implemented and tested in PCCCComm  
+❌ = not yet implemented (planned for future releases or not applicable)
+
+| # | Command | CMD | FNC | Implemented | Notes |
+|---|---------|-----|-----|-------------|-------|
+| 1 | Apply Port Configuration | 0x0F | 0x8F | ✅ | |
+| 2 | Bit Write (Write Bit) | 0x0F | 0xAB | ✅ | |
+| 3 | Change Mode (SLC 5/03+) | 0x0F | 0x80 | ✅ | |
+| 4 | Change Mode (MicroLogix) | 0x0F | 0x3A | ✅ | |
+| 5 | Close File | 0x0F | 0x82 | ✅ | |
+| 6 | Diagnostic Status | 0x06 | 0x03 | ✅ | |
+| 7 | Disable Forces | 0x0F | 0x41 | ✅ | |
+| 8 | Disable Outputs | 0x07 | 0x00 | ❌ | |
+| 9 | Download All Request (Download) | 0x0F | 0x50 | ✅ | |
+| 10 | Download Completed | 0x0F | 0x52 | ✅ | |
+| 11 | Download Request (Download Privilege) | 0x0F | 0x05 | ❌ | |
+| 12 | Echo | 0x0F | 0x00 | ✅ | |
+| 13 | Enable Outputs | 0x07 | 0x01 | ❌ | |
+| 14 | Enable PLC Scanning | 0x07 | 0x03 | ❌ | |
+| 15 | Enter Download Mode | 0x07 | 0x04 | ❌ | |
+| 16 | Enter Upload Mode | 0x07 | 0x06 | ❌ | |
+| 17 | Exit Download/Upload Mode | 0x07 | 0x05 | ❌ | |
+| 18 | File Read | 0x0F | 0xA7 | ✅ | |
+| 19 | File Write | 0x0F | 0xAF | ✅ | |
+| 20 | Get Edit Resource | 0x0F | 0x11 | ✅ | |
+| 21 | Initialize Memory | 0x0F | 0x57 | ✅ | |
+| 22 | Modify PLC‑2 Compatibility File | 0x0F | 0x5E | ❌ | |
+| 23 | Open File | 0x0F | 0x81 | ✅ | |
+| 24 | Physical Read (PLC‑2/1774‑PLC) | 0x04 | – | ❌ | Legacy |
+| 25 | Physical Read (PLC‑3/5) | 0x0F | 0x17 | ❌ | Legacy |
+| 26 | Physical Write | 0x0F | 0x08 / 0x18 | ❌ | Legacy |
+| 27 | Protected Bit Write | 0x02 | – | ❌ | Legacy |
+| 28 | Protected Typed File Read | 0x0F | 0xA7 | ✅ | Same as File Read |
+| 29 | Protected Typed File Write | 0x0F | 0xAF | ✅ | Same as File Write |
+| 30 | Protected Typed Logical Read (3 Address Fields) | 0x0F | 0xA2 | ✅ | |
+| 31 | Protected Typed Logical Write (3 Address Fields) | 0x0F | 0xAA | ✅ | |
+| 32 | Protected Write | 0x00 | – | ❌ | Legacy |
+| 33 | Read Bytes Physical | 0x0F | 0x17 | ❌ | Legacy |
+| 34 | Read Diagnostic Counters | 0x06 | 0x01 | ✅ | |
+| 35 | Read Link Parameters | 0x06 | 0x09 | ✅ | |
+| 36 | Read‑Modify‑Write | 0x0F | 0x26 | ✅ | |
+| 37 | Read‑Modify‑Write N | 0x0F | 0x79 | ❌ | |
+| 38 | Read Section Size | 0x0F | 0x29 | ❌ | |
+| 39 | Reset Diagnostic Counters | 0x06 | 0x07 | ✅ | |
+| 40 | Restart Request (Restart) | 0x0F | 0x0A | ❌ | |
+| 41 | Return Edit Resource | 0x0F | 0x12 | ✅ | |
+| 42 | Set CPU Mode | 0x0F | 0x3A / 0x80 | ✅ | Same as Change Mode |
+| 43 | Set Data Table Size | 0x06 | 0x08 | ❌ | |
+| 44 | Set ENQs | 0x06 | 0x06 | ❌ | |
+| 45 | Set Link Parameters | 0x06 | 0x0A | ✅ | |
+| 46 | Set NAKs | 0x06 | 0x05 | ❌ | |
+| 47 | Set Timeout | 0x06 | 0x04 | ❌ | |
+| 48 | Set Variables | 0x06 | 0x02 | ❌ | |
+| 49 | Shutdown | 0x0F | 0x07 | ❌ | |
+| 50 | Typed Read (Read Block) | 0x0F | 0x68 | ✅ | For Logix PCCC |
+| 51 | Typed Write (Write Block) | 0x0F | 0x67 | ✅ | For Logix PCCC |
+| 52 | Unprotected Bit Write | 0x05 | – | ❌ | Legacy |
+| 53 | Unprotected Read | 0x01 | – | ❌ | Legacy |
+| 54 | Unprotected Write | 0x08 | – | ❌ | Legacy |
+| 55 | Upload All Request (Upload) | 0x0F | 0x53 | ✅ | |
+| 56 | Upload Completed | 0x0F | 0x55 | ✅ | |
+| 57 | Upload | 0x0F | 0x06 | ❌ | |
+| 58 | Word Range Read (Read Block) | 0x0F | 0x01 | ❌ | Legacy |
+| 59 | Word Range Write (Write Block) | 0x0F | 0x00 | ❌ | Legacy |
+| 60 | Write Bytes Physical (Physical Write) | 0x0F | 0x18 | ❌ | Legacy |
+
+> **Notes:**  
+> - Commands marked with ✅ are fully implemented, tested, and ready for use.  
+> - Commands marked with ❌ are either planned for future releases or are specific to legacy PLC families (PLC‑2, 1774‑PLC, early PLC‑3) which are not the primary target of PCCCComm.  
+> - All read/write operations for SLC 500, MicroLogix, and PLC‑5 (via PCCC‑over‑CIP) are supported.  
+> - The “Legacy” note indicates commands that are rarely used in modern applications and may be added upon request.
+
+---
+
+## Supported PCCC Subset – Detailed Feature List
+
+The following sections describe the implemented commands in more detail, grouped by functionality.
 
 ### Mode Control
 
