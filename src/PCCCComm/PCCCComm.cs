@@ -650,6 +650,53 @@ public class PCCCComm : IDisposable, IHandlerContext
         }
     }
 
+    // ─── Raw PDU send/receive (for debugging and low-level testing) ────────
+
+    /// <summary>
+    /// Sends a raw PCCC PDU and waits for the matching response.
+    /// TNS bytes in the input PDU are replaced automatically.
+    /// </summary>
+    /// <param name="pdu">
+    /// Raw PCCC PDU: [dst][src][cmd][sts][tns_lo][tns_hi][fnc?][data...]
+    /// Minimum 6 bytes.
+    /// </param>
+    /// <returns>
+    ///   0  = success, ResponsePdu contains the inner PCCC frame
+    ///  -1  = pdu null or too short
+    ///  -2  = not connected
+    /// -20  = timeout / no response
+    /// </returns>
+    public (int Status, byte[]? ResponsePdu, string Diagnostics)
+        SendRawPduAndGetResponse(byte[] pdu)
+    {
+        if (pdu == null || pdu.Length < 6)
+            return (-1, null, "PDU null or too short (minimum 6 bytes)");
+
+        if (_currentTransport == null || !_currentTransport.IsOpen)
+            return (-2, null, "Transport not open — call OpenComms() first");
+
+        if (_protocol == null)
+            return (-2, null, "Protocol not initialized — call OpenComms() first");
+
+        byte cmd    = pdu[2];
+        byte sts    = pdu[3];
+        bool hasFnc = (cmd == 0x06 || cmd == 0x0F || cmd == 0x0A) && pdu.Length >= 7;
+        byte? fnc   = hasFnc ? pdu[6] : (byte?)null;
+        byte[] data = pdu.Length > (hasFnc ? 7 : 6)
+                    ? pdu[(hasFnc ? 7 : 6)..]
+                    : Array.Empty<byte>();
+
+        var req   = new PCCCMessage((byte)TargetNode, (byte)MyNode, cmd, sts, 0, fnc, data);
+        var reply = _protocol.SendRequest(req, out int replySts);
+        
+
+        if (reply == null)
+            return (replySts == 0 ? -20 : replySts, null,
+                    PCCCErrors.DecodeStatus(replySts));
+
+        return (0, reply.ToBytes(), $"cmd=0x{cmd:X2} fnc={fnc?.ToString("X2") ?? "n/a"}");
+    }
+
     // ─── String helpers (static) ──────────────────────────────────────────
     public static string WordsToString(int[] words) => StringConverter.WordsToString(words);
     public static string WordsToString(int[] words, int index) => StringConverter.WordsToString(words, index);

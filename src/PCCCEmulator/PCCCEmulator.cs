@@ -384,6 +384,9 @@ public class PCCCEmulator : IDisposable
         }
     }
 
+    // ─── DH485 Link Parameters ─────────────────────────────────────────────
+    private int _maxNodeAddress = 31;   // Default maximum solicit address for DH485
+
     // ─── PDU Event Handler (Called by transport layer) ────────────────────────
     /// <summary>
     /// Called when a complete PDU (Transport Data Unit) has been received.
@@ -453,6 +456,19 @@ public class PCCCEmulator : IDisposable
             SendDiagnosticCountersResponse(src, tns, 0x4A, clientContext);
         else if (cmd == 0x67)
             HandleReadModifiedData(src, tns, data, clientContext);
+        else if (cmd == 0x06 && func == 0x09)
+        {
+            // Read Link Parameters – return one byte containing _maxNodeAddress
+            byte[] linkParam = new byte[] { (byte)_maxNodeAddress };
+            SendDataResponse(src, tns, 0x46, linkParam, clientContext);
+        }
+        else if (cmd == 0x06 && func == 0x0A)
+        {
+            // Set Link Parameters – expects one byte in data
+            if (data != null && data.Length >= 1)
+                _maxNodeAddress = data[0];
+            SendEmptyResponse(src, tns, 0x46, func, clientContext);
+        }
         else
             SendErrorResponse(src, tns, cmd, func, 0x01, clientContext);
     }
@@ -721,6 +737,32 @@ public class PCCCEmulator : IDisposable
 
             case 0x8F:  // Apply Port Configuration
                 SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                break;
+
+            // ─── Echo (0x0F/0x00) ────────────────────────────────────────────────
+            case 0x00:
+                // Echo back the same data that was sent.
+                SendDataResponse(src, tns, 0x4F, data, clientContext);
+                break;
+
+            // ─── Initialize Memory (0x0F/0x57) ────────────────────────────────────
+            case 0x57:
+                _memory.ResetToDefault();
+                SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                break;
+
+            // ─── Read-Modify-Write (0x0F/0x26) ────────────────────────────────────
+            case 0x26:
+                HandleReadModifyWrite(src, tns, data, clientContext);
+                break;
+
+            // ─── Typed Write for Logix PCCC (0x0F/0x67) ───────────────────────────
+            case 0x67:
+                // Treat as a normal write (same as 0xAA) but with Logix‑specific addressing.
+                // The payload format is similar to 0xAA but the data may be preceded by a type/data descriptor.
+                // For emulator simplicity, we can reuse HandleWriteRequest with func=0xAA,
+                // because the actual data layout for a simple typed write is compatible.
+                HandleWriteRequest(src, tns, 0xAA, data, clientContext);
                 break;
 
             default:
@@ -1034,6 +1076,82 @@ public class PCCCEmulator : IDisposable
         SendDataResponse(src, tns, 0xA7, data, clientContext);
     }
 
+    /// <summary>
+    /// Handles Read‑Modify‑Write (CMD=0x0F, FNC=0x26).
+    /// Payload format: for each set:
+    ///   fileNumber (1 byte)
+    ///   fileType   (1 byte)
+    ///   element    (1 or 3 bytes, 0xFF extended)
+    ///   subElement (1 or 3 bytes, 0xFF extended)
+    ///   andMask    (2 bytes LE)
+    ///   orMask     (2 bytes LE)
+    /// </summary>
+    private void HandleReadModifyWrite(int src, int tns, byte[] payload, object clientContext)
+    {
+        if (payload == null || payload.Length < 8) // at least one full set
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x26, 0x01, clientContext);
+            return;
+        }
+
+        int idx = 0;
+        bool success = true;
+
+        while (idx < payload.Length && success)
+        {
+            // Decode fileNumber
+            if (idx >= payload.Length) { success = false; break; }
+            int fileNumber = payload[idx++];
+
+            // Decode fileType
+            if (idx >= payload.Length) { success = false; break; }
+            int fileType = payload[idx++];
+
+            // Decode element (extended if 0xFF)
+            if (idx >= payload.Length) { success = false; break; }
+            int element = payload[idx++];
+            if (element == 0xFF)
+            {
+                if (idx + 2 > payload.Length) { success = false; break; }
+                element = payload[idx] | (payload[idx + 1] << 8);
+                idx += 2;
+            }
+
+            // Decode subElement (extended if 0xFF)
+            if (idx >= payload.Length) { success = false; break; }
+            int subElement = payload[idx++];
+            if (subElement == 0xFF)
+            {
+                if (idx + 2 > payload.Length) { success = false; break; }
+                subElement = payload[idx] | (payload[idx + 1] << 8);
+                idx += 2;
+            }
+
+            // Decode AND mask (2 bytes LE)
+            if (idx + 2 > payload.Length) { success = false; break; }
+            int andMask = payload[idx] | (payload[idx + 1] << 8);
+            idx += 2;
+
+            // Decode OR mask (2 bytes LE)
+            if (idx + 2 > payload.Length) { success = false; break; }
+            int orMask = payload[idx] | (payload[idx + 1] << 8);
+            idx += 2;
+
+            // Perform atomic RMW using PlcMemory
+            bool ok = _memory.ReadModifyWriteWithMasks(fileType, fileNumber, element, subElement, andMask, orMask);
+            if (!ok)
+            {
+                success = false;
+                break;
+            }
+        }
+
+        if (success)
+            SendEmptyResponse(src, tns, 0x4F, 0x26, clientContext);
+        else
+            SendErrorResponse(src, tns, 0x0F, 0x26, 0x10, clientContext);
+    }
+
     // ─── Response Helpers ────────────────────────────────────────────────────
     // All responses eventually call SendResponse() which delegates to the
     // active transport's SendResponse() method.
@@ -1192,8 +1310,6 @@ public class PCCCEmulator : IDisposable
         Interlocked.Exchange(ref _lostModemCount,           0);
         Logger.Always(this, "Diagnostic counters reset to zero.");
     }
-
-    private byte[]? GetDirectoryBytes() => _directoryBytes;
 
     /// <summary>
     /// Core response sender. Builds the inner frame PDU and delegates to the

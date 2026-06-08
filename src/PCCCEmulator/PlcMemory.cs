@@ -695,6 +695,35 @@ public class PlcMemory
     }
 
     /// <summary>
+    /// Read-Modify-Write for FNC 0x26 using AND and OR masks.
+    /// Formula: newValue = (current & andMask) | orMask
+    /// </summary>
+    public bool ReadModifyWriteWithMasks(int fileType, int fileNumber, int element, int subElement,
+                                        int andMask, int orMask)
+    {
+        _rwLock.EnterWriteLock();
+        try
+        {
+            int bpe = _bytesPerElement.GetValueOrDefault((fileType, fileNumber), 2);
+            int offset = element * bpe + subElement * 2;
+
+            byte[]? data = Lookup(fileType, fileNumber);
+            if (data == null || offset + 2 > data.Length) return false;
+
+            int current = data[offset] | (data[offset + 1] << 8);
+            int newValue = (current & andMask) | orMask;
+
+            data[offset] = (byte)(newValue & 0xFF);
+            data[offset + 1] = (byte)((newValue >> 8) & 0xFF);
+            return true;
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
     /// Returns the bytes-per-element for a file, or 2 if not registered.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -832,6 +861,159 @@ public class PlcMemory
         }
     }
 
+    /// <summary>
+    /// Resets all data files to their default values (as after construction).
+    /// Used by Initialize Memory command (0x0F/0x57).
+    /// </summary>
+    public void ResetToDefault()
+    {
+        _rwLock.EnterWriteLock();
+        try
+        {
+            // O0: 12 bytes → all zero
+            var o0 = Lookup(0x8B, 0);
+            if (o0 != null) Array.Clear(o0, 0, o0.Length);
+            
+            // I1: 42 bytes → all zero
+            var i1 = Lookup(0x8C, 1);
+            if (i1 != null) Array.Clear(i1, 0, i1.Length);
+            
+            // S2: 166 bytes → re-initialise with known values
+            var s2 = Lookup(0x84, 2);
+            if (s2 != null) InitializeStatusFile();
+            
+            // B3: 28 bytes → reset to AA55, 0FF0 pattern
+            var b3 = Lookup(0x85, 3);
+            if (b3 != null)
+            {
+                Array.Clear(b3, 0, b3.Length);
+                WriteU16(b3, 0, 0xAA55);
+                WriteU16(b3, 2, 0x0FF0);
+            }
+            
+            // T4: 468 bytes → all zero
+            var t4 = Lookup(0x86, 4);
+            if (t4 != null) Array.Clear(t4, 0, t4.Length);
+            
+            // C5: 6 bytes → all zero
+            var c5 = Lookup(0x87, 5);
+            if (c5 != null) Array.Clear(c5, 0, c5.Length);
+            
+            // R6: 12 bytes → all zero
+            var r6 = Lookup(0x88, 6);
+            if (r6 != null) Array.Clear(r6, 0, r6.Length);
+            
+            // N7: 148 bytes → reset to 123, 456, -789 pattern
+            var n7 = Lookup(0x89, 7);
+            if (n7 != null)
+            {
+                Array.Clear(n7, 0, n7.Length);
+                WriteU16(n7, 0, 123);
+                WriteU16(n7, 2, 456);
+                WriteU16(n7, 4, -789);
+            }
+            
+            // F8: 152 bytes → reset to 1.23, 4.56 pattern
+            var f8 = Lookup(0x8A, 8);
+            if (f8 != null)
+            {
+                Array.Clear(f8, 0, f8.Length);
+                Array.Copy(BitConverter.GetBytes(1.23f), 0, f8, 0, 4);
+                Array.Copy(BitConverter.GetBytes(4.56f), 0, f8, 4, 4);
+            }
+            
+            // B9..B16, N17, B29..B31 → all zero
+            for (int n = 9; n <= 16; n++)
+            {
+                var b = Lookup(0x85, n);
+                if (b != null) Array.Clear(b, 0, b.Length);
+            }
+            var n17 = Lookup(0x89, 17);
+            if (n17 != null) Array.Clear(n17, 0, n17.Length);
+            
+            // ST18:10 elements → reinitialize with "EMULATOR OK" at element 0, others empty
+            var st18 = Lookup(0x8D, 18);
+            if (st18 != null)
+            {
+                Array.Clear(st18, 0, st18.Length);
+                WriteStString(st18, 0, "EMULATOR OK");
+            }
+            
+            for (int n = 29; n <= 31; n++)
+            {
+                var b = Lookup(0x85, n);
+                if (b != null) Array.Clear(b, 0, b.Length);
+            }
+            
+            // I/O config (file 0x60, 0) and download seed (0x63, 0) reset to default
+            var io = Lookup(0x60, 0);
+            if (io != null)
+            {
+                Array.Clear(io, 0, io.Length);
+                io[0] = 8;
+                io[1 * 6 + 4] = 2;
+                io[2 * 6 + 4] = 2;
+                io[3 * 6 + 4] = 2;
+                io[4 * 6 + 6] = 2;
+                io[5 * 6 + 6] = 2;
+                io[6 * 6 + 4] = 8;
+            }
+            
+            var seed = Lookup(0x63, 0);
+            if (seed != null) Array.Clear(seed, 0, seed.Length);
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
+        
+        Logger.Always(this, "Memory reset to default by Initialize Memory command.");
+    }
+
+    /// <summary>
+    /// Writes a 16-bit unsigned integer to a byte array in little-endian format.
+    /// </summary>
+    /// <param name="buf">Target byte array</param>
+    /// <param name="offset">Offset in bytes</param>
+    /// <param name="value">16-bit value to write</param>
+    public static void WriteU16(byte[] buf, int offset, int value)
+    {
+        buf[offset]     = (byte)(value & 0xFF);
+        buf[offset + 1] = (byte)((value >> 8) & 0xFF);
+    }
+
+    /// <summary>
+    /// Writes an ASCII string into an ST file element buffer at the given element offset.
+    /// SLC 500 string format: bytes 0-1 = length (LE word), bytes 2-83 = char data.
+    /// Strings longer than 82 characters are truncated.
+    /// </summary>
+    /// <param name="buf">ST file byte array</param>
+    /// <param name="elementIndex">Element index (0-based)</param>
+    /// <param name="value">String to write</param>
+    public static void WriteStString(byte[] buf, int elementIndex, string value)
+    {
+        const int elemSize = 84;
+        const int maxChars = 82;
+        int offset = elementIndex * elemSize;
+        if (offset + elemSize > buf.Length) return;
+
+        // Clamp to max 82 chars
+        if (value.Length > maxChars) value = value[..maxChars];
+        int len = value.Length;
+
+        // Write length word (little-endian)
+        buf[offset]     = (byte)(len & 0xFF);
+        buf[offset + 1] = (byte)((len >> 8) & 0xFF);
+
+        // Write char data (one ASCII byte per byte, starting at offset+2)
+        for (int i = 0; i < len; i++)
+            buf[offset + 2 + i] = (byte)(value[i] & 0x7F);
+
+        // Zero-fill remaining char bytes
+        for (int i = len; i < maxChars; i++)
+            buf[offset + 2 + i] = 0x00;
+    }
+
     // =========================================================================
     // PRIVATE HELPERS
     // =========================================================================
@@ -865,50 +1047,6 @@ public class PlcMemory
         _files[(fileType, fileNumber)] = new byte[sizeBytes];
         _bytesPerElement[(fileType, fileNumber)] = bytesPerElement;
         _fileTypeByNumber[fileNumber] = fileType;
-    }
-
-    /// <summary>
-    /// Writes a 16-bit unsigned integer to a byte array in little-endian format.
-    /// </summary>
-    /// <param name="buf">Target byte array</param>
-    /// <param name="offset">Offset in bytes</param>
-    /// <param name="value">16-bit value to write</param>
-    private static void WriteU16(byte[] buf, int offset, int value)
-    {
-        buf[offset]     = (byte)(value & 0xFF);
-        buf[offset + 1] = (byte)((value >> 8) & 0xFF);
-    }
-
-    /// <summary>
-    /// Writes an ASCII string into an ST file element buffer at the given element offset.
-    /// SLC 500 string format: bytes 0-1 = length (LE word), bytes 2-83 = char data.
-    /// Strings longer than 82 characters are truncated.
-    /// </summary>
-    /// <param name="buf">ST file byte array</param>
-    /// <param name="elementIndex">Element index (0-based)</param>
-    /// <param name="value">String to write</param>
-    private static void WriteStString(byte[] buf, int elementIndex, string value)
-    {
-        const int elemSize = 84;
-        const int maxChars = 82;
-        int offset = elementIndex * elemSize;
-        if (offset + elemSize > buf.Length) return;
-
-        // Clamp to max 82 chars
-        if (value.Length > maxChars) value = value[..maxChars];
-        int len = value.Length;
-
-        // Write length word (little-endian)
-        buf[offset]     = (byte)(len & 0xFF);
-        buf[offset + 1] = (byte)((len >> 8) & 0xFF);
-
-        // Write char data (one ASCII byte per byte, starting at offset+2)
-        for (int i = 0; i < len; i++)
-            buf[offset + 2 + i] = (byte)(value[i] & 0x7F);
-
-        // Zero-fill remaining char bytes
-        for (int i = len; i < maxChars; i++)
-            buf[offset + 2 + i] = 0x00;
     }
 
     // =========================================================================

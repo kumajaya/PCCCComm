@@ -1291,7 +1291,7 @@ class Program
     /// Handles the "sendhex" interactive command.
     ///
     /// Sends a raw PCCC PDU by calling the internal PrefixAndSend method via
-    /// reflection (see <see cref="SendRawPdu"/>). This bypasses all address
+    /// reflection (see <see cref="SendRawPduAndGetResponse"/>). This bypasses all address
     /// parsing in the library and is useful for testing undocumented commands
     /// or validating emulator behaviour at the raw protocol level.
     ///
@@ -1347,9 +1347,9 @@ class Program
         for (int i = 0; i < dataBytes.Count; i++)
             pdu[7 + i] = dataBytes[i];
 
-        Console.WriteLine($"Sending: {BitConverter.ToString(pdu)}");
-        int reply = SendRawPdu(pccc, pdu);
-        Console.WriteLine($"Reply status: {reply}  (0 = success)");
+        WriteHex("      TX:", pdu, pdu.Length);
+        var (_, resp, _) = pccc.SendRawPduAndGetResponse(pdu);
+        if (resp != null) WriteHex("      RX:", resp, resp.Length);
     }
 
 // =============================================================================
@@ -1448,6 +1448,10 @@ class Program
         SelfTest_StringReadWrite(pccc);
         SelfTest_BoundaryConditions(pccc);
         SelfTest_ProcessorMode(pccc);
+        SelfTest_Echo(pccc);
+        SelfTest_InitializeMemory(pccc);
+        SelfTest_LinkParameters(pccc);
+        SelfTest_ReadModifyWrite(pccc);
         SelfTest_Latency(pccc);
 
         sw.Stop();
@@ -1974,6 +1978,196 @@ class Program
         }
     }
 
+    // ── Test group 12: Echo command ─────────────────────────────────────────
+    private static void SelfTest_Echo(Comm.PCCCComm pccc)
+    {
+        Console.WriteLine("── Echo Test ──────────────────────────────────────");
+        byte[] testData = { 0x01, 0x02, 0x03, 0xAA, 0xBB, 0xCC };
+        // Build PDU: DST, SRC, CMD, STS, TNS_LO, TNS_HI, FNC, data...
+        byte[] pdu = new byte[7 + testData.Length];
+        pdu[0] = (byte)pccc.TargetNode;
+        pdu[1] = (byte)pccc.MyNode;
+        pdu[2] = 0x0F;
+        pdu[3] = 0x00;
+        pdu[4] = 0x00; // TNS low (library will assign)
+        pdu[5] = 0x00; // TNS high
+        pdu[6] = 0x00; // Echo FNC
+        Array.Copy(testData, 0, pdu, 7, testData.Length);
+
+        var (status, response, _) = pccc.SendRawPduAndGetResponse(pdu);
+        bool ok = status == 0 && response != null && response.Length >= 6 + testData.Length;
+        if (ok && response != null)
+        {
+            // Extract data from response (skip DST,SRC,CMD,STS,TNS,FNC? depends on withFunc)
+            // For Echo, response should have FUNC byte (0x00) and data
+            const int dataStart = 6; // no FNC byte in Echo reply
+            if (response.Length > dataStart + testData.Length - 1)
+            {
+                byte[] respData = new byte[testData.Length];
+                Array.Copy(response, dataStart, respData, 0, testData.Length);
+                ok = respData.SequenceEqual(testData);
+            }
+            else ok = false;
+        }
+        TestResult("Echo returns same data", ok, ok ? "" : status != 0 ? $"status {status}" : "data mismatch");
+    }
+
+     // ── Test group 13: Initialize Memory ────────────────────────────────────
+    private static void SelfTest_InitializeMemory(Comm.PCCCComm pccc)
+    {
+        Console.WriteLine("── Initialize Memory Test ─────────────────────────");
+        // Write test values
+        try
+        {
+            // Use reflection to call WriteData? Or we can reuse existing WriteData (public)
+            // WriteData is public, so it's fine.
+            pccc.WriteData("N7:3", 0x1234);
+            pccc.WriteData("ST18:2", "INIT_TEST");
+        }
+        catch (Exception ex)
+        {
+            TestResult("InitializeMemory preparation", false, ex.Message);
+            return;
+        }
+
+        // Send raw Initialize Memory command (0x0F/0x57)
+        byte[] pdu = new byte[7];
+        pdu[0] = (byte)pccc.TargetNode;
+        pdu[1] = (byte)pccc.MyNode;
+        pdu[2] = 0x0F;
+        pdu[3] = 0x00;
+        pdu[4] = 0x00;
+        pdu[5] = 0x00;
+        pdu[6] = 0x57; // FNC Initialize Memory
+
+        var (status, _, _) = pccc.SendRawPduAndGetResponse(pdu);
+        if (status != 0)
+        {
+            TestResult("InitializeMemory() call", false, $"status {status}");
+            return;
+        }
+
+        // Read back using public ReadAny
+        string n7val = pccc.ReadAny("N7:3");
+        string st18val = pccc.ReadAny("ST18:2");
+        bool n7ok = n7val == "0";
+        bool st18ok = st18val == "";
+        TestResult("N7:3 reset to 0 after InitializeMemory", n7ok, n7ok ? "" : $"got {n7val}");
+        TestResult("ST18:2 reset to empty after InitializeMemory", st18ok, st18ok ? "" : $"got {st18val}");
+    }
+
+    // ── Test group 14: Link Parameters (DH485) ──────────────────────────────
+    private static void SelfTest_LinkParameters(Comm.PCCCComm pccc)
+    {
+        Console.WriteLine("── Link Parameters Test ───────────────────────────");
+
+        // Read default (should be 31)
+        var (status,  response,  _) = pccc.SendRawPduAndGetResponse(BuildPdu(pccc, 0x06, 0x09));
+        
+        byte defaultMax = 0;
+        bool readOk = status == 0 && response != null && response.Length >= 7;
+        if (readOk&& response != null)
+        {
+            // Response inner frame: DST,SRC,CMD,STS,TNS,FUNC?,DATA
+            // For CMD 0x06 reply without FUNC byte? Actually GetStatus responses have no FUNC, but Read Link Params may have.
+            // Safer: data starts at offset 6
+            defaultMax = response[6];
+            readOk = defaultMax == 31;
+        }
+        TestResult("ReadLinkParameters default = 31", readOk, readOk ? "" : $"got {defaultMax}");
+
+        // Set to 15
+        var (setStatus, _, _)       = pccc.SendRawPduAndGetResponse(BuildPdu(pccc, 0x06, 0x0A, 15));
+        if (setStatus != 0)
+        {
+            TestResult("SetLinkParameters(15)", false, $"status {setStatus}");
+            return;
+        }
+
+        // Read again
+        var (status2, response2, _) = pccc.SendRawPduAndGetResponse(BuildPdu(pccc, 0x06, 0x09));
+        byte newMax = 0;
+        if (status2 == 0 && response2 != null && response2.Length >= 7)
+            newMax = response2[6];
+        TestResult("ReadLinkParameters returns 15 after set", newMax == 15, $"got {newMax}");
+    }
+
+    private static byte[] BuildPdu(Comm.PCCCComm pccc, byte cmd, byte fnc, params byte[] data)
+    {
+        byte[] pdu = new byte[7 + data.Length];
+        pdu[0] = (byte)pccc.TargetNode;
+        pdu[1] = (byte)pccc.MyNode;
+        pdu[2] = cmd;
+        pdu[3] = 0x00;  // STS
+        pdu[4] = 0x00;  // TNS lo (library replaces)
+        pdu[5] = 0x00;  // TNS hi
+        pdu[6] = fnc;
+        data.CopyTo(pdu, 7);
+        return pdu;
+    }
+
+    // ── Test group 15: Read-Modify-Write (FNC 0x26) ─────────────────────────
+    private static void SelfTest_ReadModifyWrite(Comm.PCCCComm pccc)
+    {
+        Console.WriteLine("── Read-Modify-Write Test ─────────────────────────");
+
+        // Clear B3:1 using public WriteData
+        try
+        {
+            pccc.WriteData("B3:1", 0);
+        }
+        catch (Exception ex)
+        {
+            TestResult("RMW preparation", false, ex.Message);
+            return;
+        }
+
+        // Build RMW request: set bits 0 and 2 (OR mask 0x0005, AND mask 0xFFFF)
+        // Payload: fileNumber(1), fileType(1), element(1), subElement(1), andMask(2), orMask(2)
+        byte[] payload = new byte[8];
+        payload[0] = 1;     // fileNumber = 1 (B3:1 element 1? Wait B3:1 is file 3, element 1. File number is 3? Let's correct: B3:1 = fileType 0x85, fileNumber 3, element 1)
+        // Actually B3 file number is 3. So fileNumber = 3
+        payload[0] = 3;
+        payload[1] = 0x85;  // fileType Binary
+        payload[2] = 1;     // element = 1
+        payload[3] = 0;     // subElement = 0
+        payload[4] = 0xFF;  // andMask low
+        payload[5] = 0xFF;  // andMask high
+        payload[6] = 0x05;  // orMask low (bits 0 and 2)
+        payload[7] = 0x00;  // orMask high
+
+        byte[] pdu = new byte[7 + payload.Length];
+        pdu[0] = (byte)pccc.TargetNode;
+        pdu[1] = (byte)pccc.MyNode;
+        pdu[2] = 0x0F;
+        pdu[3] = 0x00;
+        pdu[4] = 0x00;
+        pdu[5] = 0x00;
+        pdu[6] = 0x26; // FNC RMW
+        Array.Copy(payload, 0, pdu, 7, payload.Length);
+
+        var (status, _, _) = pccc.SendRawPduAndGetResponse(pdu);
+        TestResult("RMW returns status 0", status == 0, status != 0 ? $"status {status}" : "");
+
+        // Read back using public ReadAny
+        string val = pccc.ReadAny("B3:1");
+        bool ok = int.TryParse(val, out int intVal) && intVal == 5;
+        TestResult("RMW set bits 0 and 2 → value 5", ok, ok ? "" : $"got {val}");
+
+        // Now clear bit 0: AND mask 0xFFFE, OR mask 0
+        payload[4] = 0xFE; // andMask low
+        payload[5] = 0xFF; // andMask high
+        payload[6] = 0x00; // orMask low
+        payload[7] = 0x00; // orMask high
+        Array.Copy(payload, 0, pdu, 7, payload.Length);
+        var (status2, _, _) = pccc.SendRawPduAndGetResponse(pdu);
+        TestResult("RMW clear returns status 0", status2 == 0, status2 != 0 ? $"status {status2}" : "");
+
+        val = pccc.ReadAny("B3:1");
+        ok = int.TryParse(val, out intVal) && intVal == 4;
+        TestResult("RMW clear bit 0 → value 4 (bit2 only)", ok, ok ? "" : $"got {val}");
+    }
+
 // =============================================================================
 // SECTION 6 — Communication statistics
 // =============================================================================
@@ -2068,50 +2262,23 @@ class Program
 // SECTION 7 — Low-level helpers
 // =============================================================================
 
-    /// <summary>
-    /// Sends a raw PCCC PDU by invoking the internal PrefixAndSend method via
-    /// reflection. Used only by the "sendhex" interactive command.
-    ///
-    /// PDU layout:
-    ///   [0]    DST  — target node (temporarily applied to pccc.TargetNode)
-    ///   [1]    SRC  — ignored; the library uses pccc.MyNode
-    ///   [2]    CMD  — PCCC command code (e.g. 0x0F)
-    ///   [3]    STS  — must be 0x00 in requests
-    ///   [4-5]  TNS  — ignored; the library generates its own TNS
-    ///   [6]    FNC  — function code (used when CMD = 0x0F or 0x06)
-    ///   [7..]  DATA — command-specific payload
-    ///
-    /// PrefixAndSend signature:
-    ///   int PrefixAndSend(int cmd, int func, byte[] data, bool waitReply, out int rTNS)
-    ///
-    /// Returns the status code from the reply frame (0 = success, non-zero = error).
-    /// </summary>
-    private static int SendRawPdu(Comm.PCCCComm pccc, byte[] pdu)
+    private static void WriteHex(string prefix, byte[] data, int length)
     {
-        var method = typeof(Comm.PCCCComm).GetMethod(
-            "PrefixAndSend",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-        if (method == null)
-            throw new Exception("PrefixAndSend method not found in PCCCComm. " +
-                                "Ensure the library version matches this client.");
-
-        int    cmd  = pdu[2];
-        int    func = pdu[6];
-        byte[] data = pdu.Length > 7 ? pdu[7..] : Array.Empty<byte>();
-
-        int saved = pccc.TargetNode;
-        pccc.TargetNode = pdu[0]; // override with the user-supplied DST byte
-        try
+        if (length <= 0 || data == null) return;
+        if (length > data.Length) length = data.Length;
         {
-            // rTNS is arg[4] (an out parameter); pass 0 as placeholder.
-            object[] args = { cmd, func, data, true, 0 };
-            object?  res  = method.Invoke(pccc, args);
-            return res is int i ? i : -1;
+            Console.Write($"{prefix} ");
+            WriteHex(Console.Out, data, length);
+            Console.WriteLine();
         }
-        finally
+    }
+
+    private static void WriteHex(TextWriter writer, byte[] data, int length)
+    {
+        for (int i = 0; i < length; i++)
         {
-            pccc.TargetNode = saved;
+            if (i > 0) writer.Write(' ');
+            writer.Write(data[i].ToString("X2"));
         }
     }
 
