@@ -21,14 +21,14 @@
 
 using System.Text.RegularExpressions;
 
-namespace PCCCComm.Core;
+namespace PCCCComm.Pccc;
 
 /// <summary>
 /// Parses Allen-Bradley PLC address strings into a DataAddress struct.
 /// Supported formats (ref AB Publication 1770-6.5.16, page 7-18):
 ///   N7:0, B3:0/5, T4:1.ACC, C5:0.DN, F8:0, ST9:0, I:0, O:0, S:1
 /// </summary>
-public static partial class AddressParser
+public static partial class PCCCParser
 {
     [GeneratedRegex(@"^\s*(?<FileType>([SBCTRNFAIOL])|(ST)|(MG)|(PD)|(PLS))(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})(/(?<BitNumber>\d{1,4}))?\s*$", RegexOptions.IgnoreCase)]
     private static partial Regex RE1();

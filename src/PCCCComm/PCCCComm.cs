@@ -53,7 +53,7 @@ public class PCCCComm : IDisposable
 
     // PCCC engine
     private PCCCProtocol? _protocol;
-    private IPlcProtocolHandler? _handler;
+    private IPlcHandler? _handler;
 
     // ─── Properties (exactly as original) ──────────────────────────────────
     public int MyNode { get; set; }
@@ -283,7 +283,7 @@ public class PCCCComm : IDisposable
         switch (family)
         {
             case PCCCConstants.ProcessorFamily.SlcMicroLogix:
-                _handler = new SlcProtocolHandler(this, _protocol!, _processorType);
+                _handler = new SlcHandler(this, _protocol!, _processorType);
                 break;
             case PCCCConstants.ProcessorFamily.Plc5:
                 throw new NotSupportedException("PLC-5 protocol handler not yet implemented.");

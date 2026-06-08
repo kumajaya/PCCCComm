@@ -27,7 +27,7 @@ namespace PCCCComm.Handlers;
 /// Protocol handler interface for different PLC families (SLC, MicroLogix, PLC-5, etc.).
 /// Each handler implements the PCCC commands specific to a processor family.
 /// </summary>
-public interface IPlcProtocolHandler
+public interface IPlcHandler
 {
     // ─── Mode Control ─────────────────────────────────────────────────────
     

@@ -31,7 +31,7 @@ namespace PCCCComm.Handlers;
 /// Implements Protected Typed Logical Read/Write (FNC 0xA1/0xA2, 0xAA) and
 /// SLC-specific upload/download procedures.
 /// </summary>
-public class SlcProtocolHandler : IPlcProtocolHandler
+public class SlcHandler : IPlcHandler
 {
     // ─── Fields ─────────────────────────────────────────────────────────────
     private readonly PCCCComm _parent;
@@ -40,7 +40,7 @@ public class SlcProtocolHandler : IPlcProtocolHandler
     private readonly Random _rnd = new();
 
     // ─── Constructor ───────────────────────────────────────────────────────
-    public SlcProtocolHandler(PCCCComm parent, PCCCProtocol protocol, int initialProcessorType)
+    public SlcHandler(PCCCComm parent, PCCCProtocol protocol, int initialProcessorType)
     {
         _parent = parent;
         _protocol = protocol;
@@ -265,7 +265,7 @@ public class SlcProtocolHandler : IPlcProtocolHandler
     /// </summary>
     public string[] ReadAny(string startAddress, int numberOfElements)
     {
-        DataAddress p = AddressParser.Parse(startAddress);
+        DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
         short arrayElements = (short)(numberOfElements - 1);
@@ -371,7 +371,7 @@ public class SlcProtocolHandler : IPlcProtocolHandler
         DataAddress[] parsed = new DataAddress[addresses.Length];
         for (int i = 0; i < addresses.Length; i++)
         {
-            parsed[i] = AddressParser.Parse(addresses[i]);
+            parsed[i] = PCCCParser.Parse(addresses[i]);
             if (parsed[i].FileType == 0)
                 throw new PCCCException($"ReadModifyWrite: invalid address '{addresses[i]}'.");
         }
@@ -386,7 +386,7 @@ public class SlcProtocolHandler : IPlcProtocolHandler
 
     public int WriteData(string startAddress, int numberOfElements, int[] dataToWrite)
     {
-        DataAddress p = AddressParser.Parse(startAddress);
+        DataAddress p = PCCCParser.Parse(startAddress);
         byte[] converted = new byte[numberOfElements * p.BytesPerElements];
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
@@ -411,7 +411,7 @@ public class SlcProtocolHandler : IPlcProtocolHandler
 
     public int WriteData(string startAddress, int numberOfElements, float[] dataToWrite)
     {
-        DataAddress p = AddressParser.Parse(startAddress);
+        DataAddress p = PCCCParser.Parse(startAddress);
         byte[] converted = new byte[numberOfElements * p.BytesPerElements];
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Float)
         {
@@ -445,7 +445,7 @@ public class SlcProtocolHandler : IPlcProtocolHandler
         if (string.IsNullOrEmpty(dataToWrite)) return 0;
         if (dataToWrite.Length > 82) dataToWrite = dataToWrite[..82];
 
-        DataAddress p = AddressParser.Parse(startAddress);
+        DataAddress p = PCCCParser.Parse(startAddress);
         
         // ST file (SLC 500 String file, type 0x8D)
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)

@@ -21,7 +21,7 @@
 
 using System.Text;
 
-namespace PCCCComm.Core;
+namespace PCCCComm.Pccc;
 
 /// <summary>
 /// Converts between strings and AB PLC integer-stored word arrays.

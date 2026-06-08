@@ -19,15 +19,16 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-namespace PCCCComm;
+namespace PCCCComm.Pccc;
 
 /// <summary>
-/// Checksum selection for DF1 frames.
-/// CRC-16/ARC (init=0x0000, poly=0xA001) as AB DF1 spec
-/// BCC uses two's complement of sum.
+/// Custom exception for DF1 library errors.
 /// </summary>
-public enum CheckSumOptions
+public class PCCCException : Exception
 {
-    Crc = 0,
-    Bcc = 1
+    public PCCCException() { }
+
+    public PCCCException(string message) : base(message) { }
+
+    public PCCCException(string message, Exception inner) : base(message, inner) { }
 }

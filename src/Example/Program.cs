@@ -370,8 +370,8 @@ class Program
                     TargetNode = cfg.TargetNode,
                     MyNode     = cfg.MyNode,
                     CheckSum   = cfg.Checksum == "crc"
-                                     ? Comm.CheckSumOptions.Crc
-                                     : Comm.CheckSumOptions.Bcc,
+                                     ? Comm.Pccc.CheckSumOptions.Crc
+                                     : Comm.Pccc.CheckSumOptions.Bcc,
                 };
                 Console.WriteLine($"DF1: Connecting to {cfg.PortName} @ {cfg.Baud} baud, " +
                                   $"{cfg.SerialParity} parity, checksum={pccc.CheckSum}");
@@ -429,7 +429,7 @@ class Program
             Console.WriteLine();
             return true;
         }
-        catch (Comm.PCCCException ex)
+        catch (Comm.Pccc.PCCCException ex)
         {
             Console.WriteLine($"FAILED");
             Console.WriteLine();
@@ -632,7 +632,7 @@ class Program
                     Console.WriteLine($"  {count,6} reads — last value: {last}");
                 }
             }
-            catch (Comm.PCCCException ex)
+            catch (Comm.Pccc.PCCCException ex)
             {
                 if      (ex.Message.Contains("NAK"))          RecordNak();
                 else if (ex.Message.Contains("No Response") ||
@@ -794,7 +794,7 @@ class Program
                 Console.WriteLine($"FOUND  type=0x{procType:X2}  ({name})");
                 found.Add((node, procType));
             }
-            catch (Comm.PCCCException ex) when (
+            catch (Comm.Pccc.PCCCException ex) when (
                 ex.Message.Contains("No Response") ||
                 ex.Message.Contains("Timeout")     ||
                 ex.Message.Contains("NAK"))
@@ -867,7 +867,7 @@ class Program
             int procType = pccc.GetProcessorType();
             Console.WriteLine($"OK  (type=0x{procType:X2}  {ProcessorTypeName(procType)})");
         }
-        catch (Comm.PCCCException ex)
+        catch (Comm.Pccc.PCCCException ex)
         {
             // Probe failed — report the error but keep the new target set.
             // The user may have a reason to target a node that is temporarily
@@ -1016,7 +1016,7 @@ class Program
                     lastValue = value;
                 }
             }
-            catch (Comm.PCCCException ex)
+            catch (Comm.Pccc.PCCCException ex)
             {
                 consecErr++;
                 TimeSpan elapsed = startTime.Elapsed;
@@ -1205,7 +1205,7 @@ class Program
                         break;
                 }
             }
-            catch (Comm.PCCCException ex)
+            catch (Comm.Pccc.PCCCException ex)
             {
                 Console.WriteLine($"PCCC Error: {ex.Message}");
             }
@@ -2043,7 +2043,7 @@ class Program
             RecordSuccess();
             return result;
         }
-        catch (Comm.PCCCException ex)
+        catch (Comm.Pccc.PCCCException ex)
         {
             if      (ex.Message.Contains("NAK"))          RecordNak();
             else if (ex.Message.Contains("No Response") ||

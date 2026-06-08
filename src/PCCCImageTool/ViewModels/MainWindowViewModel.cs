@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using PCCCComm;
 using PCCCComm.Core;
+using PCCCComm.Pccc;
 using PCCCImageTool.Models;
 using PCCCImageTool.Services;
 using ReactiveUI;
