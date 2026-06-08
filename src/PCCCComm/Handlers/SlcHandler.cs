@@ -276,6 +276,16 @@ public class SlcHandler : IPlcHandler
         return sts;
     }
 
+    public void EnableForces()
+    {
+        _protocol.EnableForces((byte)MyNode, (byte)TargetNode);
+    }
+
+    public void ClearForces()
+    {
+        _protocol.ClearForces((byte)MyNode, (byte)TargetNode);
+    }
+
     /// <summary>
     /// Reads data from the specified address and returns it as strings.
     /// Supports integer, float, string, timer/counter, and bit-level addressing.

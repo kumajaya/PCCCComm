@@ -46,6 +46,12 @@ public interface IPlcHandler
     /// <summary>Disables forces on the processor.</summary>
     int DisableForces();
 
+    /// <summary>Enables forces on the processor.</summary>
+    void EnableForces();
+
+    /// <summary>Clears all forces from the processor.</summary>
+    void ClearForces();
+
     // ─── Read / Write ─────────────────────────────────────────────────────
     
     /// <summary>Reads data from the specified address and returns it as strings.</summary>

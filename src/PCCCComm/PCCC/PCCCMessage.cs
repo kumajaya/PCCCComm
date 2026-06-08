@@ -310,6 +310,20 @@ namespace PCCCComm.Pccc
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns, PCCCConstants.Fnc.DisableForces, Array.Empty<byte>());
         }
 
+        /// <summary>Creates an Enable Forces request (0x0F/0x42).</summary>
+        public static PCCCMessage CreateEnableForcesRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.EnableForces, Array.Empty<byte>());
+        }
+
+        /// <summary>Creates a Clear Forces request (0x0F/0x43).</summary>
+        public static PCCCMessage CreateClearForcesRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.ClearForces, Array.Empty<byte>());
+        }
+
         // ========================================================================
         // Factory methods for new commands
         // ========================================================================

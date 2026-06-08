@@ -96,6 +96,10 @@ public static class PCCCConstants
         // --- Forces & Outputs -----------------------------------------------
         /// <summary>Disable forces (0x41).</summary>
         public const byte DisableForces = 0x41;
+        /// <summary>Enable forces (0x42).</summary>
+        public const byte EnableForces = 0x42;
+        /// <summary>Clear forces (0x43).</summary>
+        public const byte ClearForces = 0x43;
         /// <summary>Disable outputs (0x00, with CMD=0x07).</summary>
         public const byte DisableOutputs = 0x00;
         /// <summary>Enable outputs (0x01, with CMD=0x07).</summary>

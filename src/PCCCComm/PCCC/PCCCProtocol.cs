@@ -220,6 +220,24 @@ namespace PCCCComm.Pccc
                 throw new PCCCException($"DisableForces failed: {PCCCErrors.DecodeStatus(sts)}");
         }
 
+        /// <summary>Enables forces on the processor (CMD=0x0F, FNC=0x42).</summary>
+        public void EnableForces(byte myNode, byte targetNode)
+        {
+            var req = PCCCMessage.CreateEnableForcesRequest(0, myNode, targetNode);
+            SendRequest(req, out int sts);
+            if (sts != Sts.Success)
+                throw new PCCCException($"EnableForces failed: {PCCCErrors.DecodeStatus(sts)}");
+        }
+
+        /// <summary>Clears all forces on the processor (CMD=0x0F, FNC=0x43).</summary>
+        public void ClearForces(byte myNode, byte targetNode)
+        {
+            var req = PCCCMessage.CreateClearForcesRequest(0, myNode, targetNode);
+            SendRequest(req, out int sts);
+            if (sts != Sts.Success)
+                throw new PCCCException($"ClearForces failed: {PCCCErrors.DecodeStatus(sts)}");
+        }
+
         // ========================================================================
         // File-based upload/download commands (SLC 5/03+)
         // ========================================================================
