@@ -34,31 +34,30 @@ namespace PCCCComm.Handlers;
 public class SlcHandler : IPlcHandler
 {
     // ─── Fields ─────────────────────────────────────────────────────────────
-    private readonly PCCCComm _parent;
+    private readonly IHandlerContext _context;
     private readonly PCCCProtocol _protocol;
     private int _processorType;
-    private readonly Random _rnd = new();
 
     // ─── Constructor ───────────────────────────────────────────────────────
-    public SlcHandler(PCCCComm parent, PCCCProtocol protocol, int initialProcessorType)
+    public SlcHandler(IHandlerContext context, PCCCProtocol protocol, int initialProcessorType)
     {
-        _parent = parent;
+        _context = context;
         _protocol = protocol;
         _processorType = initialProcessorType;
     }
 
     // ─── Helper Properties (expose parent settings) ────────────────────────
-    private int MyNode => _parent.MyNode;
-    private int TargetNode => _parent.TargetNode;
-    private bool AsyncMode => _parent.AsyncMode;
+    private int MyNode => _context.MyNode;
+    private int TargetNode => _context.TargetNode;
+    private bool AsyncMode => _context.AsyncMode;
     
     private bool DisableEventFlag
     {
-        get => _parent.GetDisableEventFlag();
-        set => _parent.SetDisableEventFlag(value);
+        get => _context.DisableEvent;
+        set => _context.DisableEvent = value;
     }
     
-    private void OnFileProgress(PCCCComm.FileProgressEventArgs e) => _parent.RaiseFileProgress(e);
+    private void OnFileProgress(PCCCComm.FileProgressEventArgs e) => _context.RaiseFileProgress(e);
 
     // ─── Private Helper Methods (copied from PCCCComm) ────────────────────
     
@@ -101,10 +100,13 @@ public class SlcHandler : IPlcHandler
             Array.Copy(reply.Data, 0, result, filePosition, bytesRead);
             filePosition += bytesRead;
 
-            if (addr.FileType == 0xA4)
-                addr.Element += toRead / 0x28;
+            const byte stringFileType = (byte)PCCCConstants.SlcFileTypeCode.String; // 0x8D, 84 bytes per element
+            const int stringElementBytes = 84; // size of one ST file element
+
+            if (addr.FileType == stringFileType)
+                addr.Element += toRead / stringElementBytes; // move to next string element
             else
-                addr.SubElement += toRead / 2;
+                addr.SubElement += toRead / 2;               // move by words (2 bytes each)
         }
         return result;
     }
@@ -139,10 +141,13 @@ public class SlcHandler : IPlcHandler
                 filePosition += toWrite;
             }
 
-            if (addr.FileType != 0xA4)
-                addr.SubElement += toWrite / 2;
+            const byte stringFileType = (byte)PCCCConstants.SlcFileTypeCode.String;
+            const int stringElementBytes = 84;
+
+            if (addr.FileType == stringFileType)
+                addr.Element += toWrite / stringElementBytes;
             else
-                addr.Element += toWrite / 0x28;
+                addr.SubElement += toWrite / 2;
         }
         if (reply == 0) return 0;
         throw new PCCCException(PCCCErrors.DecodeStatus(reply));
@@ -381,8 +386,15 @@ public class SlcHandler : IPlcHandler
         return sts;
     }
 
+    /// <summary>
+    /// Writes a single integer value to the specified address.
+    /// </summary>
+    /// <returns>Empty string on success, or an error description on failure.</returns>
     public string WriteData(string startAddress, int dataToWrite)
-        => WriteData(startAddress, 1, new int[] { dataToWrite }).ToString();
+    {
+        int status = WriteData(startAddress, 1, new int[] { dataToWrite });
+        return status == 0 ? string.Empty : PCCCErrors.DecodeStatus(status);
+    }
 
     public int WriteData(string startAddress, int numberOfElements, int[] dataToWrite)
     {

@@ -31,10 +31,9 @@ namespace PCCCComm;
 /// PCCC application layer for Allen‑Bradley PLCs (DF1, EIP).
 /// Facade for PcccProtocol, handling chunking, data conversion, upload/download.
 /// </summary>
-public class PCCCComm : IDisposable
+public class PCCCComm : IDisposable, IHandlerContext
 {
     // ─── Fields ─────────────────────────────────────────────────────────────
-    private readonly Random _rnd = new();
     private PCCCConstants.ProcessorFamily _processorFamily = PCCCConstants.ProcessorFamily.Unknown;
     private int _processorType;  // cached processor type from diagnostic status
 
@@ -196,6 +195,19 @@ public class PCCCComm : IDisposable
         public long GrandTotalBytes { get; set; }
     }
 
+    bool IHandlerContext.DisableEvent
+    {
+        get => _disableEvent;
+        set => _disableEvent = value;
+    }
+
+    void IHandlerContext.RaiseFileProgress(FileProgressEventArgs e)
+    => FileProgress?.Invoke(this, e);
+
+    int IHandlerContext.MyNode => MyNode;
+    int IHandlerContext.TargetNode => TargetNode;
+    bool IHandlerContext.AsyncMode => AsyncMode;
+
     // ─── Constructors ──────────────────────────────────────────────────────
     public PCCCComm(string? portName = null, int baud = 19200,
                     System.IO.Ports.Parity parity = System.IO.Ports.Parity.None)
@@ -208,13 +220,15 @@ public class PCCCComm : IDisposable
         }
     }
 
+    /// <summary>Creates a PCCCComm instance for EtherNet/IP communication.
+    /// The connection is not opened automatically; call <see cref="OpenComms"/> to establish the session.
+    /// </summary>
     public PCCCComm(string host, int port, int timeoutMs = 5000)
     {
         _responseTimeoutMs = timeoutMs;
         _eipHost = host;
         _eipPort = port;
-        _currentTransport = new EIPTransport(host, port, timeoutMs);
-        AttachTransportEvents();
+        // DO NOT create transport here – it will be created in OpenComms()
     }
 
     public PCCCComm(ITransport transport)
@@ -566,21 +580,17 @@ public class PCCCComm : IDisposable
                     try
                     {
                         var port = new SerialPortWrapper(_comPort, _baudRate, _parity);
-                        var transport = new DF1FullDuplexTransport(port);
+                        using var transport = new DF1FullDuplexTransport(
+                            new SerialPortWrapper(_comPort, _baudRate, _parity));
                         transport.ChecksumType = _checkSum;
                         transport.MaxTicks = 3;
                         transport.Open();
                         reply = transport.SendEnqAndWaitForAck();
                         transport.Close();
-                        transport.Dispose();
                         if (reply == 0) break;
                     }
-                    catch (Exception ex)
-                    {
-                        if (ex.Message.Contains("Access") || ex.Message.Contains("port"))
-                            portError = true;
-                        reply = -6;
-                    }
+                    catch (UnauthorizedAccessException) { portError = true; reply = -6; break; }
+                    catch (Exception) { reply = -6; }
                     if (reply == -6) { portError = true; break; }
                 }
             }
@@ -602,8 +612,9 @@ public class PCCCComm : IDisposable
         if (innerFrame.Length < 6) return;
         ushort tns = (ushort)(innerFrame[4] | (innerFrame[5] << 8));
 
-        // Only raise DataReceived if this is a reply (CMD > 31) AND not a response we're waiting for
-        if (!_disableEvent && innerFrame.Length > 2 && innerFrame[2] > 31)
+        // Check if this is a reply frame: bit 6 (0x40) of the CMD byte is set
+        const byte replyBitMask = 0x40;
+        if (!_disableEvent && innerFrame.Length > 2 && (innerFrame[2] & replyBitMask) != 0)
         {
             // Check if this TNS is NOT being waited for by the protocol
             if (_protocol != null && !_protocol.IsTnsPending(tns))
