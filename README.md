@@ -22,48 +22,37 @@ All components target .NET 8 and are licensed under GNU General Public License v
 PCCCComm/
 ├── LICENSE                         (GNU GPL v3.0)
 ├── README.md                       (this file)
-├── src/
-│   ├── PCCCComm/                   # Core library (DF1 + EIP transport)
-│   │   ├── PCCCComm.cs
-│   │   ├── PCCCOptions.cs
-│   │   ├── PCCCException.cs
-│   │   ├── Models.cs
-│   │   ├── Core/
-│   │   │   ├── ITransport.cs
-│   │   │   ├── DF1Transport.cs
-│   │   │   ├── EIPTransport.cs
-│   │   │   ├── MessageDecoder.cs
-│   │   │   ├── PacketBuilder.cs
-│   │   │   ├── AddressParser.cs
-│   │   │   ├── StringConverter.cs
-│   │   │   ├── ISerialPort.cs
-│   │   │   └── SerialPortWrapper.cs
-│   │   └── PCCCComm.csproj
-│   ├── PCCCEmulator/               # PCCC emulator (standalone)
-│   │   ├── PCCCEmulator.cs
-│   │   ├── PlcMemory.cs
-│   │   ├── DF1Transport.cs (emulator version)
-│   │   ├── EIPTransport.cs (emulator version)
-│   │   ├── EIPClient.cs
-│   │   ├── ILinkTransport.cs
-│   │   ├── MessageDecoder.cs
-│   │   ├── Logger.cs
-│   │   ├── Program.cs
-│   │   ├── PCCCEmulator.csproj
-│   │   └── README.md
-│   ├── PCCCImageTool/             # Desktop GUI for upload/download
-│   │   ├── Views/
-│   │   ├── ViewModels/
-│   │   ├── Models/
-│   │   ├── Services/
-│   │   ├── Utilities/
-│   │   ├── PCCCImageTool.csproj
-│   │   └── README.md
-│   └── Example/                    # Example client application
-│       ├── Program.cs
-│       ├── Example.csproj
-│       └── README.md
-└── PCCCComm.sln                     # Visual Studio solution
+├── PCCCComm.sln                    # Visual Studio solution
+└── src/
+    ├── PCCCComm/                   # Core library
+    │   ├── Core/                   # Transport abstractions
+    │   │   ├── DF1BaseTransport.cs
+    │   │   ├── DF1FullDuplexTransport.cs
+    │   │   ├── DF1HalfDuplexTransport.cs
+    │   │   ├── EIPTransport.cs
+    │   │   ├── ISerialPort.cs
+    │   │   ├── ITransport.cs
+    │   │   └── SerialPortWrapper.cs
+    │   ├── Handlers/               # PLC family protocol handlers
+    │   │   ├── IHandlerContext.cs
+    │   │   ├── IPlcHandler.cs
+    │   │   └── SlcHandler.cs
+    │   ├── PCCC/                   # PCCC core (messages, constants, parser)
+    │   │   ├── PCCCConstants.cs
+    │   │   ├── PCCCErrors.cs
+    │   │   ├── PCCCException.cs
+    │   │   ├── PCCCMessage.cs
+    │   │   ├── PCCCOptions.cs
+    │   │   ├── PCCCParser.cs
+    │   │   ├── PCCCProtocol.cs
+    │   │   ├── README.md           # Full PCCC command set reference
+    │   │   └── StringConverter.cs
+    │   ├── Models.cs
+    │   ├── PCCCComm.cs
+    │   └── PCCCComm.csproj
+    ├── PCCCEmulator/               # Standalone emulator
+    ├── PCCCImageTool/              # Desktop GUI PLC image transfer
+    └── Example/                    # Example client
 ```
 
 ---
@@ -257,17 +246,15 @@ dotnet run --project src/PCCCImageTool
 
 ## Protocol Reference
 
-The implementation follows **Allen‑Bradley Publication 1770‑6.5.16** (DF1 Protocol and Command Set) and **ODVA EtherNet/IP Specification** (Volumes 1 & 2). Supported PCCC commands include:
+The implementation follows **Allen‑Bradley Publication 1770‑6.5.16** (DF1 Protocol and Command Set) and **ODVA EtherNet/IP Specification** (Volumes 1 & 2).
 
-| Command | Description |
-|---------|-------------|
-| `0x06` (Get Status) | Read processor type, mode, diagnostics |
-| `0x0F` (Protected Typed Logical Read/Write) | Read/write data files (0xA1, 0xA2, 0xAA, 0xAB) |
-| `0x01` (Reset) | Reset communication |
-| `0x0B` (Set Variables) | RSLinx auto‑configure |
-| `0x0A` (Diagnostic Counters) | Read modem and packet statistics |
-| `0x67` (Read Modified Data) | Simplified read |
-| `0x0F` (Execute Command List) | Multi‑function commands (mode change, I/O config, upload/download) |
+For a complete, up‑to‑date list of all PCCC commands and their implementation status, see the  
+**[PCCC Protocol Subset Implementation Guide](src/PCCCComm/PCCC/README.md)**.
+
+Supported transport modes:
+- DF1 full‑duplex (point‑to‑point)
+- DF1 half‑duplex master (RS‑485 multi‑drop)
+- EtherNet/IP (PCCC‑over‑CIP)
 
 DF1 checksum modes as per AB specification:
 - **BCC**: two's complement of sum.
