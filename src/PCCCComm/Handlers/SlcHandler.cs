@@ -509,7 +509,56 @@ public class SlcHandler : IPlcHandler
     }
 
     // ─── Data Memory ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns a list of data files present in the processor.
+    /// Uses file-based read (OpenFile/FileRead) when supported by the processor,
+    /// otherwise falls back to physical (Protected Typed Logical Read) method.
+    /// </summary>
     public DataFileDetails[] GetDataMemory()
+    {
+        // If processor supports file-based transfer (SLC 5/03+ or MicroLogix 1100/1200/1500)
+        // use the more reliable file-based method, which is also used by upload/download.
+        if (SupportsFileBasedTransfer())
+            return GetDataMemoryFileBased();
+        else
+            return GetDataMemoryPhysicalBased();
+    }
+
+    public DataFileDetails[] GetML1500DataMemory()
+    {
+        var pAddr = new DataAddress { FileNumber = 0, FileType = 2, Element = 0x2F };
+        byte[] data = ReadRawDataWithChunking(ref pAddr, 2, out int reply);
+        if (reply != 0) throw new PCCCException(PCCCErrors.DecodeStatus(reply) + " - Failed to get data table list");
+
+        int fzSize = data[0] + data[1] * 256;
+        pAddr.Element = 0; pAddr.SubElement = 0;
+        byte[] fzd = ReadRawDataWithChunking(ref pAddr, fzSize, out reply);
+        if (reply != 0) throw new PCCCException(PCCCErrors.DecodeStatus(reply) + " - Failed to get data table list");
+
+        var list = new List<DataFileDetails>();
+        int filePosition = 143, idx = 0;
+        while (filePosition + 2 < fzd.Length)
+        {
+            int bpe = FileTypeToBytesPerElement(fzd[filePosition], out string ftStr);
+            var df = new DataFileDetails
+            {
+                FileType = ftStr,
+                NumberOfElements = (fzd[filePosition + 1] + fzd[filePosition + 2] * 256) / bpe,
+                FileNumber = idx
+            };
+            if (fzd[filePosition] > 0x81 && fzd[filePosition] < 0x95) { list.Add(df); idx++; }
+            filePosition += 10;
+        }
+        return list.ToArray();
+    }
+
+    /// <summary>
+    /// Reads the data file directory using traditional Protected Typed Logical Read (FNC 0xA1).
+    /// This method works on all SLC/MicroLogix processors, including older ones that do not
+    /// support file-based transfer (SLC 5/01, 5/02, ML1000).
+    /// </summary>
+    public DataFileDetails[] GetDataMemoryPhysicalBased()
     {
         byte[] fzd = ReadFileDirectory();
         int numberOfDataTables = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
@@ -557,32 +606,102 @@ public class SlcHandler : IPlcHandler
         return result;
     }
 
-    public DataFileDetails[] GetML1500DataMemory()
+    /// <summary>
+    /// Reads the data file directory using file-based read (OpenFile/FileRead).
+    /// This method is only available on processors that support file-based transfer
+    /// (SLC 5/03, 5/04, 5/05, MicroLogix 1100, 1200, 1500). It is more reliable
+    /// and consistent with the upload/download mechanism.
+    /// </summary>
+    /// <returns>Array of DataFileDetails for all data files found.</returns>
+    private DataFileDetails[] GetDataMemoryFileBased()
     {
-        var pAddr = new DataAddress { FileNumber = 0, FileType = 2, Element = 0x2F };
-        byte[] data = ReadRawDataWithChunking(ref pAddr, 2, out int reply);
-        if (reply != 0) throw new PCCCException(PCCCErrors.DecodeStatus(reply) + " - Failed to get data table list");
+        // Step 1: Open the program directory (file number 0, type 0x24)
+        ushort dirTag = OpenFile(0, 0x24);
 
-        int fzSize = data[0] + data[1] * 256;
-        pAddr.Element = 0; pAddr.SubElement = 0;
-        byte[] fzd = ReadRawDataWithChunking(ref pAddr, fzSize, out reply);
-        if (reply != 0) throw new PCCCException(PCCCErrors.DecodeStatus(reply) + " - Failed to get data table list");
+        // Step 2: Read directory size from byte offset 70 (word offset 35)
+        // The size is stored as a 16-bit little-endian value at offset 70.
+        byte[] sizeData = FileReadWithChunking(dirTag, 70, 2);
+        if (sizeData.Length < 2)
+            throw new PCCCException("Failed to read directory size via file-based read.");
 
-        var list = new List<DataFileDetails>();
-        int filePosition = 143, idx = 0;
-        while (filePosition + 2 < fzd.Length)
+        int dirSize = sizeData[0] + (sizeData[1] << 8);
+        if (dirSize <= 0 || dirSize > 65535)
+            throw new PCCCException($"Invalid directory size from file-based read: {dirSize}");
+
+        // Step 3: Read the entire directory using chunked reads
+        byte[] directory = FileReadWithChunking(dirTag, 0, dirSize);
+
+        // Step 4: Close the directory file
+        CloseFile(dirTag);
+
+        // Step 5: Parse the directory data (same as physical method)
+        return ParseDirectory(directory);
+    }
+
+    /// <summary>
+    /// Parses raw directory bytes into a list of data file details.
+    /// This method contains the common parsing logic used by both physical-based
+    /// and file-based directory reads.
+    /// </summary>
+    /// <param name="fzd">Raw directory data (File 0) from the PLC.</param>
+    /// <returns>Array of DataFileDetails for all data files found.</returns>
+    private DataFileDetails[] ParseDirectory(byte[] fzd)
+    {
+        // Number of data tables from directory header (offset 52/53)
+        int numberOfDataTables = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
+                            + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] * 256;
+        var dataFiles = new List<DataFileDetails>();
+
+        // Determine starting offset and bytes per row based on processor type
+        int filePosition, bytesPerRow;
+        switch (_processorType)
         {
-            int bpe = FileTypeToBytesPerElement(fzd[filePosition], out string ftStr);
-            var df = new DataFileDetails
-            {
-                FileType = ftStr,
-                NumberOfElements = (fzd[filePosition + 1] + fzd[filePosition + 2] * 256) / bpe,
-                FileNumber = idx
-            };
-            if (fzd[filePosition] > 0x81 && fzd[filePosition] < 0x95) { list.Add(df); idx++; }
-            filePosition += 10;
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC502:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1000:
+                filePosition = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetSlc502Ml1000;
+                bytesPerRow = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntrySlc502;
+                break;
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1200:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP:
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1100:
+                filePosition = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetMl1100Ml1500;
+                bytesPerRow = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntryDefault;
+                break;
+            default:
+                filePosition = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault;
+                bytesPerRow = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntryDefault;
+                break;
         }
-        return list.ToArray();
+
+        int entriesParsed = 0;
+        int maxEntries = (fzd.Length - filePosition) / bytesPerRow;
+
+        // Iterate through directory entries
+        while (entriesParsed < numberOfDataTables && entriesParsed < maxEntries)
+        {
+            // Guard against buffer overflow
+            if (filePosition + bytesPerRow > fzd.Length)
+                break;
+
+            byte fileTypeByte = fzd[filePosition];
+            // Valid data file types are 0x82–0x9F (SLC/MicroLogix data files)
+            if (fileTypeByte > 0x81 && fileTypeByte < 0x9F)
+            {
+                int bpe = FileTypeToBytesPerElement(fileTypeByte, out string ftStr);
+                int elementCount = (fzd[filePosition + 1] + (fzd[filePosition + 2] << 8)) / bpe;
+                dataFiles.Add(new DataFileDetails
+                {
+                    FileType = ftStr,
+                    NumberOfElements = elementCount,
+                    FileNumber = entriesParsed
+                });
+            }
+            entriesParsed++;
+            filePosition += bytesPerRow;
+        }
+
+        return dataFiles.ToArray();
     }
 
     // ─── I/O Configuration ─────────────────────────────────────────────────
