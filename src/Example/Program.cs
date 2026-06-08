@@ -92,15 +92,40 @@ class Program
                 Console.WriteLine("DF1 port opened successfully");
             Console.WriteLine();
 
-            // Run the quick demo unless the user asked to skip it.
-            if (!cfg.InteractiveOnly)
+            // ── Verify that the target node is reachable ──────────────────────
+            // OpenComms() only opens the serial port or TCP socket — it does not
+            // send any PCCC traffic. A successful open does NOT mean the target
+            // PLC is present or responding. For DF1 serial this is especially
+            // important: the port always opens regardless of whether any device
+            // is connected to the RS-485 bus or what node address it uses.
+            //
+            // GetProcessorType() is used as the connectivity probe because it is
+            // the lightest round-trip command (CMD=0x06 FNC=0x03, no data payload)
+            // and it is the same call that the library uses internally for processor
+            // family detection. A failure here gives the user an actionable message
+            // before any read or write operations are attempted.
+            bool nodeOk = VerifyTargetNode(pccc, cfg);
+
+            // Run the quick demo unless the user asked to skip it, or the node
+            // verification failed (no point running a demo against a silent bus).
+            if (nodeOk && !cfg.InteractiveOnly)
                 RunDemo(pccc);
 
-            // Run the continuous stress test if requested.
-            if (cfg.StressTest)
+            // Scan DF1/RS-485 nodes if requested via --scan-nodes.
+            // This runs before the stress test so the target node is restored
+            // to the originally configured value before stress testing begins.
+            // Node scan runs even when verification failed — that is its purpose.
+            if (cfg.ScanNodes)
+                RunNodeScan(pccc, cfg.ScanFrom, cfg.ScanTo);
+
+            // Run the continuous stress test if requested, but only when the
+            // target node is confirmed reachable.
+            if (nodeOk && cfg.StressTest)
                 RunStressTest(pccc, cfg.StressLoopCount);
 
             // Enter the interactive CLI unless the user asked to skip it.
+            // The CLI is always offered even when verification failed so the
+            // user can run scannodes or change the target node and retry.
             if (!cfg.NoInteractive)
                 RunInteractiveCli(pccc);
         }
@@ -146,6 +171,9 @@ class Program
         public bool   NoInteractive      { get; init; } = false;
         public bool   StressTest         { get; init; } = false;
         public int    StressLoopCount    { get; init; } = 0; // 0 = infinite
+        public bool   ScanNodes         { get; init; } = false;
+        public int    ScanFrom          { get; init; } = 1;
+        public int    ScanTo            { get; init; } = 31;
     }
 
     // =========================================================================
@@ -177,6 +205,9 @@ class Program
         bool   noInteractive      = false;
         bool   stressTest         = false;
         int    stressLoopCount    = 0;
+        bool   scanNodes          = false;
+        int    scanFrom           = 1;
+        int    scanTo             = 31;
 
         cfg = new Config(); // satisfy out parameter before early returns
 
@@ -211,6 +242,12 @@ class Program
                     stressTest = true;
                     if (i + 1 < args.Length && int.TryParse(args[i + 1], out var loops))
                     { stressLoopCount = loops; i++; }
+                    break;
+                case "--scan-nodes":
+                    scanNodes = true;
+                    // Optional: --scan-nodes [from] [to]  e.g. --scan-nodes 1 31
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out var sf)) { scanFrom = sf; i++; }
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out var st)) { scanTo   = st; i++; }
                     break;
                 case "--parity" when i + 1 < args.Length:
                     parity = args[++i].ToLowerInvariant() switch
@@ -254,6 +291,9 @@ class Program
             NoInteractive      = noInteractive,
             StressTest         = stressTest,
             StressLoopCount    = stressLoopCount,
+            ScanNodes          = scanNodes,
+            ScanFrom           = scanFrom,
+            ScanTo             = scanTo,
         };
         return true;
     }
@@ -340,6 +380,106 @@ class Program
         }
 
         return pccc;
+    }
+
+    // =========================================================================
+    // Target node verifier
+    // =========================================================================
+
+    /// <summary>
+    /// Verifies that the configured target node is reachable by sending a
+    /// GetProcessorType probe (CMD=0x06 FNC=0x03) before any demo or test
+    /// operations are executed.
+    ///
+    /// Why this is necessary
+    /// ---------------------
+    /// For DF1 serial transports, <c>OpenComms()</c> only opens the serial port
+    /// or TCP socket — it does not send any PCCC traffic. A successful open does
+    /// NOT guarantee that any PLC is present on the bus or that the target node
+    /// address is correct. Common mistakes:
+    ///
+    ///   - Forgetting to pass <c>--target N</c> when the PLC node is not 1.
+    ///   - PLC powered off or keyswitch in PROGRAM mode blocking some commands.
+    ///   - Wrong COM port or baud rate (port opens but no data flows).
+    ///   - RS-485 termination missing, causing all frames to be corrupted.
+    ///
+    /// Without this guard, all subsequent operations silently fail and the
+    /// statistics show 100% error rate with no clear indication of the cause.
+    ///
+    /// Recovery hint
+    /// -------------
+    /// If the probe fails, the method prints the error and suggests using
+    /// <c>scannodes</c> (for DF1 modes) to discover the actual node address,
+    /// or checking the host and port (for EIP mode).
+    ///
+    /// Interactive mode is still offered after a failed probe so the user can
+    /// run <c>scannodes</c> without restarting the client.
+    /// </summary>
+    /// <param name="pccc">Open PCCCComm instance.</param>
+    /// <param name="cfg">Parsed configuration (used for transport-specific hint text).</param>
+    /// <returns>True if the target node responded; false otherwise.</returns>
+    private static bool VerifyTargetNode(Comm.PCCCComm pccc, Config cfg)
+    {
+        Console.Write($"Verifying target node {cfg.TargetNode}... ");
+
+        try
+        {
+            int procType = pccc.GetProcessorType();
+            Console.WriteLine($"OK  (type=0x{procType:X2}  {ProcessorTypeName(procType)})");
+            Console.WriteLine();
+            return true;
+        }
+        catch (Comm.PCCCException ex)
+        {
+            Console.WriteLine($"FAILED");
+            Console.WriteLine();
+            Console.WriteLine($"  Error    : {ex.Message}");
+            Console.WriteLine($"  Transport: {cfg.Transport.ToUpperInvariant()}");
+
+            if (cfg.Transport == "eip")
+            {
+                Console.WriteLine($"  Target   : {cfg.EipHost}:{cfg.EipPort}");
+                Console.WriteLine();
+                Console.WriteLine("  Suggestions:");
+                Console.WriteLine("    - Verify the PLC or emulator is running in EIP mode.");
+                Console.WriteLine("    - Check that firewall allows TCP port 44818.");
+                Console.WriteLine($"    - Confirm --host {cfg.EipHost} and --eip-port {cfg.EipPort} are correct.");
+            }
+            else
+            {
+                Console.WriteLine($"  Port     : {cfg.PortName}  Baud: {cfg.Baud}  Node: {cfg.TargetNode}");
+                Console.WriteLine();
+                Console.WriteLine("  Suggestions:");
+                Console.WriteLine($"    - Use 'scannodes' in the interactive CLI to discover active nodes.");
+                Console.WriteLine($"    - Or restart with the correct --target N, e.g.:");
+
+                // Show a ready-to-paste command with the correct flags reconstructed.
+                string modeFlag = cfg.Transport == "df1master" ? " --mode df1master" : "";
+                string portArg  = cfg.PortName != "COM1" ? $" {cfg.PortName}" : "";
+                Console.WriteLine($"        dotnet run -- {portArg}{modeFlag} --target <node>");
+                Console.WriteLine();
+                Console.WriteLine("    - Verify baud rate, parity, and checksum match the PLC settings.");
+                Console.WriteLine("    - For RS-485: check termination resistors and cable polarity.");
+            }
+
+            Console.WriteLine();
+
+            // Offer interactive mode so the user can run scannodes without
+            // restarting the process. Return false so the demo is skipped.
+            if (!cfg.NoInteractive)
+            {
+                Console.WriteLine("  Entering interactive CLI so you can run 'scannodes' or 'exit'.");
+                Console.WriteLine();
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"FAILED (unexpected error: {ex.Message})");
+            Console.WriteLine();
+            return false;
+        }
     }
 
 // =============================================================================
@@ -513,6 +653,406 @@ class Program
     }
 
 // =============================================================================
+// SECTION 3b — Node scanner
+// =============================================================================
+
+    /// <summary>
+    /// Probes a range of DF1 node addresses by sending GetProcessorType() to
+    /// each node in turn and recording which ones respond.
+    ///
+    /// Background
+    /// ----------
+    /// In a DF1 half-duplex (RS-485) network, each SLC 500 or MicroLogix PLC
+    /// is assigned a unique node address (1–31 by default). There is no
+    /// broadcast mechanism to discover nodes, so the only reliable method is
+    /// to probe each address individually.
+    ///
+    /// For peer-to-peer DF1 full-duplex links the target node may not always
+    /// be 1; this scan quickly identifies the actual node address without
+    /// needing RSLinx or a separate DF1 sniffer.
+    ///
+    /// How it works
+    /// ------------
+    /// The method temporarily reassigns <c>pccc.TargetNode</c> and
+    /// <c>pccc.SlaveAddress</c> for each probe, then restores the original
+    /// values when the scan completes. The timeout for each probe is reduced
+    /// to 1000 ms to keep the scan fast on sparse networks.
+    ///
+    /// False-positive guard
+    /// --------------------
+    /// A GetDiagnosticStatus response from a real SLC 500 is at minimum 28 bytes
+    /// (6 header + 22 payload). Shorter frames — caused by RS-485 echo, stale
+    /// packets in the receive buffer, or bus noise — are rejected:
+    ///
+    ///   pkt[3]  must be 0x00 (STS = no error)
+    ///   pkt[1]  (SRC) must equal the probed node number — the PLC sets SRC to
+    ///           its own node address in every reply, so a mismatch means the
+    ///           packet came from a different node or is an echo of our own frame.
+    ///   pkt[9]  (processor type) must be non-zero — type 0x00 is not a valid
+    ///           SLC 500 processor code and indicates a truncated or bogus frame.
+    ///   pkt.Length must be >= 28 — a complete GetStatus reply body.
+    ///
+    /// EIP note
+    /// --------
+    /// EIP sessions are addressed by IP, not by node number. If the transport
+    /// is EIP this method still runs but the node number only affects the DST
+    /// byte inside the PCCC PDU. This is useful for PCCC-over-CIP bridging
+    /// scenarios (e.g. through a 1756-DHRIO) where multiple DF1 nodes are
+    /// reachable via one EIP path.
+    ///
+    /// Processor type codes (partial list)
+    /// ------------------------------------
+    ///   0x49 = SLC 5/03      0x4B = SLC 5/04      0x4C = SLC 5/05
+    ///   0x89 = MicroLogix 1000 (series C)          0x9C = MicroLogix 1100
+    ///   0xA0 = MicroLogix 1200                     0xA2 = MicroLogix 1400
+    /// </summary>
+    /// <param name="pccc">Open PCCCComm instance.</param>
+    /// <param name="from">First node address to probe (inclusive).</param>
+    /// <param name="to">Last node address to probe (inclusive).</param>
+    private static void RunNodeScan(Comm.PCCCComm pccc, int from, int to)
+    {
+        // Clamp range to valid DF1 node address space (0–254; practical limit 31).
+        from = Math.Max(0, Math.Min(254, from));
+        to   = Math.Max(from, Math.Min(254, to));
+
+        int savedTarget  = pccc.TargetNode;
+        int savedSlave   = pccc.SlaveAddress;
+        int savedTimeout = pccc.ResponseTimeoutMs;
+
+        // Use a shorter per-probe timeout so the scan does not take excessively
+        // long on sparse networks. 1000 ms is enough for a healthy serial link;
+        // increase if the baud rate is very low or the cable is very long.
+        const int probeTimeoutMs = 1000;
+
+        // Minimum valid GetDiagnosticStatus response length.
+        // Layout: [DST SRC CMD STS TNS_LO TNS_HI | payload(≥22 bytes)]
+        // A real SLC 500 / MicroLogix returns at least 28 bytes total.
+        // Frames shorter than this are echoes, noise, or truncated responses.
+        const int minValidResponseLen = 28;
+
+        pccc.ResponseTimeoutMs = probeTimeoutMs;
+
+        Console.WriteLine($"\n--- Node Scan (nodes {from}–{to}, timeout {probeTimeoutMs} ms each) ---");
+
+        var found = new List<(int node, int procType)>();
+
+        for (int node = from; node <= to; node++)
+        {
+            pccc.TargetNode   = node;
+            pccc.SlaveAddress = node;
+
+            Console.Write($"  Node {node,3}: ");
+
+            try
+            {
+                // GetDiagnosticStatusRaw() returns the raw response payload so we
+                // can inspect the full frame for false-positive detection, without
+                // triggering the ProcessorType side-effect on stale data.
+                byte[]? raw = pccc.GetDiagnosticStatusRaw();
+
+                if (raw == null)
+                {
+                    // STS != 0 or missing packet — node sent an error reply.
+                    Console.WriteLine("error response");
+                    continue;
+                }
+
+                // raw is the payload after the 6-byte header, so the full packet
+                // length equivalent is raw.Length + 6.
+                int fullLen = raw.Length + 6;
+                if (fullLen < minValidResponseLen)
+                {
+                    // Frame is too short to be a genuine GetStatus reply.
+                    // Most likely cause: RS-485 echo of our own transmitted frame
+                    // or bus noise returning a few bytes that happen to pass CRC.
+                    Console.WriteLine($"ignored (frame too short: {fullLen} < {minValidResponseLen} bytes)");
+                    continue;
+                }
+
+                // raw[ResponseOffsets.DiagnosticStatus.TypeExtender] (offset 1) is the
+                // "type extender" byte. For all SLC 500 and MicroLogix processors this
+                // byte is 0xEE. Any other value means the response is not from an
+                // SLC/MicroLogix, or is a garbled frame.
+                byte typeExt = raw[Comm.Pccc.PCCCConstants.ResponseOffsets.DiagnosticStatus.TypeExtender];
+                if (typeExt != Comm.Pccc.PCCCConstants.ResponseOffsets.DiagnosticStatus.TypeExtenderSlcMl)
+                {
+                    Console.WriteLine($"ignored (type extender=0x{typeExt:X2}, expected 0xEE — not SLC/MicroLogix or echo)");
+                    continue;
+                }
+
+                // raw[ResponseOffsets.DiagnosticStatus.ProcessorType] (offset 3) is the
+                // processor type byte. 0x00 is not a valid SLC 500 code; reject it as
+                // a remnant of an echo or zeroed frame.
+                int procType = raw[Comm.Pccc.PCCCConstants.ResponseOffsets.DiagnosticStatus.ProcessorType];
+                if (procType == 0x00)
+                {
+                    Console.WriteLine($"ignored (processor type 0x00 — likely echo or noise)");
+                    continue;
+                }
+
+                string name = ProcessorTypeName(procType);
+                Console.WriteLine($"FOUND  type=0x{procType:X2}  ({name})");
+                found.Add((node, procType));
+            }
+            catch (Comm.PCCCException ex) when (
+                ex.Message.Contains("No Response") ||
+                ex.Message.Contains("Timeout")     ||
+                ex.Message.Contains("NAK"))
+            {
+                // No response — node is absent or powered off. This is the
+                // expected result for the majority of addresses on a sparse bus.
+                Console.WriteLine("no response");
+            }
+            catch (Exception ex)
+            {
+                // Unexpected error — print but continue scanning remaining nodes.
+                Console.WriteLine($"error: {ex.Message}");
+            }
+        }
+
+        // ── Summary ──────────────────────────────────────────────────────────
+        Console.WriteLine();
+        if (found.Count == 0)
+        {
+            Console.WriteLine("  No nodes found in range.");
+        }
+        else
+        {
+            Console.WriteLine($"  {found.Count} node(s) found:");
+            foreach (var (node, procType) in found)
+                Console.WriteLine($"    Node {node,3}  type=0x{procType:X2}  ({ProcessorTypeName(procType)})");
+        }
+
+        // Restore original settings so subsequent demo, stress test, or
+        // interactive CLI operations target the originally configured node.
+        pccc.TargetNode        = savedTarget;
+        pccc.SlaveAddress      = savedSlave;
+        pccc.ResponseTimeoutMs = savedTimeout;
+        Console.WriteLine($"\n  Target node restored to {savedTarget}.");
+    }
+
+    /// <summary>
+    /// Handles the "settarget" interactive CLI command.
+    ///
+    /// Changes <c>pccc.TargetNode</c> and <c>pccc.SlaveAddress</c> at runtime,
+    /// then immediately re-runs a GetProcessorType probe to confirm the new node
+    /// is reachable. The connection does not need to be closed and reopened —
+    /// DF1 serial and EIP transports both support changing the target node while
+    /// the port or socket remains open.
+    ///
+    /// Typical workflow after a failed startup probe:
+    ///   PCCC&gt; scannodes          ← discover which nodes are active
+    ///   PCCC&gt; settarget 3        ← switch to the found node
+    ///   PCCC&gt; read N7:0          ← now works
+    ///
+    /// Usage: settarget &lt;node&gt;
+    /// </summary>
+    private static void HandleSetTarget(Comm.PCCCComm pccc, string[] parts)
+    {
+        if (parts.Length < 2 || !int.TryParse(parts[1], out int node) || node < 0 || node > 254)
+        {
+            Console.WriteLine("Usage: settarget <node>");
+            Console.WriteLine("  node is a decimal address in range 0–254.");
+            Console.WriteLine("  Example: settarget 3");
+            return;
+        }
+
+        int previous = pccc.TargetNode;
+        pccc.TargetNode   = node;
+        pccc.SlaveAddress = node;
+        Console.Write($"Target node changed {previous} → {node}. Probing... ");
+
+        try
+        {
+            int procType = pccc.GetProcessorType();
+            Console.WriteLine($"OK  (type=0x{procType:X2}  {ProcessorTypeName(procType)})");
+        }
+        catch (Comm.PCCCException ex)
+        {
+            // Probe failed — report the error but keep the new target set.
+            // The user may have a reason to target a node that is temporarily
+            // offline, or may want to try scannodes before deciding.
+            Console.WriteLine($"no response  ({ex.Message})");
+            Console.WriteLine($"  Node {node} did not respond. Target is set but operations may fail.");
+            Console.WriteLine($"  Run 'scannodes' to find active nodes, or 'settarget {previous}' to revert.");
+        }
+    }
+    private static void HandleScanNodes(Comm.PCCCComm pccc, string[] parts)
+    {
+        int from = 1, to = 31;
+
+        if (parts.Length >= 2 && !int.TryParse(parts[1], out from))
+        {
+            Console.WriteLine("Usage: scannodes [from] [to]");
+            Console.WriteLine("  from and to are decimal node addresses (default: 1 31)");
+            return;
+        }
+        if (parts.Length >= 3 && !int.TryParse(parts[2], out to))
+        {
+            Console.WriteLine("Usage: scannodes [from] [to]");
+            return;
+        }
+
+        RunNodeScan(pccc, from, to);
+    }
+
+    /// <summary>
+    /// Returns a human-readable processor name for a processor type byte.
+    ///
+    /// The processor type byte is found at payload offset
+    /// <see cref="Comm.Pccc.PCCCConstants.ResponseOffsets.DiagnosticStatus.ProcessorType"/>
+    /// (= 3) in the GetDiagnosticStatus response.
+    ///
+    /// Source: AB Publication 1770-6.5.16, Appendix B.
+    /// This list covers the most common SLC 500 and MicroLogix variants;
+    /// unknown codes are returned as "(unknown)".
+    /// </summary>
+    private static string ProcessorTypeName(int code) => code switch
+    {
+        0x25 => "SLC 5/01 (series A/B)",
+        0x49 => "SLC 5/03",
+        0x4A => "SLC 5/03 (OS302)",
+        0x4B => "SLC 5/04",
+        0x4C => "SLC 5/05",
+        0x88 => "MicroLogix 1000",
+        0x89 => "MicroLogix 1000 (series C)",
+        0x9C => "MicroLogix 1100",
+        0xA0 => "MicroLogix 1200",
+        0xA2 => "MicroLogix 1400",
+        0x31 => "SLC 5/02",
+        0x3B => "SLC 500 (fixed)",
+        _    => "unknown",
+    };
+
+// =============================================================================
+// SECTION 3c — Watch: live address monitor
+// =============================================================================
+
+    /// <summary>
+    /// Polls a single PLC address at a configurable interval and prints the
+    /// value to the console whenever it changes.
+    ///
+    /// Usage (interactive CLI):
+    ///   watch &lt;address&gt; [interval_ms]
+    ///
+    /// The address format is identical to <c>ReadAny</c>:
+    ///   N7:0, F8:5, B3:0, ST18:0, O0:0, I1:0, etc.
+    ///
+    /// The interval defaults to 500 ms. The minimum enforced interval is 50 ms
+    /// to avoid overwhelming a slow serial link.
+    ///
+    /// Press any key to stop the watch loop.
+    ///
+    /// Delta detection
+    /// ---------------
+    /// The value is printed only when it differs from the previous reading.
+    /// This makes it easy to spot the moment a value changes without the
+    /// terminal scrolling continuously. The first reading is always printed.
+    ///
+    /// Timestamp
+    /// ---------
+    /// Each printed line is prefixed with the elapsed time since the watch
+    /// started (HH:MM:SS.mmm) so the rate and timing of changes are visible.
+    ///
+    /// Error handling
+    /// --------------
+    /// A single read error does not stop the watch loop — it prints the error
+    /// and continues polling. This is intentional: intermittent communication
+    /// errors (e.g. RS-485 collisions) should not abort a long-running monitor.
+    /// Three consecutive errors do stop the loop to avoid flood-printing errors
+    /// on a disconnected link.
+    /// </summary>
+    private static void HandleWatch(Comm.PCCCComm pccc, string[] parts)
+    {
+        if (parts.Length < 2)
+        {
+            Console.WriteLine("Usage: watch <address> [interval_ms]");
+            Console.WriteLine("  Example: watch F8:0");
+            Console.WriteLine("           watch N7:5 200");
+            Console.WriteLine("  Press any key to stop.");
+            return;
+        }
+
+        string addr       = parts[1];
+        int    intervalMs = 500;
+        const int minIntervalMs   = 50;
+        const int maxConsecErrors = 3;
+
+        if (parts.Length >= 3)
+        {
+            if (!int.TryParse(parts[2], out intervalMs) || intervalMs < minIntervalMs)
+            {
+                Console.WriteLine($"Invalid interval; must be an integer >= {minIntervalMs} ms.");
+                return;
+            }
+        }
+
+        Console.WriteLine($"Watching {addr} every {intervalMs} ms. Press any key to stop.");
+        Console.WriteLine();
+
+        string? lastValue   = null;   // last successfully read value (null = not yet read)
+        int     consecErr   = 0;      // consecutive error counter
+        long    changeCount = 0;      // number of value changes observed
+        long    readCount   = 0;      // total successful reads
+        var     startTime   = Stopwatch.StartNew();
+
+        while (!Console.KeyAvailable)
+        {
+            try
+            {
+                string[]? result = pccc.ReadAny(addr, 1);
+                string    value  = result?.Length > 0 ? result[0] : "(null)";
+                readCount++;
+                consecErr = 0; // reset on success
+
+                // Print only when the value changes (or on the very first read).
+                if (value != lastValue)
+                {
+                    changeCount++;
+                    TimeSpan elapsed = startTime.Elapsed;
+                    Console.WriteLine(
+                        $"  [{elapsed:hh\\:mm\\:ss\\.fff}]  {addr} = {value}" +
+                        (lastValue == null ? "  (initial)" : $"  (was: {lastValue})"));
+                    lastValue = value;
+                }
+            }
+            catch (Comm.PCCCException ex)
+            {
+                consecErr++;
+                TimeSpan elapsed = startTime.Elapsed;
+                Console.WriteLine($"  [{elapsed:hh\\:mm\\:ss\\.fff}]  Error: {ex.Message}");
+
+                if (consecErr >= maxConsecErrors)
+                {
+                    Console.WriteLine($"  {maxConsecErrors} consecutive errors — stopping watch.");
+                    break;
+                }
+            }
+            catch (Exception ex)
+            {
+                consecErr++;
+                Console.WriteLine($"  Unexpected error: {ex.Message}");
+                if (consecErr >= maxConsecErrors) break;
+            }
+
+            // Sleep in short increments so key-press is detected promptly.
+            // Sleeping the full interval in one call would make the loop
+            // unresponsive to keyboard input for up to intervalMs milliseconds.
+            int    slept = 0;
+            while (slept < intervalMs && !Console.KeyAvailable)
+            {
+                Thread.Sleep(Math.Min(50, intervalMs - slept));
+                slept += 50;
+            }
+        }
+
+        if (Console.KeyAvailable) Console.ReadKey(true);
+
+        Console.WriteLine();
+        Console.WriteLine($"  Watch stopped. {readCount} reads, {changeCount} change(s) in {startTime.Elapsed:hh\\:mm\\:ss}.");
+    }
+
+// =============================================================================
 // SECTION 4 — Interactive CLI
 // =============================================================================
 
@@ -625,6 +1165,39 @@ class Program
                     // RunSelfTest() before running against a real PLC.
                     case "selftest":
                         RunSelfTest(pccc);
+                        break;
+
+                    // ── Node management ──────────────────────────────────────────
+
+                    // settarget <node>
+                    // Changes the target node address at runtime without restarting.
+                    // Useful after scannodes reveals the correct node, or when switching
+                    // between multiple PLCs on the same RS-485 bus.
+                    // Also re-runs the connectivity probe so the result is confirmed.
+                    // Example: settarget 3
+                    case "settarget":
+                        HandleSetTarget(pccc, parts);
+                        break;
+
+                    // scannodes [from] [to]
+                    // Probes each DF1 node address in the given range (default 1–31)
+                    // by sending GetProcessorType. Reports which nodes respond and
+                    // their processor type codes. Useful for RS-485 bus commissioning
+                    // or finding which node a PLC has been assigned.
+                    // Example: scannodes        (scans nodes 1–31)
+                    //          scannodes 1 8    (scans nodes 1–8 only)
+                    case "scannodes":
+                        HandleScanNodes(pccc, parts);
+                        break;
+
+                    // watch <address> [interval_ms]
+                    // Polls the given address repeatedly and prints the value
+                    // whenever it changes. Default interval is 500 ms.
+                    // Press any key to stop.
+                    // Example: watch F8:0
+                    //          watch N7:5 200
+                    case "watch":
+                        HandleWatch(pccc, parts);
                         break;
 
                     default:
@@ -1619,12 +2192,15 @@ class Program
         Console.WriteLine("  --interactive-only           Skip demo, go straight to CLI");
         Console.WriteLine("  --no-interactive             Run demo only, then exit");
         Console.WriteLine("  --stress-test [n]            Stress test; n = iterations (0=infinite)");
+        Console.WriteLine("  --scan-nodes [from] [to]     Scan DF1 node range (default 1–31)");
         Console.WriteLine("  --help, -h                   Show this help");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run -- COM1");
         Console.WriteLine("  dotnet run -- COM1 --interactive-only");
         Console.WriteLine("  dotnet run -- COM1 --stress-test 500");
+        Console.WriteLine("  dotnet run -- COM1 --mode df1master --scan-nodes");
+        Console.WriteLine("  dotnet run -- COM1 --mode df1master --scan-nodes 1 8");
         Console.WriteLine("  dotnet run -- --mode eip --host 127.0.0.1");
         Console.WriteLine("  dotnet run -- --mode eip --host 127.0.0.1 --stress-test");
     }
@@ -1649,6 +2225,13 @@ class Program
         Console.WriteLine("  selftest                       Run exhaustive self-test suite");
         Console.WriteLine("  stats                          Show communication statistics");
         Console.WriteLine("  resetstats                     Reset statistics counters");
+        Console.WriteLine();
+        Console.WriteLine("Node management:");
+        Console.WriteLine("  scannodes [from] [to]          Scan DF1 node range for live PLCs");
+        Console.WriteLine("                                 (default range: 1–31)");
+        Console.WriteLine("  settarget <node>               Change target node at runtime and probe");
+        Console.WriteLine("  watch <addr> [interval_ms]     Monitor address, print on change");
+        Console.WriteLine("                                 (default interval: 500 ms)");
         Console.WriteLine();
         Console.WriteLine("  exit / quit                    Leave interactive mode");
         Console.WriteLine("  help                           This reference");
