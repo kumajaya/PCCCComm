@@ -21,6 +21,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO.Ports;
 using System.Linq;
 using System.Threading;
@@ -82,6 +83,10 @@ public class PCCCEmulator : IDisposable
 {
     // ─── Core Components ──────────────────────────────────────────────────────
     private readonly PlcMemory _memory;
+    private byte[]? _directoryBytes;
+    private readonly ConcurrentDictionary<ushort, (int FileType, int FileNumber)> _openFiles = new();
+    private ushort _nextTag = 1;  // start from 1, avoid 0 and 0xFFFF
+    private readonly object _tagLock = new();
     private ILinkTransport? _transport;
 
     // ─── Transport Mode ───────────────────────────────────────────────────────
@@ -238,6 +243,9 @@ public class PCCCEmulator : IDisposable
     public PCCCEmulator(string portName, int baudRate, Parity parity, TransportMode mode = TransportMode.DF1, int eipPort = 44818)
     {
         _memory = new PlcMemory();
+        _directoryBytes = _memory.GetDirectory();
+        Logger.Always(this, $"Directory loaded: {_directoryBytes?.Length ?? 0} bytes");
+
         _mode = mode;
 
         // Build initial GetStatus payload cache using the default processor mode.
@@ -518,8 +526,200 @@ public class PCCCEmulator : IDisposable
             case 0x11:  // Get Edit Resource
             case 0x12:  // Return Edit Resource
             case 0x29:  // Unrecognized (sent by RSLinx during auto-configure)
-            case 0x52:  // Download Completed
             case 0x88:  // Execute Command List (download initialization)
+                SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                break;
+
+            // =================================================================
+            // File-based upload/download commands (SLC 5/03 and newer)
+            // =================================================================
+            case 0x53:  // Upload All Request — return segment info
+                {
+                    // Segment info: max chunk size (2 bytes LE) + total memory size (2 bytes LE)
+                    // SLC 5/03: max segment = 236 bytes, total memory = directory size
+                    int totalMemory = _directoryBytes?.Length ?? 0;
+                    byte[] segInfo = new byte[4];
+                    segInfo[0] = (byte)(236 & 0xFF);
+                    segInfo[1] = (byte)((236 >> 8) & 0xFF);
+                    segInfo[2] = (byte)(totalMemory & 0xFF);
+                    segInfo[3] = (byte)((totalMemory >> 8) & 0xFF);
+                    SendDataResponse(src, tns, 0x4F, segInfo, clientContext);
+                    break;
+                }
+
+            case 0x50:  // Download All Request — return segment info
+                {
+                    int totalMemory = _directoryBytes?.Length ?? 0;
+                    byte[] segInfo = new byte[4];
+                    segInfo[0] = (byte)(164 & 0xFF);
+                    segInfo[1] = (byte)((164 >> 8) & 0xFF);
+                    segInfo[2] = (byte)(totalMemory & 0xFF);
+                    segInfo[3] = (byte)((totalMemory >> 8) & 0xFF);
+                    SendDataResponse(src, tns, 0x4F, segInfo, clientContext);
+                    break;
+                }
+
+            case 0x55:  // Upload Completed
+            case 0x52:  // Download Completed
+                SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                break;
+
+            case 0x81:  // Open File
+                if (data.Length >= 2)
+                {
+                    int fileNumber = data[0];
+                    int fileType   = data[1];
+
+                    // Program directory (type 0x24, number 0) → special tag 0xFFFF
+                    if (fileType == 0x24 && fileNumber == 0)
+                    {
+                        _openFiles[0xFFFF] = (fileType, fileNumber);
+                        SendDataResponse(src, tns, 0x4F, new byte[] { 0xFF, 0xFF }, clientContext);
+                        break;
+                    }
+
+                    // Normal file: verify exists, assign unique tag
+                    int size = _memory.GetFileSize(fileType, fileNumber);
+                    if (size > 0)
+                    {
+                        ushort tag;
+                        lock (_tagLock)
+                        {
+                            // Cari tag berikutnya yang belum dipakai (skip 0 dan 0xFFFF)
+                            do {
+                                if (_nextTag == 0xFFFE) _nextTag = 1;
+                                else _nextTag++;
+                            } while (_openFiles.ContainsKey(_nextTag));
+                            tag = _nextTag;
+                        }
+                        _openFiles[tag] = (fileType, fileNumber);
+                        byte[] tagBytes = new byte[] { (byte)(tag & 0xFF), (byte)((tag >> 8) & 0xFF) };
+                        SendDataResponse(src, tns, 0x4F, tagBytes, clientContext);
+                    }
+                    else
+                    {
+                        SendErrorResponse(src, tns, 0x0F, func, 0x50, clientContext);
+                    }
+                }
+                else
+                {
+                    SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
+                }
+                break;
+
+            case 0x82:  // Close File
+                if (data.Length >= 2)
+                {
+                    ushort tag = (ushort)(data[0] | (data[1] << 8));
+                    _openFiles.TryRemove(tag, out _);
+                }
+                SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                break;
+
+            case 0xA7:  // Protected Typed File Read
+                if (data.Length >= 5)
+                {
+                    ushort tag = (ushort)(data[0] | (data[1] << 8));
+                    int offsetWords = data[2] | (data[3] << 8);
+                    int bytesToRead = data[4];
+                    int byteOffset  = offsetWords * 2;
+
+                    if (tag == 0xFFFF)
+                    {
+                        // Directory read — sama seperti sebelumnya
+                        if (_directoryBytes == null || byteOffset + bytesToRead > _directoryBytes.Length)
+                        {
+                            SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext);
+                            break;
+                        }
+                        byte[] response = new byte[bytesToRead];
+                        Array.Copy(_directoryBytes, byteOffset, response, 0, bytesToRead);
+                        SendDataResponse(src, tns, 0x4F, response, clientContext);
+                        break;
+                    }
+
+                    // Lookup tag → (fileType, fileNumber)
+                    if (!_openFiles.TryGetValue(tag, out var fileInfo))
+                    {
+                        SendErrorResponse(src, tns, 0x0F, func, 0x50, clientContext);  // file not open
+                        break;
+                    }
+
+                    byte[] fileData = _memory.ReadRaw(fileInfo.FileType, fileInfo.FileNumber,
+                                                    byteOffset, bytesToRead, out int status);
+                    if (status == 0)
+                        SendDataResponse(src, tns, 0x4F, fileData, clientContext);
+                    else
+                        SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext);
+                }
+                else
+                {
+                    SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
+                }
+                break;
+
+            case 0xAF: // Protected Typed File Write
+                if (data.Length >= 5)
+                {
+                    int tag = data[0] | (data[1] << 8);
+                    int offsetWords  = data[2] | (data[3] << 8);
+                    int bytesToWrite = data[4];
+                    int byteOffset   = offsetWords * 2;
+
+                    if (tag == 0xFFFF)
+                    {
+                        // Directory write — allowed during download
+                        if (data.Length < 5 + bytesToWrite)
+                        {
+                            SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
+                            break;
+                        }
+                        if (_directoryBytes == null ||
+                            byteOffset + bytesToWrite > _directoryBytes.Length)
+                        {
+                            SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext);
+                            break;
+                        }
+                        byte[] writeData = new byte[bytesToWrite];
+                        Array.Copy(data, 5, writeData, 0, bytesToWrite);
+                        Array.Copy(writeData, 0, _directoryBytes, byteOffset, bytesToWrite);
+                        SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                        break;
+                    }
+
+                    // Normal file — pakai _openFiles lookup (kode yang sudah ada)
+                    if (!_openFiles.TryGetValue((ushort)tag, out var fileInfo))
+                    {
+                        SendErrorResponse(src, tns, 0x0F, func, 0x50, clientContext);
+                        break;
+                    }
+                    if (data.Length >= 5 + bytesToWrite)
+                    {
+                        byte[] writeData = new byte[bytesToWrite];
+                        Array.Copy(data, 5, writeData, 0, bytesToWrite);
+                        bool ok = _memory.WriteRaw(fileInfo.FileType, fileInfo.FileNumber,
+                                                byteOffset, bytesToWrite, writeData);
+                        if (ok)
+                            SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                        else
+                            SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext);
+                    }
+                    else
+                    {
+                        SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
+                    }
+                }
+                else
+                {
+                    SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
+                }
+                break;
+
+            case 0x41:  // Disable Forces
+                SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                break;
+
+            case 0x8F:  // Apply Port Configuration
                 SendEmptyResponse(src, tns, 0x4F, func, clientContext);
                 break;
 
@@ -992,6 +1192,8 @@ public class PCCCEmulator : IDisposable
         Interlocked.Exchange(ref _lostModemCount,           0);
         Logger.Always(this, "Diagnostic counters reset to zero.");
     }
+
+    private byte[]? GetDirectoryBytes() => _directoryBytes;
 
     /// <summary>
     /// Core response sender. Builds the inner frame PDU and delegates to the

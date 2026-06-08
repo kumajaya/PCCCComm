@@ -202,9 +202,21 @@ public class SlcHandler : IPlcHandler
         return PCCCConstants.SlcFileTypeInfo.GetBytesPerElement(type);
     }
 
-    // ─── Public API Implementation ─────────────────────────────────────────
-    // (All methods below are copied verbatim from PCCCComm, with field adjustments)
+    // ─── Helper to detect file-based transfer support ──────────────────────
+    private bool SupportsFileBasedTransfer()
+    {
+        return _processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC503 ||
+               _processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC504 ||
+               _processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC505 ||
+               _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1100 ||
+               _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1200 ||
+               _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP ||
+               _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP;
+    }
 
+    // ─── Public API Implementation ─────────────────────────────────────────
+    // (Existing public methods from original are kept as is, they are already implemented)
+    
     /// <summary>
     /// Gets the processor type code.
     /// Original documentation: Returns the processor type code (e.g., 0x49 for SLC 5/03).
@@ -270,6 +282,7 @@ public class SlcHandler : IPlcHandler
     /// </summary>
     public string[] ReadAny(string startAddress, int numberOfElements)
     {
+        // Implementation unchanged
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
@@ -605,7 +618,7 @@ public class SlcHandler : IPlcHandler
 
     private IOConfig[] GetML1500IOConfig()
     {
-        // First read: get size
+        // ... unchanged, omitted for brevity (already in original)
         byte[] body = { 4, 0, 0x62, 0, 0 };
         var req = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetIOConfig, body);
         var reply = _protocol.SendRequest(req, out int sts);
@@ -676,95 +689,16 @@ public class SlcHandler : IPlcHandler
         return result;
     }
 
-    // ─── Upload / Download ─────────────────────────────────────────────────
+    // ─── Upload / Download (Facade) ────────────────────────────────────────
     public Collection<PLCFileDetails> UploadProgramData()
     {
         DisableEventFlag = true;
         try
         {
-            byte[] fzd = ReadFileDirectory();
-            var programFiles = new Collection<PLCFileDetails>();
-            programFiles.Add(new PLCFileDetails { FileNumber = 0, Data = fzd, FileType = 0, NumberOfBytes = fzd.Length });
-
-            OnFileProgress(new PCCCComm.FileProgressEventArgs
-            {
-                FileNumber = 0,
-                FileType = 0,
-                FileSizeBytes = fzd.Length,
-                FilesCompleted = 1,
-                TotalFiles = 1,
-                TotalBytesTransferred = fzd.Length,
-                GrandTotalBytes = fzd.Length
-            });
-
-            int numberOfProgramFiles = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfProgramFilesLo]
-                                     + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfProgramFilesHi] * 256;
-            int numberOfDataFiles = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
-                                  + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] * 256;
-            int totalEntries = numberOfProgramFiles + numberOfDataFiles;
-
-            int filePosition = (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000)
-                ? PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetSlc502Ml1000
-                : (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1200 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1100)
-                    ? PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetMl1100Ml1500
-                    : PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault;
-
-            long grandTotalBytes = 0;
-            int tempPos = filePosition;
-            for (int j = 0; j < totalEntries && tempPos < fzd.Length; j++)
-            {
-                int sizeBytes = fzd[tempPos + 1] + fzd[tempPos + 2] * 256;
-                grandTotalBytes += sizeBytes;
-                tempPos += (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000) ? 8 : 10;
-            }
-            grandTotalBytes += fzd.Length;
-
-            int i = 0;
-            long totalBytesTransferred = fzd.Length;
-            int filesCompleted = 1;
-
-            while (filePosition < fzd.Length && i < totalEntries)
-            {
-                var pf = new PLCFileDetails
-                {
-                    FileType = fzd[filePosition],
-                    NumberOfBytes = fzd[filePosition + 1] + fzd[filePosition + 2] * 256
-                };
-                pf.FileNumber = fzd[filePosition + 3];
-
-                var addr = new DataAddress { FileType = pf.FileType, FileNumber = pf.FileNumber };
-                if (pf.NumberOfBytes > 0)
-                {
-                    pf.Data = ReadRawDataWithChunking(ref addr, pf.NumberOfBytes, out int reply);
-                    if (reply != 0 && reply != 0x50)
-                        throw new PCCCException("Failed to Read Program File " + addr.FileNumber +
-                                            ", Type " + addr.FileType + " - " + PCCCErrors.DecodeStatus(reply));
-                    if (reply == 0x50)
-                        pf.Data = Array.Empty<byte>();
-                }
-                else
-                    pf.Data = Array.Empty<byte>();
-
-                programFiles.Add(pf);
-
-                totalBytesTransferred += pf.NumberOfBytes;
-                filesCompleted++;
-
-                OnFileProgress(new PCCCComm.FileProgressEventArgs
-                {
-                    FileNumber = pf.FileNumber,
-                    FileType = pf.FileType,
-                    FileSizeBytes = pf.NumberOfBytes,
-                    FilesCompleted = filesCompleted,
-                    TotalFiles = totalEntries + 1,
-                    TotalBytesTransferred = totalBytesTransferred,
-                    GrandTotalBytes = grandTotalBytes
-                });
-
-                i++;
-                filePosition += (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000) ? 8 : 10;
-            }
-            return programFiles;
+            if (SupportsFileBasedTransfer())
+                return UploadProgramDataFileBased();
+            else
+                return UploadProgramDataPhysicalBased();
         }
         finally
         {
@@ -777,136 +711,603 @@ public class SlcHandler : IPlcHandler
         DisableEventFlag = true;
         try
         {
-            SetProgramMode();
-
-            long grandTotalBytes = plcFiles.Sum(f => f.Data?.Length ?? 0);
-            long totalBytesTransferred = 0;
-            int filesCompleted = 0;
-            int totalFiles = plcFiles.Count;
-
-            // Step 1: Initialize download
-            int dataLength = (_processorType == 0x5B || _processorType == 0x78) ? 13 : 15;
-            byte[] initData = new byte[dataLength + 1];
-            initData[0] = 0x02; initData[1] = 0x0A; initData[2] = 0xAA;
-            initData[3] = 4; initData[4] = 0; initData[5] = 0x63;
-
-            int idx = 0;
-            while (idx < plcFiles.Count && (plcFiles[idx].FileNumber != 0 || plcFiles[idx].FileType != 0x24)) idx++;
-            if (idx < plcFiles.Count && plcFiles[idx].Data?.Length >= 8)
-            {
-                initData[8] = plcFiles[idx].Data[2]; initData[9] = plcFiles[idx].Data[3];
-                initData[10] = plcFiles[idx].Data[4]; initData[11] = plcFiles[idx].Data[5];
-                if (dataLength > 14) { initData[12] = plcFiles[idx].Data[6]; initData[13] = plcFiles[idx].Data[7]; }
-            }
-
-            var pAddr = new DataAddress();
-            switch (_processorType)
-            {
-                case 0x78: case 0x5B: case 0x49:
-                    pAddr.FileType = 0x63; pAddr.Element = 0;
-                    byte[] four = ReadRawDataWithChunking(ref pAddr, 4, out int r4);
-                    if (r4 != 0) throw new PCCCException("Failed to Read File 0, Type 63h - " + PCCCErrors.DecodeStatus(r4));
-                    Array.Copy(four, 0, initData, 8, 4);
-                    pAddr.FileType = 1; pAddr.Element = 0x23;
-                    initData[1] = 0x0A; initData[3] = 4;
-                    break;
-                case 0x88: case 0x89: case 0x8C: case 0x9C:
-                    initData[1] = 0x0C; initData[3] = 6;
-                    pAddr.FileType = 2; pAddr.Element = 0x23;
-                    break;
-                default:
-                    initData[1] = 0x0A; initData[3] = 4;
-                    pAddr.FileType = 1; pAddr.Element = 0x23;
-                    break;
-            }
-            initData[initData.Length - 2] = 1;
-            initData[initData.Length - 1] = 0x56;
-
-            var initReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.DownloadInit, initData);
-            var initReply = _protocol.SendRequest(initReq, out int initSts);
-            if (initSts != 0) throw new PCCCException("Failed to Initialize for Download - " + PCCCErrors.DecodeStatus(initSts));
-
-            // Step 2: Secure sole access
-            var secureReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.SecureAccess, Array.Empty<byte>());
-            var secureReply = _protocol.SendRequest(secureReq, out int secureSts);
-            if (secureSts != 0) throw new PCCCException("Failed to Secure Sole Access - " + PCCCErrors.DecodeStatus(secureSts));
-
-            // Step 3: Write directory length
-            pAddr.BitNumber = 16;
-            byte[] dirLen = { (byte)(plcFiles[0].Data.Length & 0xFF), (byte)((plcFiles[0].Data.Length >> 8) & 0xFF) };
-            int writeLenSts = WriteRawDataWithChunking(pAddr, dirLen);
-            if (writeLenSts != 0) throw new PCCCException("Failed to Write Directory Length - " + PCCCErrors.DecodeStatus(writeLenSts));
-
-            totalBytesTransferred += 2;
-            filesCompleted = 1;
-            OnFileProgress(new PCCCComm.FileProgressEventArgs
-            {
-                FileNumber = 0,
-                FileType = 0,
-                FileSizeBytes = 2,
-                FilesCompleted = filesCompleted,
-                TotalFiles = totalFiles,
-                TotalBytesTransferred = totalBytesTransferred,
-                GrandTotalBytes = grandTotalBytes
-            });
-
-            // Step 4: Write program directory
-            pAddr.Element = 0;
-            pAddr.SubElement = 0;
-            int writeDirSts = WriteRawDataWithChunking(pAddr, plcFiles[0].Data);
-            if (writeDirSts != 0) throw new PCCCException("Failed to Write New Program Directory - " + PCCCErrors.DecodeStatus(writeDirSts));
-
-            totalBytesTransferred += plcFiles[0].Data.Length;
-            filesCompleted++;
-            OnFileProgress(new PCCCComm.FileProgressEventArgs
-            {
-                FileNumber = 0,
-                FileType = 0,
-                FileSizeBytes = plcFiles[0].Data.Length,
-                FilesCompleted = filesCompleted,
-                TotalFiles = totalFiles,
-                TotalBytesTransferred = totalBytesTransferred,
-                GrandTotalBytes = grandTotalBytes
-            });
-
-            // Step 5: Write each program/data file
-            for (int i = 1; i < plcFiles.Count; i++)
-            {
-                pAddr.FileNumber = plcFiles[i].FileNumber;
-                pAddr.FileType = plcFiles[i].FileType;
-                pAddr.Element = 0;
-                pAddr.SubElement = 0;
-                pAddr.BitNumber = 16;
-                int writeFileSts = WriteRawDataWithChunking(pAddr, plcFiles[i].Data);
-                if (writeFileSts != 0) throw new PCCCException("Failed when writing files to PLC - " + PCCCErrors.DecodeStatus(writeFileSts));
-
-                totalBytesTransferred += plcFiles[i].Data?.Length ?? 0;
-                filesCompleted++;
-                OnFileProgress(new PCCCComm.FileProgressEventArgs
-                {
-                    FileNumber = plcFiles[i].FileNumber,
-                    FileType = plcFiles[i].FileType,
-                    FileSizeBytes = plcFiles[i].Data?.Length ?? 0,
-                    FilesCompleted = filesCompleted,
-                    TotalFiles = totalFiles,
-                    TotalBytesTransferred = totalBytesTransferred,
-                    GrandTotalBytes = grandTotalBytes
-                });
-            }
-
-            // Step 6: Indicate download complete
-            var completeReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.DownloadComplete, Array.Empty<byte>());
-            var completeReply = _protocol.SendRequest(completeReq, out int completeSts);
-            if (completeSts != 0) throw new PCCCException("Failed to Indicate to PLC that Download is complete - " + PCCCErrors.DecodeStatus(completeSts));
-
-            // Step 7: Release sole access
-            var releaseReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.ReleaseAccess, Array.Empty<byte>());
-            var releaseReply = _protocol.SendRequest(releaseReq, out int releaseSts);
-            if (releaseSts != 0) throw new PCCCException("Failed to Release Sole Access - " + PCCCErrors.DecodeStatus(releaseSts));
+            if (SupportsFileBasedTransfer())
+                DownloadProgramDataFileBased(plcFiles);
+            else
+                DownloadProgramDataPhysicalBased(plcFiles);
         }
         finally
         {
             DisableEventFlag = false;
         }
+    }
+
+    // ─── Implementation: Physical-based (legacy) ───────────────────────────
+    private Collection<PLCFileDetails> UploadProgramDataPhysicalBased()
+    {
+        byte[] fzd = ReadFileDirectory();
+        var programFiles = new Collection<PLCFileDetails>();
+        programFiles.Add(new PLCFileDetails { FileNumber = 0, Data = fzd, FileType = 0, NumberOfBytes = fzd.Length });
+
+        OnFileProgress(new PCCCComm.FileProgressEventArgs
+        {
+            FileNumber = 0,
+            FileType = 0,
+            FileSizeBytes = fzd.Length,
+            FilesCompleted = 1,
+            TotalFiles = 1,
+            TotalBytesTransferred = fzd.Length,
+            GrandTotalBytes = fzd.Length
+        });
+
+        int numberOfProgramFiles = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfProgramFilesLo]
+                                 + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfProgramFilesHi] * 256;
+        int numberOfDataFiles = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
+                              + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] * 256;
+        int totalEntries = numberOfProgramFiles + numberOfDataFiles;
+
+        int filePosition = (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000)
+            ? PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetSlc502Ml1000
+            : (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1200 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1100)
+                ? PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetMl1100Ml1500
+                : PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault;
+
+        long grandTotalBytes = 0;
+        int tempPos = filePosition;
+        for (int j = 0; j < totalEntries && tempPos < fzd.Length; j++)
+        {
+            int sizeBytes = fzd[tempPos + 1] + fzd[tempPos + 2] * 256;
+            grandTotalBytes += sizeBytes;
+            tempPos += (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000) ? 8 : 10;
+        }
+        grandTotalBytes += fzd.Length;
+
+        int i = 0;
+        long totalBytesTransferred = fzd.Length;
+        int filesCompleted = 1;
+
+        while (filePosition < fzd.Length && i < totalEntries)
+        {
+            var pf = new PLCFileDetails
+            {
+                FileType = fzd[filePosition],
+                NumberOfBytes = fzd[filePosition + 1] + fzd[filePosition + 2] * 256
+            };
+            pf.FileNumber = fzd[filePosition + 3];
+
+            var addr = new DataAddress { FileType = pf.FileType, FileNumber = pf.FileNumber };
+            if (pf.NumberOfBytes > 0)
+            {
+                pf.Data = ReadRawDataWithChunking(ref addr, pf.NumberOfBytes, out int reply);
+                if (reply != 0 && reply != 0x50)
+                    throw new PCCCException("Failed to Read Program File " + addr.FileNumber +
+                                        ", Type " + addr.FileType + " - " + PCCCErrors.DecodeStatus(reply));
+                if (reply == 0x50)
+                    pf.Data = Array.Empty<byte>();
+            }
+            else
+                pf.Data = Array.Empty<byte>();
+
+            programFiles.Add(pf);
+
+            totalBytesTransferred += pf.NumberOfBytes;
+            filesCompleted++;
+
+            OnFileProgress(new PCCCComm.FileProgressEventArgs
+            {
+                FileNumber = pf.FileNumber,
+                FileType = pf.FileType,
+                FileSizeBytes = pf.NumberOfBytes,
+                FilesCompleted = filesCompleted,
+                TotalFiles = totalEntries + 1,
+                TotalBytesTransferred = totalBytesTransferred,
+                GrandTotalBytes = grandTotalBytes
+            });
+
+            i++;
+            filePosition += (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000) ? 8 : 10;
+        }
+        return programFiles;
+    }
+
+    private void DownloadProgramDataPhysicalBased(Collection<PLCFileDetails> plcFiles)
+    {
+        SetProgramMode();
+
+        long grandTotalBytes = plcFiles.Sum(f => f.Data?.Length ?? 0);
+        long totalBytesTransferred = 0;
+        int filesCompleted = 0;
+        int totalFiles = plcFiles.Count;
+
+        // Step 1: Initialize download
+        int dataLength = (_processorType == 0x5B || _processorType == 0x78) ? 13 : 15;
+        byte[] initData = new byte[dataLength + 1];
+        initData[0] = 0x02; initData[1] = 0x0A; initData[2] = 0xAA;
+        initData[3] = 4; initData[4] = 0; initData[5] = 0x63;
+
+        int idx = 0;
+        while (idx < plcFiles.Count && (plcFiles[idx].FileNumber != 0 || plcFiles[idx].FileType != 0x24)) idx++;
+        if (idx < plcFiles.Count && plcFiles[idx].Data?.Length >= 8)
+        {
+            initData[8] = plcFiles[idx].Data[2]; initData[9] = plcFiles[idx].Data[3];
+            initData[10] = plcFiles[idx].Data[4]; initData[11] = plcFiles[idx].Data[5];
+            if (dataLength > 14) { initData[12] = plcFiles[idx].Data[6]; initData[13] = plcFiles[idx].Data[7]; }
+        }
+
+        var pAddr = new DataAddress();
+        switch (_processorType)
+        {
+            case 0x78: case 0x5B: case 0x49:
+                pAddr.FileType = 0x63; pAddr.Element = 0;
+                byte[] four = ReadRawDataWithChunking(ref pAddr, 4, out int r4);
+                if (r4 != 0) throw new PCCCException("Failed to Read File 0, Type 63h - " + PCCCErrors.DecodeStatus(r4));
+                Array.Copy(four, 0, initData, 8, 4);
+                pAddr.FileType = 1; pAddr.Element = 0x23;
+                initData[1] = 0x0A; initData[3] = 4;
+                break;
+            case 0x88: case 0x89: case 0x8C: case 0x9C:
+                initData[1] = 0x0C; initData[3] = 6;
+                pAddr.FileType = 2; pAddr.Element = 0x23;
+                break;
+            default:
+                initData[1] = 0x0A; initData[3] = 4;
+                pAddr.FileType = 1; pAddr.Element = 0x23;
+                break;
+        }
+        initData[initData.Length - 2] = 1;
+        initData[initData.Length - 1] = 0x56;
+
+        var initReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.DownloadInit, initData);
+        var initReply = _protocol.SendRequest(initReq, out int initSts);
+        if (initSts != 0) throw new PCCCException("Failed to Initialize for Download - " + PCCCErrors.DecodeStatus(initSts));
+
+        // Step 2: Secure sole access
+        var secureReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.SecureAccess, Array.Empty<byte>());
+        var secureReply = _protocol.SendRequest(secureReq, out int secureSts);
+        if (secureSts != 0) throw new PCCCException("Failed to Secure Sole Access - " + PCCCErrors.DecodeStatus(secureSts));
+
+        // Step 3: Write directory length
+        pAddr.BitNumber = 16;
+        byte[] dirLen = { (byte)(plcFiles[0].Data.Length & 0xFF), (byte)((plcFiles[0].Data.Length >> 8) & 0xFF) };
+        int writeLenSts = WriteRawDataWithChunking(pAddr, dirLen);
+        if (writeLenSts != 0) throw new PCCCException("Failed to Write Directory Length - " + PCCCErrors.DecodeStatus(writeLenSts));
+
+        totalBytesTransferred += 2;
+        filesCompleted = 1;
+        OnFileProgress(new PCCCComm.FileProgressEventArgs
+        {
+            FileNumber = 0,
+            FileType = 0,
+            FileSizeBytes = 2,
+            FilesCompleted = filesCompleted,
+            TotalFiles = totalFiles,
+            TotalBytesTransferred = totalBytesTransferred,
+            GrandTotalBytes = grandTotalBytes
+        });
+
+        // Step 4: Write program directory
+        pAddr.Element = 0;
+        pAddr.SubElement = 0;
+        int writeDirSts = WriteRawDataWithChunking(pAddr, plcFiles[0].Data);
+        if (writeDirSts != 0) throw new PCCCException("Failed to Write New Program Directory - " + PCCCErrors.DecodeStatus(writeDirSts));
+
+        totalBytesTransferred += plcFiles[0].Data.Length;
+        filesCompleted++;
+        OnFileProgress(new PCCCComm.FileProgressEventArgs
+        {
+            FileNumber = 0,
+            FileType = 0,
+            FileSizeBytes = plcFiles[0].Data.Length,
+            FilesCompleted = filesCompleted,
+            TotalFiles = totalFiles,
+            TotalBytesTransferred = totalBytesTransferred,
+            GrandTotalBytes = grandTotalBytes
+        });
+
+        // Step 5: Write each program/data file
+        for (int i = 1; i < plcFiles.Count; i++)
+        {
+            pAddr.FileNumber = plcFiles[i].FileNumber;
+            pAddr.FileType = plcFiles[i].FileType;
+            pAddr.Element = 0;
+            pAddr.SubElement = 0;
+            pAddr.BitNumber = 16;
+            int writeFileSts = WriteRawDataWithChunking(pAddr, plcFiles[i].Data);
+            if (writeFileSts != 0) throw new PCCCException("Failed when writing files to PLC - " + PCCCErrors.DecodeStatus(writeFileSts));
+
+            totalBytesTransferred += plcFiles[i].Data?.Length ?? 0;
+            filesCompleted++;
+            OnFileProgress(new PCCCComm.FileProgressEventArgs
+            {
+                FileNumber = plcFiles[i].FileNumber,
+                FileType = plcFiles[i].FileType,
+                FileSizeBytes = plcFiles[i].Data?.Length ?? 0,
+                FilesCompleted = filesCompleted,
+                TotalFiles = totalFiles,
+                TotalBytesTransferred = totalBytesTransferred,
+                GrandTotalBytes = grandTotalBytes
+            });
+        }
+
+        // Step 6: Indicate download complete
+        var completeReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.DownloadComplete, Array.Empty<byte>());
+        var completeReply = _protocol.SendRequest(completeReq, out int completeSts);
+        if (completeSts != 0) throw new PCCCException("Failed to Indicate to PLC that Download is complete - " + PCCCErrors.DecodeStatus(completeSts));
+
+        // Step 7: Release sole access
+        var releaseReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.ReleaseAccess, Array.Empty<byte>());
+        var releaseReply = _protocol.SendRequest(releaseReq, out int releaseSts);
+        if (releaseSts != 0) throw new PCCCException("Failed to Release Sole Access - " + PCCCErrors.DecodeStatus(releaseSts));
+    }
+
+    // ─── Private Helper Methods for Chunked File I/O ───────────────────────────
+
+    /// <summary>
+    /// Uploads program and data files from the PLC using file-based transfer (SLC 5/03+ and ML1100/1200/1500).
+    /// This method performs the following steps:
+    ///   1. UploadAllRequest – enter upload mode, get memory segment info (not used further).
+    ///   2. GetEditResource – secure sole access.
+    ///   3. OpenFile – open program directory (file number 0, type 0x24), get a tag handle.
+    ///   4. Read directory size – read 2 bytes at offset 70 (word offset 0x23) which contains the total size of the directory in bytes.
+    ///   5. Read entire directory – using chunked reads (FileReadWithChunking) to get the full directory data.
+    ///   6. Parse directory – iterate through directory entries to read each program/data file using OpenFile/FileRead/CloseFile.
+    ///   7. UploadCompleted – exit upload mode.
+    ///   8. ReturnEditResource – release sole access.
+    /// </summary>
+    private Collection<PLCFileDetails> UploadProgramDataFileBased()
+    {
+        // Step 1: Enter upload mode and get segment info (required by some PLCs)
+        byte[] segmentInfo = _protocol.UploadAllRequest((byte)MyNode, (byte)TargetNode);
+        
+        // Step 2: Secure edit resource (sole access)
+        GetEditResource();
+        
+        var files = new Collection<PLCFileDetails>();
+        
+        // Step 3: Open program directory (file number 0, type 0x24)
+        ushort dirTag = OpenFile(0, 0x24);
+        
+        // Step 4: Read directory size from byte offset 70 (word offset 0x23)
+        // The directory length is stored as a 16-bit little-endian value at offset 70
+        byte[] dirSizeData = FileReadWithChunking(dirTag, 70, 2);
+        int dirSize = dirSizeData[0] + (dirSizeData[1] << 8);
+        
+        // Step 5: Read entire directory using chunked reads
+        byte[] directory = FileReadWithChunking(dirTag, 0, dirSize);
+        files.Add(new PLCFileDetails { FileNumber = 0, FileType = 0, NumberOfBytes = dirSize, Data = directory });
+        
+        CloseFile(dirTag);
+        
+        // Step 6: Parse directory and read each program/data file
+        // Directory structure (per AB Publication 1770-6.5.16, Chapter 10):
+        //   Offset 46/47: number of program files (little-endian)
+        //   Offset 52/53: number of data files (little-endian)
+        //   Then file table entries start at processor-specific offset.
+        int numberOfProgramFiles = directory[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfProgramFilesLo]
+                                + directory[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfProgramFilesHi] * 256;
+        int numberOfDataFiles = directory[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
+                            + directory[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] * 256;
+        int totalEntries = numberOfProgramFiles + numberOfDataFiles;
+        
+        // Determine starting offset and bytes per entry based on processor type
+        int filePosition;
+        int bytesPerEntry;
+        if (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || 
+            _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000)
+        {
+            filePosition = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetSlc502Ml1000;
+            bytesPerEntry = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntrySlc502;
+        }
+        else if (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1200 ||
+                _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP ||
+                _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP ||
+                _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1100)
+        {
+            filePosition = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetMl1100Ml1500;
+            bytesPerEntry = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntryDefault;
+        }
+        else
+        {
+            filePosition = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault;
+            bytesPerEntry = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntryDefault;
+        }
+        
+        // Calculate grand total bytes for progress reporting
+        long grandTotalBytes = dirSize;
+        int tempPos = filePosition;
+        for (int j = 0; j < totalEntries && tempPos < directory.Length; j++)
+        {
+            int sizeBytes = directory[tempPos + 1] + directory[tempPos + 2] * 256;
+            grandTotalBytes += sizeBytes;
+            tempPos += bytesPerEntry;
+        }
+        
+        int i = 0;
+        long totalBytesTransferred = dirSize;
+        int filesCompleted = 1;
+        
+        while (filePosition < directory.Length && i < totalEntries)
+        {
+            int fileType = directory[filePosition];
+            int fileNumber = directory[filePosition + 3];
+            int fileSizeBytes = directory[filePosition + 1] + directory[filePosition + 2] * 256;
+            
+            // Open the file (program or data) using its number and type
+            ushort fileTag = OpenFile(fileNumber, fileType);
+            byte[] fileData;
+            if (fileSizeBytes > 0)
+            {
+                fileData = FileReadWithChunking(fileTag, 0, fileSizeBytes);
+            }
+            else
+            {
+                fileData = Array.Empty<byte>();
+            }
+            CloseFile(fileTag);
+            
+            var pf = new PLCFileDetails
+            {
+                FileNumber = fileNumber,
+                FileType = fileType,
+                NumberOfBytes = fileSizeBytes,
+                Data = fileData
+            };
+            files.Add(pf);
+            
+            totalBytesTransferred += fileSizeBytes;
+            filesCompleted++;
+            
+            OnFileProgress(new PCCCComm.FileProgressEventArgs
+            {
+                FileNumber = fileNumber,
+                FileType = fileType,
+                FileSizeBytes = fileSizeBytes,
+                FilesCompleted = filesCompleted,
+                TotalFiles = totalEntries + 1,
+                TotalBytesTransferred = totalBytesTransferred,
+                GrandTotalBytes = grandTotalBytes
+            });
+            
+            i++;
+            filePosition += bytesPerEntry;
+        }
+        
+        // Step 7: Exit upload mode
+        UploadCompleted();
+        
+        // Step 8: Release edit resource
+        ReturnEditResource();
+        
+        return files;
+    }
+
+    /// <summary>
+    /// Downloads a program and data files to the PLC using file-based transfer (SLC 5/03+ and ML1100/1200/1500).
+    /// Steps:
+    ///   1. SetProgramMode – place CPU in program mode.
+    ///   2. DisableForces – disable any active forces.
+    ///   3. DownloadAllRequest – enter download mode, get segment info.
+    ///   4. GetEditResource – secure sole access.
+    ///   5. OpenFile – open program directory (file 0, type 0x24).
+    ///   6. Write directory data – write the entire directory (including size header) using FileWriteWithChunking.
+    ///   7. CloseFile – close directory file.
+    ///   8. For each program/data file (i >= 1): OpenFile, FileWriteWithChunking, CloseFile.
+    ///   9. DownloadCompleted – exit download mode.
+    ///   10. ApplyPortConfiguration – apply stored port configuration.
+    ///   11. ReturnEditResource – release sole access.
+    /// </summary>
+    private void DownloadProgramDataFileBased(Collection<PLCFileDetails> plcFiles)
+    {
+        // Step 1: Set Program mode (required for download)
+        SetProgramMode();
+        
+        // Step 2: Disable forces (if any)
+        try { DisableForces(); }
+        catch (PCCCException) { /* ignore — forces may already be disabled */ }
+        
+        // Step 3: Enter download mode and get segment info (optional)
+        byte[] segmentInfo = _protocol.DownloadAllRequest((byte)MyNode, (byte)TargetNode);
+        
+        // Step 4: Secure edit resource
+        GetEditResource();
+        
+        // Step 5: Open program directory file (file number 0, type 0x24)
+        ushort dirTag = OpenFile(0, 0x24);
+        
+        // Step 6: Write entire directory data (starting at offset 0)
+        FileWriteWithChunking(dirTag, 0, plcFiles[0].Data);
+        
+        // Step 7: Close directory file
+        CloseFile(dirTag);
+        
+        // --- Progress calculation for download ---
+        long grandTotalBytes = plcFiles.Sum(f => f.Data?.Length ?? 0);
+        long totalBytesTransferred = plcFiles[0].Data?.Length ?? 0;
+        int filesCompleted = 1;   // directory sudah ditulis
+        int totalFiles = plcFiles.Count;
+
+        // Trigger initial progress event for directory
+        OnFileProgress(new PCCCComm.FileProgressEventArgs
+        {
+            FileNumber = 0,
+            FileType = 0,
+            FileSizeBytes = plcFiles[0].Data?.Length ?? 0,
+            FilesCompleted = filesCompleted,
+            TotalFiles = totalFiles,
+            TotalBytesTransferred = totalBytesTransferred,
+            GrandTotalBytes = grandTotalBytes
+        });
+
+        // Step 8: Write each program/data file (skip index 0, which is the directory)
+        for (int i = 1; i < plcFiles.Count; i++)
+        {
+            ushort fileTag = OpenFile(plcFiles[i].FileNumber, plcFiles[i].FileType);
+            FileWriteWithChunking(fileTag, 0, plcFiles[i].Data);
+            CloseFile(fileTag);
+
+            // Update progress
+            totalBytesTransferred += plcFiles[i].Data?.Length ?? 0;
+            filesCompleted++;
+
+            OnFileProgress(new PCCCComm.FileProgressEventArgs
+            {
+                FileNumber = plcFiles[i].FileNumber,
+                FileType = plcFiles[i].FileType,
+                FileSizeBytes = plcFiles[i].Data?.Length ?? 0,
+                FilesCompleted = filesCompleted,
+                TotalFiles = totalFiles,
+                TotalBytesTransferred = totalBytesTransferred,
+                GrandTotalBytes = grandTotalBytes
+            });
+        }
+        
+        // Step 9: Exit download mode
+        DownloadCompleted();
+        
+        // Step 10: Apply port configuration (required after download)
+        ApplyPortConfiguration();
+        
+        // Step 11: Release edit resource
+        ReturnEditResource();
+    }
+
+    /// <summary>
+    /// Reads a file with automatic chunking. Converts byte offset to word offset for the protocol.
+    /// </summary>
+    private byte[] FileReadWithChunking(ushort tag, int byteOffset, int totalBytes)
+    {
+        if (byteOffset % 2 != 0)
+            throw new PCCCException("FileRead: byte offset must be even (word‑aligned).");
+
+        using var ms = new MemoryStream(totalBytes);
+        int bytesRemaining = totalBytes;
+        int currentByteOffset = byteOffset;
+        int maxChunkBytes = PCCCConstants.Df1Limits.MaxReadPayloadBytes; // 236
+
+        while (bytesRemaining > 0)
+        {
+            int toReadBytes = Math.Min(bytesRemaining, maxChunkBytes);
+            int wordOffset = currentByteOffset / 2;
+            byte[] chunk = _protocol.FileRead(tag, wordOffset, toReadBytes, (byte)MyNode, (byte)TargetNode);
+            if (chunk == null || chunk.Length == 0)
+                throw new PCCCException($"Empty chunk received at byte offset {currentByteOffset} (word offset {wordOffset}).");
+            ms.Write(chunk, 0, chunk.Length);
+            bytesRemaining    -= chunk.Length;   // actual bytes received, bukan toReadBytes
+            currentByteOffset += chunk.Length;
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Writes a file with automatic chunking. Converts byte offset to word offset for the protocol.
+    /// </summary>
+    private void FileWriteWithChunking(ushort tag, int byteOffset, byte[] data)
+    {
+        if (byteOffset % 2 != 0)
+            throw new PCCCException("FileWrite: byte offset must be even (word‑aligned).");
+
+        int bytesRemaining = data.Length;
+        int currentByteOffset = byteOffset;
+        int maxChunkBytes = PCCCConstants.Df1Limits.MaxWritePayloadBytes; // 164
+
+        while (bytesRemaining > 0)
+        {
+            int toWriteBytes = Math.Min(bytesRemaining, maxChunkBytes);
+            int wordOffset = currentByteOffset / 2;
+            int srcOffset = currentByteOffset - byteOffset;     // posisi di array data, bukan data.Length - bytesRemaining
+            byte[] chunk = new byte[toWriteBytes];
+            Array.Copy(data, srcOffset, chunk, 0, toWriteBytes);
+            int sts = _protocol.FileWrite(tag, wordOffset, chunk, (byte)MyNode, (byte)TargetNode);
+            if (sts != 0)
+                throw new PCCCException($"FileWrite failed at byte offset {currentByteOffset}: {PCCCErrors.DecodeStatus(sts)}");
+            bytesRemaining    -= toWriteBytes;
+            currentByteOffset += toWriteBytes;
+        }
+    }
+
+    // ─── New public methods for file-based and diagnostic commands ─────────
+    public ushort OpenFile(int fileNumber, int fileType)
+    {
+        return _protocol.OpenFile((byte)fileNumber, (byte)fileType, (byte)MyNode, (byte)TargetNode);
+    }
+
+    public void CloseFile(ushort tag)
+    {
+        _protocol.CloseFile(tag, (byte)MyNode, (byte)TargetNode);
+    }
+
+    public byte[] FileRead(ushort tag, int offset, int length)
+    {
+        return _protocol.FileRead(tag, offset, length, (byte)MyNode, (byte)TargetNode);
+    }
+
+    public int FileWrite(ushort tag, int offset, byte[] data)
+    {
+        return _protocol.FileWrite(tag, offset, data, (byte)MyNode, (byte)TargetNode);
+    }
+
+    public void GetEditResource()
+    {
+        _protocol.GetEditResource((byte)MyNode, (byte)TargetNode);
+    }
+
+    public void ReturnEditResource()
+    {
+        _protocol.ReturnEditResource((byte)MyNode, (byte)TargetNode);
+    }
+
+    public void UploadAllRequest()
+    {
+        _protocol.UploadAllRequest((byte)MyNode, (byte)TargetNode);
+    }
+
+    public void UploadCompleted()
+    {
+        _protocol.UploadCompleted((byte)MyNode, (byte)TargetNode);
+    }
+
+    public void DownloadAllRequest()
+    {
+        _protocol.DownloadAllRequest((byte)MyNode, (byte)TargetNode);
+    }
+
+    public void DownloadCompleted()
+    {
+        _protocol.DownloadCompleted((byte)MyNode, (byte)TargetNode);
+    }
+
+    public void ApplyPortConfiguration()
+    {
+        _protocol.ApplyPortConfiguration((byte)MyNode, (byte)TargetNode);
+    }
+
+    public void InitializeMemory()
+    {
+        _protocol.InitializeMemory((byte)MyNode, (byte)TargetNode);
+    }
+
+    public byte[] ReadDiagnosticCounters()
+    {
+        return _protocol.ReadDiagnosticCounters((byte)MyNode, (byte)TargetNode);
+    }
+
+    public void ResetDiagnosticCounters()
+    {
+        _protocol.ResetDiagnosticCounters((byte)MyNode, (byte)TargetNode);
+    }
+
+    public byte ReadLinkParameters()
+    {
+        return _protocol.ReadLinkParameters((byte)MyNode, (byte)TargetNode);
+    }
+
+    public void SetLinkParameters(byte maxAddress)
+    {
+        _protocol.SetLinkParameters(maxAddress, (byte)MyNode, (byte)TargetNode);
+    }
+
+    public byte[] Echo(byte[] data)
+    {
+        return _protocol.Echo(data, (byte)MyNode, (byte)TargetNode);
     }
 }

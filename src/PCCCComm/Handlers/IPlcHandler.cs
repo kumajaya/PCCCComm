@@ -106,4 +106,33 @@ public interface IPlcHandler
     
     /// <summary>Returns data file information specific to MicroLogix 1500.</summary>
     DataFileDetails[] GetML1500DataMemory();
+
+    // File management
+    ushort OpenFile(int fileNumber, int fileType);
+    void CloseFile(ushort tag);
+    byte[] FileRead(ushort tag, int offset, int length);
+    int FileWrite(ushort tag, int offset, byte[] data);
+
+    // Edit resource
+    void GetEditResource();
+    void ReturnEditResource();
+
+    // Upload/Download mode
+    void UploadAllRequest();
+    void UploadCompleted();
+    void DownloadAllRequest();
+    void DownloadCompleted();
+
+    // Configuration
+    void ApplyPortConfiguration();
+    void InitializeMemory();
+
+    // Diagnostic
+    byte[] ReadDiagnosticCounters();
+    void ResetDiagnosticCounters();
+    byte ReadLinkParameters();
+    void SetLinkParameters(byte maxAddress);
+
+    // Testing
+    byte[] Echo(byte[] data);
 }

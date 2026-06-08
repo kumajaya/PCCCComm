@@ -309,5 +309,142 @@ namespace PCCCComm.Pccc
         {
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns, PCCCConstants.Fnc.DisableForces, Array.Empty<byte>());
         }
+
+        // ========================================================================
+        // Factory methods for new commands
+        // ========================================================================
+
+        /// <summary>Creates an Open File request (0x0F/0x81).</summary>
+        public static PCCCMessage CreateOpenFileRequest(byte fileNumber, byte fileType, ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.OpenFile, new byte[] { fileNumber, fileType });
+        }
+
+        /// <summary>Creates a Close File request (0x0F/0x82).</summary>
+        public static PCCCMessage CreateCloseFileRequest(ushort tag, ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.CloseFile, new byte[] { (byte)(tag & 0xFF), (byte)((tag >> 8) & 0xFF) });
+        }
+
+        /// <summary>Creates a File Read request (0x0F/0xA7).</summary>
+        public static PCCCMessage CreateFileReadRequest(ushort tag, int offset, int bytesToRead, ushort tns, byte myNode, byte targetNode)
+        {
+            byte[] body = new byte[5];
+            body[0] = (byte)(tag & 0xFF);
+            body[1] = (byte)((tag >> 8) & 0xFF);
+            body[2] = (byte)(offset & 0xFF);
+            body[3] = (byte)((offset >> 8) & 0xFF);
+            body[4] = (byte)bytesToRead;
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.FileRead, body);
+        }
+
+        /// <summary>Creates a File Write request (0x0F/0xAF).</summary>
+        public static PCCCMessage CreateFileWriteRequest(ushort tag, int offset, byte[] data, ushort tns, byte myNode, byte targetNode)
+        {
+            byte[] body = new byte[5 + data.Length];
+            body[0] = (byte)(tag & 0xFF);
+            body[1] = (byte)((tag >> 8) & 0xFF);
+            body[2] = (byte)(offset & 0xFF);
+            body[3] = (byte)((offset >> 8) & 0xFF);
+            body[4] = (byte)data.Length;
+            Array.Copy(data, 0, body, 5, data.Length);
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.FileWrite, body);
+        }
+
+        /// <summary>Creates an Upload All Request (0x0F/0x53).</summary>
+        public static PCCCMessage CreateUploadAllRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.UploadAllRequest, Array.Empty<byte>());
+        }
+
+        /// <summary>Creates an Upload Completed request (0x0F/0x55).</summary>
+        public static PCCCMessage CreateUploadCompletedRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.UploadCompleted, Array.Empty<byte>());
+        }
+
+        /// <summary>Creates a Download All Request (0x0F/0x50).</summary>
+        public static PCCCMessage CreateDownloadAllRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.DownloadAllRequest, Array.Empty<byte>());
+        }
+
+        /// <summary>Creates a Download Completed request (0x0F/0x52).</summary>
+        public static PCCCMessage CreateDownloadCompletedRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.DownloadCompleted, Array.Empty<byte>());
+        }
+
+        /// <summary>Creates a Get Edit Resource request (0x0F/0x11).</summary>
+        public static PCCCMessage CreateGetEditResourceRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.SecureAccess, Array.Empty<byte>());
+        }
+
+        /// <summary>Creates a Return Edit Resource request (0x0F/0x12).</summary>
+        public static PCCCMessage CreateReturnEditResourceRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.ReleaseAccess, Array.Empty<byte>());
+        }
+
+        /// <summary>Creates an Apply Port Configuration request (0x0F/0x8F).</summary>
+        public static PCCCMessage CreateApplyPortConfigRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            // Four unused bytes as placeholder
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.ApplyPortConfig, new byte[] { 0, 0, 0, 0 });
+        }
+
+        /// <summary>Creates an Initialize Memory request (0x0F/0x57).</summary>
+        public static PCCCMessage CreateInitializeMemoryRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.InitializeMemory, Array.Empty<byte>());
+        }
+
+        /// <summary>Creates a Read Diagnostic Counters request (0x06/0x01).</summary>
+        public static PCCCMessage CreateReadDiagnosticCountersRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.DiagnosticStatus, 0, tns,
+                PCCCConstants.DiagnosticFnc.ReadCounters, new byte[] { 0, 0 });
+        }
+
+        /// <summary>Creates a Reset Diagnostic Counters request (0x06/0x07).</summary>
+        public static PCCCMessage CreateResetDiagnosticCountersRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.DiagnosticStatus, 0, tns,
+                PCCCConstants.DiagnosticFnc.ResetCounters, new byte[] { 0, 0 });
+        }
+
+        /// <summary>Creates a Read Link Parameters request (0x06/0x09).</summary>
+        public static PCCCMessage CreateReadLinkParamsRequest(ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.DiagnosticStatus, 0, tns,
+                PCCCConstants.DiagnosticFnc.ReadLinkParams, Array.Empty<byte>());
+        }
+
+        /// <summary>Creates a Set Link Parameters request (0x06/0x0A).</summary>
+        public static PCCCMessage CreateSetLinkParamsRequest(byte maxAddress, ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.DiagnosticStatus, 0, tns,
+                PCCCConstants.DiagnosticFnc.SetLinkParams, new byte[] { maxAddress });
+        }
+
+        /// <summary>Creates an Echo request (0x0F/0x00).</summary>
+        public static PCCCMessage CreateEchoRequest(byte[] data, ushort tns, byte myNode, byte targetNode)
+        {
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.Echo, data ?? Array.Empty<byte>());
+        }
     }
 }

@@ -130,6 +130,9 @@ public class PlcMemory
     private int _totalWrites = 0;
     private int _hotCacheHits = 0;
 
+    private const int DirectoryInternalType = 0xFF;
+    private const int DirectoryInternalNumber = 0xFF;
+
     // ─── Constructor ──────────────────────────────────────────────────────────
     /// <summary>
     /// Initializes the PLC memory with default file structures.
@@ -215,7 +218,7 @@ public class PlcMemory
         int addr = WriteDataFileEntries(dir, 0);
         WriteProgramFileEntries(dir, addr);
 
-        _files[(1, 0)] = dir;
+        _files[(DirectoryInternalType, DirectoryInternalNumber)] = dir;
     }
 
     /// <summary>
@@ -329,6 +332,8 @@ public class PlcMemory
         dir[pos + 3] = 0x00;
         pos += 10;
         _fileTypeByNumber[0] = 0x01;
+        _files[(0x01, 0)] = new byte[2];
+        _bytesPerElement[(0x01, 0)] = 0;
 
         // SYS file 1 — Reserved for future use (2 bytes)
         dir[pos]     = 0x01;
@@ -337,6 +342,8 @@ public class PlcMemory
         dir[pos + 3] = 0x01;
         pos += 10;
         _fileTypeByNumber[1] = 0x01;
+        _files[(0x01, 1)] = new byte[2];
+        _bytesPerElement[(0x01, 1)] = 0;
 
         // LAD files (active program files)
         // Sizes from .ACH disassembly (bytes)
@@ -795,6 +802,34 @@ public class PlcMemory
         totalWrites = Interlocked.CompareExchange(ref _totalWrites, 0, 0);
         hotCacheHits = Interlocked.CompareExchange(ref _hotCacheHits, 0, 0);
         hitRate = totalReads > 0 ? (double)hotCacheHits / totalReads * 100.0 : 0.0;
+    }
+
+    /// <summary>
+    /// Returns the raw directory file (type 0x01, number 0) bytes.
+    /// </summary>
+    public byte[] GetDirectory() 
+    => _files[(DirectoryInternalType, DirectoryInternalNumber)];
+
+    /// <summary>
+    /// Writes raw bytes to a file at a given byte offset (no element/bpe conversion).
+    /// Mirrors ReadRaw semantics. Used by FileWrite (0xAF) in the emulator.
+    /// </summary>
+    public bool WriteRaw(int fileType, int fileNumber, int byteOffset, int lengthInBytes, byte[] newData)
+    {
+        Interlocked.Increment(ref _totalWrites);
+        _rwLock.EnterWriteLock();
+        try
+        {
+            byte[]? data = Lookup(fileType, fileNumber);
+            if (data == null) return false;
+            if (byteOffset < 0 || byteOffset + lengthInBytes > data.Length) return false;
+            Array.Copy(newData, 0, data, byteOffset, Math.Min(newData.Length, lengthInBytes));
+            return true;
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
     }
 
     // =========================================================================

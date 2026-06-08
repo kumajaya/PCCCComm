@@ -110,6 +110,18 @@ public static class PCCCConstants
         // --- Echo -----------------------------------------------------------
         /// <summary>Echo command (0x00).</summary>
         public const byte Echo = 0x00;
+
+        // --- File-based upload/download (SLC 5/03 and newer) ---
+        public const byte OpenFile = 0x81;
+        public const byte CloseFile = 0x82;
+        public const byte DownloadAllRequest = 0x50;
+        public const byte UploadAllRequest = 0x53;   // alias for existing UploadAll (optional)
+        public const byte DownloadCompleted = 0x52;
+        public const byte UploadCompleted = 0x55;   // alias for UploadComplete
+        public const byte FileWrite = 0xAF;
+        public const byte FileRead = 0xA7;
+        public const byte ApplyPortConfig = 0x8F;
+        public const byte InitializeMemory = 0x57;
     }
 
     // ========================================================================
@@ -187,6 +199,17 @@ public static class PCCCConstants
         public const int RemoteRackFault = 0x122;
         public const int Timeout = 0x123;
         public const int UnknownError = 0x124;
+    }
+
+    /// <summary>
+    /// Function codes for Diagnostic Status command (CMD = 0x06).
+    /// </summary>
+    public static class DiagnosticFnc
+    {
+        public const byte ReadCounters = 0x01;
+        public const byte ResetCounters = 0x07;
+        public const byte ReadLinkParams = 0x09;
+        public const byte SetLinkParams = 0x0A;
     }
 
     // ========================================================================
