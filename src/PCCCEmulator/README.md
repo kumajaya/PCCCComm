@@ -1,14 +1,14 @@
 # PCCC Emulator with DF1 / EtherNet/IP transport
 
 **Purpose**  
-Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an SLC 5/03 PLC for testing DF1/EIP clients and RSLinx. This emulator does **not** depend on any external DF1 library – all DF1 framing, checksum (BCC/CRC), DLE stuffing, EIP/CIP encapsulation, and memory simulation are self‑contained.
+Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an SLC-5/04 PLC for testing DF1/EIP clients and RSLinx. This emulator does **not** depend on any external DF1 library – all DF1 framing, checksum (BCC/CRC), DLE stuffing, EIP/CIP encapsulation, and memory simulation are self‑contained.
 
 ## Features
 - **DF1 full‑duplex framing** with DLE STX / DLE ETX and DLE stuffing
 - **DF1 half‑duplex slave** for RS‑485 multi‑drop networks (polling, address filtering)
 - **EtherNet/IP (EIP/PCCC)** support – TCP port 44818, UDP broadcast ListIdentity
 - CRC‑16 (calculation as per AB specification) **default** – BCC (two's complement of byte sum) also supported
-- Get Status response crafted for SLC 5/03 (processor code `0x49`)
+- Get Status response crafted for SLC-5/04 (processor code `0x5B`)
 - Reads from File 0 (directory) and any data file listed in the directory
 - In‑memory PLC file store with pre‑defined files (O, I, S, B, N, F, T, C, R)
 - Configurable serial settings via command line
@@ -16,7 +16,7 @@ Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an
 - Configurable RS‑485 direction control (Auto/Rts/Dtr) for half‑duplex slave
 - Console logging of RX/TX hex for debugging
 - Independent – no external dependencies except `System.IO.Ports`
-- **Loads real SLC 5/03 program** from embedded .bin resource (converted from APS .ACH archive)
+- **Loads real SLC-5/04 program** from embedded .bin resource (converted from APS .ACH archive)
 - Contains 21 data files + 10 LAD files – bit‑exact copy of original PLC memory
 
 ## Requirements
@@ -41,7 +41,7 @@ dotnet run --project PCCCEmulator.csproj -- COM2
 Output:
 ```
 [MEM] PCCCEmulator.Resources.DBU550.bin
-      Size=9921 Magic=0xDF1A Ver=1 Type=0x49 SLC 5/03
+      Size=9921 Magic=0xDF1A Ver=1 Type=0x49 SLC 5/04
       Files=33 TS=2026-05-31 01:59:11
       Loaded: 21 data files, 10 program files
 PCCC PLC memory initialized with embedded program.
@@ -109,7 +109,7 @@ dotnet run --project PCCCEmulator.csproj -- COM2 --mode uic
 Output:
 ```
 [MEM] PCCCEmulator.Resources.DBU550.bin
-      Size=9921 Magic=0xDF1A Ver=1 Type=0x49 SLC 5/03
+      Size=9921 Magic=0xDF1A Ver=1 Type=0x49 SLC 5/04
       Files=33 TS=2026-05-31 01:59:11
       Loaded: 21 data files, 10 program files
 [MEM] PCCC PLC memory initialized with embedded program.
@@ -228,9 +228,9 @@ dotnet run --project ../Example/Example.csproj -- COM1 --mode df1master --target
 
 *RSLinx OPC Server accessing PCCCEmulator memory in the background*
 
-## Emulated SLC 5/03 Memory Layout
+## Emulated SLC-5/05 Memory Layout
 
-The emulator simulates a specific SLC 5/03 configuration with the following data files and program files.
+The emulator simulates a specific SLC-5/04 configuration with the following data files and program files.
 
 ### Data Files
 

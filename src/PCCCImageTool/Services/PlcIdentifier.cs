@@ -51,6 +51,13 @@ public static class PlcIdentifier
                 0x89 => ("SLC 5/02",        "SLC"),
                 0x8C => ("MicroLogix 1500", "MicroLogix"),
                 0x9C => ("SLC 5/05",        "SLC"),
+                0xB0 => ("SLC 5/05",        "SLC"),
+                0xB1 => ("SLC 5/05",        "SLC"),
+                0xB2 => ("SLC 5/05",        "SLC"),
+                0x0D => ("SLC 5/05",        "SLC"),
+                0x13 => ("SLC 5/05",        "SLC"),
+                0x14 => ("SLC 5/05",        "SLC"),
+                0x15 => ("SLC 5/05",        "SLC"),
                 0x58 => ("MicroLogix 1000", "MicroLogix"),
                 0x0B or 0x0E => ("PLC-5",   "PLC5"),
                 _    => ($"Unknown (0x{procType:X2})", "Unknown")

@@ -1102,11 +1102,11 @@ public class PCCCEmulator : IDisposable
         payload[0] = 0x00;      // Mode/status flags (no edits active)
         payload[1] = 0xEE;      // Type extender
         payload[2] = 0x34;      // Extended interface type (DF1 full-duplex)
-        payload[3] = 0x49;      // Extended processor type (SLC 5/03)
-        payload[4] = 0x22;      // Series/revision
+        payload[3] = 0x5B;      // Extended processor type (SLC-5/05)
+        payload[4] = 0x32;      // Series/revision
 
-        // Bulletin number "5/03" in ASCII, space-padded to 11 bytes (bytes 5–15)
-        string catalog = "5/03";
+        // Bulletin number "5/04" in ASCII, space-padded to 11 bytes (bytes 5–15)
+        string catalog = "5/04";
         byte[] catBytes = System.Text.Encoding.ASCII.GetBytes(catalog);
         Array.Copy(catBytes, 0, payload, 5, catBytes.Length);
         for (int i = 5 + catBytes.Length; i < 16; i++) payload[i] = 0x20;
@@ -1117,7 +1117,7 @@ public class PCCCEmulator : IDisposable
         payload[19] = 0x00;     // High byte (fault flags)
         payload[20] = 0x00;     // Program ID (low byte)
         payload[21] = 0x00;     // Program ID (high byte)
-        payload[22] = 0x20;     // RAM size in Kbytes — 0x20 = 32 KB (1747-L532E)
+        payload[22] = 0x40;     // RAM size in Kbytes — 0x40 = 64 KB (1747-L542)
         payload[23] = 0x3F;     // Flags (no program owner, directory not corrupted)
 
         return payload;

@@ -181,12 +181,12 @@ public partial class EIPTransport : ILinkTransport, IDisposable
     // The Identity Object attributes here are from RSLinx EDS files.
 
     private const ushort EIP_VENDOR_ID    = 0x0001; // Rockwell Automation / Allen-Bradley
-    private const ushort EIP_DEVICE_TYPE  = 0x000E; // General-Purpose Discrete I/O Controller
-    private const ushort EIP_PRODUCT_CODE = 0x000D; // SLC 5/05 (1747-L551 C)
-    private const byte   EIP_REV_MAJOR    = 19;     // Firmware major revision
-    private const byte   EIP_REV_MINOR    = 6;      // Firmware minor revision
+    private const ushort EIP_DEVICE_TYPE  = 0x000C; // Communication Adapter
+    private const ushort EIP_PRODUCT_CODE = 0x00B2; // SLC-5/05 (1747-L553/C)
+    private const byte   EIP_REV_MAJOR    = 3;     // Firmware major revision
+    private const byte   EIP_REV_MINOR    = 9;      // Firmware minor revision
     private const uint   EIP_SERIAL_NUM   = 0x600DCAFE; // Emulator serial number
-    private const string EIP_PRODUCT_NAME = "1747-L551 C SLC 5/05";
+    private const string EIP_PRODUCT_NAME = "1747-L553/C SLC-5/05";
 
     // Identity attribute bytes, built once at type initialisation.
     // Shared by List Identity, Get Attributes All, and Get Attribute Single replies.
