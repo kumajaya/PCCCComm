@@ -765,12 +765,6 @@ public class PCCCEmulator : IDisposable
                 SendEmptyResponse(src, tns, 0x4F, func, clientContext);
                 break;
 
-            // ─── Echo (0x0F/0x00) ────────────────────────────────────────────────
-            case 0x00:
-                // Echo back the same data that was sent.
-                SendDataResponse(src, tns, 0x4F, data, clientContext);
-                break;
-
             // ─── Initialize Memory (0x0F/0x57) ────────────────────────────────────
             case 0x57:
                 _memory.ResetToDefault();
@@ -788,6 +782,14 @@ public class PCCCEmulator : IDisposable
 
             case 0x68:  // Typed Read for PLC-5
                 HandleTypedReadRequest(src, tns, data, clientContext);
+                break;
+
+            case 0x00:  // Word Range Write for PLC-5
+                HandleWordRangeWrite(src, tns, data, clientContext);
+                break;
+
+            case 0x01:  // Word Range Read for PLC-5
+                HandleWordRangeRead(src, tns, data, clientContext);
                 break;
 
             default:
@@ -1187,6 +1189,11 @@ public class PCCCEmulator : IDisposable
     /// For simplicity, we assume type/data param is 0x31 (ID=3, size=1) and
     /// logical address is encoded as per EncodePlc5LogicalAddress.
     /// </summary>
+    /// <summary>
+    /// Handles Typed Write (CMD=0x0F, FNC=0x67) for PLC-5.
+    /// Payload: [typeParam 1B] [logical binary address (variable)] [elementCount 2B LE] [data...]
+    /// typeParam is skipped (assumed 0x31 — word array).
+    /// </summary>
     private void HandleTypedWriteRequest(int src, int tns, byte[] payload, object clientContext)
     {
         if (payload == null || payload.Length < 4)
@@ -1195,77 +1202,40 @@ public class PCCCEmulator : IDisposable
             return;
         }
 
-        int idx = 0;
-        // Skip type/data parameter (we assume it's 0x31 for byte array)
-        // In real implementation, we should parse it, but for emulator simplicity,
-        // we assume fixed format.
-        byte typeData = payload[idx++]; // expecting 0x31
-        // Decode logical binary address (variable length)
-        if (idx >= payload.Length)
+        int idx = 1; // skip typeParam byte
+        if (!Plc5AddressDecoder.Decode(payload, ref idx,
+                out int fileNumber, out int fileType, out int element, out int subElement))
         {
             SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
             return;
         }
-        byte maskByte = payload[idx++];
-        int levelCount = (maskByte >> 4) & 0x0F;
-        bool hasSubElement = (maskByte & 0x08) != 0;
-        int expectedLevels = hasSubElement ? 4 : 3;
-        if (levelCount != expectedLevels)
-        {
-            // For simplicity, we accept any level count; just parse what we have.
-        }
+        fileType = Plc5ToSlcFileType(fileType);
 
-        // Extract levels (up to 4)
-        int[] levels = new int[4];
-        for (int i = 0; i < levelCount && idx < payload.Length; i++)
-        {
-            if (payload[idx] == 0xFF && idx + 2 < payload.Length)
-            {
-                levels[i] = payload[idx + 1] | (payload[idx + 2] << 8);
-                idx += 3;
-            }
-            else
-            {
-                levels[i] = payload[idx++];
-            }
-        }
-
-        // Now read number of elements (2 bytes LE)
         if (idx + 2 > payload.Length)
         {
             SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
             return;
         }
-        int elementCount = payload[idx] | (payload[idx + 1] << 8);
-        idx += 2;
+        int elementCount = payload[idx] | (payload[idx + 1] << 8); idx += 2;
 
-        // Remaining bytes are data
         int dataBytes = payload.Length - idx;
-        if (dataBytes < elementCount) // each element is 1 byte in our assumed format
+        if (dataBytes < elementCount)
         {
             SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
             return;
         }
+
         byte[] data = new byte[dataBytes];
         Array.Copy(payload, idx, data, 0, dataBytes);
 
-        // Map levels to fileNumber, fileType, element, subElement
-        int fileNumber = levels[0];
-        int fileType = levels[1];
-        int element = levels[2];
-        int subElement = (levelCount >= 4) ? levels[3] : 0;
-
-        // Write data using existing Write method
         bool ok = _memory.Write(fileType, fileNumber, element, subElement, dataBytes, data);
-        if (ok)
-            SendEmptyResponse(src, tns, 0x4F, 0x67, clientContext);
-        else
-            SendErrorResponse(src, tns, 0x0F, 0x67, 0x10, clientContext);
+        if (ok) SendEmptyResponse(src, tns, 0x4F, 0x67, clientContext);
+        else    SendErrorResponse(src, tns, 0x0F, 0x67, 0x10, clientContext);
     }
 
     /// <summary>
     /// Handles Typed Read (CMD=0x0F, FNC=0x68) for PLC-5.
-    /// Assumes same logical address encoding as Typed Write.
+    /// Payload: [typeParam 1B] [logical binary address (variable)] [bytesToRead 2B LE]
     /// </summary>
     private void HandleTypedReadRequest(int src, int tns, byte[] payload, object clientContext)
     {
@@ -1275,56 +1245,216 @@ public class PCCCEmulator : IDisposable
             return;
         }
 
-        int idx = 0;
-        byte typeData = payload[idx++]; // skip type/data param (assume 0x31)
-        if (idx >= payload.Length)
+        int idx = 1; // skip typeParam byte
+        if (!Plc5AddressDecoder.Decode(payload, ref idx,
+                out int fileNumber, out int fileType, out int element, out int subElement))
         {
             SendErrorResponse(src, tns, 0x0F, 0x68, 0x01, clientContext);
             return;
         }
-        byte maskByte = payload[idx++];
-        int levelCount = (maskByte >> 4) & 0x0F;
-        bool hasSubElement = (maskByte & 0x08) != 0;
-        int expectedLevels = hasSubElement ? 4 : 3;
-        // Parse levels
-        int[] levels = new int[4];
-        for (int i = 0; i < levelCount && idx < payload.Length; i++)
-        {
-            if (payload[idx] == 0xFF && idx + 2 < payload.Length)
-            {
-                levels[i] = payload[idx + 1] | (payload[idx + 2] << 8);
-                idx += 3;
-            }
-            else
-            {
-                levels[i] = payload[idx++];
-            }
-        }
+        fileType = Plc5ToSlcFileType(fileType);
 
-        // Read element count (number of bytes to read)
         if (idx + 2 > payload.Length)
         {
             SendErrorResponse(src, tns, 0x0F, 0x68, 0x01, clientContext);
             return;
         }
         int bytesToRead = payload[idx] | (payload[idx + 1] << 8);
-        idx += 2;
 
-        int fileNumber = levels[0];
-        int fileType = levels[1];
-        int element = levels[2];
-        int subElement = (levelCount >= 4) ? levels[3] : 0;
-
-        int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
+        int bpe        = _memory.GetBytesPerElement(fileType, fileNumber);
         int byteOffset = element * bpe + subElement * 2;
 
         byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
-        if (status == 2)
-            SendErrorResponse(src, tns, 0x0F, 0x68, 0x50, clientContext);
-        else if (status != 0)
-            SendErrorResponse(src, tns, 0x0F, 0x68, 0x10, clientContext);
+        if      (status == 2) SendErrorResponse(src, tns, 0x0F, 0x68, 0x50, clientContext);
+        else if (status != 0) SendErrorResponse(src, tns, 0x0F, 0x68, 0x10, clientContext);
+        else                  SendDataResponse(src, tns, 0x4F, data, clientContext);
+    }
+
+    /// <summary>
+    /// Handles Word Range Read (CMD=0x0F, FNC=0x01).
+    /// Supports PLC-5 standard (logical binary/ASCII) and RSLinx fixed 10-byte format.
+    /// </summary>
+    private void HandleWordRangeRead(int src, int tns, byte[] payload, object clientContext)
+    {
+        if (payload == null || payload.Length < 8)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext);
+            return;
+        }
+
+        if (!TryDecodeWordRangeAddress(payload,
+                out int fileNumber, out int fileType,
+                out int element,    out int subElement,
+                out int wordOffset, out int sizeWords,
+                out _))
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext);
+            return;
+        }
+
+        int bpe         = _memory.GetBytesPerElement(fileType, fileNumber);
+        int byteOffset  = wordOffset * 2 + element * bpe + subElement * 2;
+        int bytesToRead = sizeWords * 2;
+        int fileSize    = _memory.GetFileSize(fileType, fileNumber);
+
+        if (fileSize == 0)                                         { SendErrorResponse(src, tns, 0x0F, 0x01, 0x50, clientContext); return; }
+        if (byteOffset < 0 || byteOffset + bytesToRead > fileSize) { SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext); return; }
+
+        byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
+        if (status != 0 || data.Length != bytesToRead)             { SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext); return; }
+
+        SendDataResponse(src, tns, 0x4F, data, clientContext);
+    }
+
+    /// <summary>
+    /// Handles Word Range Write (CMD=0x0F, FNC=0x00) for PLC-5.
+    /// See <see cref="TryDecodeWordRangeAddress"/> for supported wire formats.
+    /// </summary>
+    private void HandleWordRangeWrite(int src, int tns, byte[] payload, object clientContext)
+    {
+        if (!TryDecodeWordRangeAddress(payload,
+                out int fileNumber, out int fileType,
+                out int element,    out int subElement,
+                out int wordOffset, out int sizeWords,
+                out int dataStart))
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+            return;
+        }
+
+        int bytesToWrite = sizeWords * 2;
+        if (payload.Length < dataStart + bytesToWrite)             { SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext); return; }
+
+        byte[] writeData = new byte[bytesToWrite];
+        Array.Copy(payload, dataStart, writeData, 0, bytesToWrite);
+
+        int bpe        = _memory.GetBytesPerElement(fileType, fileNumber);
+        int byteOffset = wordOffset * 2 + element * bpe + subElement * 2;
+        int fileSize   = _memory.GetFileSize(fileType, fileNumber);
+
+        if (fileSize == 0)                                          { SendErrorResponse(src, tns, 0x0F, 0x00, 0x50, clientContext); return; }
+        if (byteOffset < 0 || byteOffset + bytesToWrite > fileSize) { SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext); return; }
+
+        bool ok = _memory.WriteRaw(fileType, fileNumber, byteOffset, bytesToWrite, writeData);
+        if (ok) SendEmptyResponse(src, tns, 0x4F, 0x00, clientContext);
+        else    SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+    }
+
+    /// <summary>
+    /// Translates a PLC-5 wire file type code (1770-6.5.16 Table 13-1) to the
+    /// SLC 500 / DF1 file type code used internally by PlcMemory.
+    /// Returns the input unchanged if it is already an SLC 500 code (>= 0x80)
+    /// or has no known PLC-5 equivalent.
+    ///
+    /// PLC-5 → SLC 500 mapping:
+    ///   0x00 O  → 0x8B    0x01 I  → 0x8C    0x02 S  → 0x84    0x03 B  → 0x85
+    ///   0x04 T  → 0x86    0x05 C  → 0x87    0x06 R  → 0x88    0x07 N  → 0x89
+    ///   0x08 F  → 0x8A    0x09 D  → 0x89*   0x0A ST → 0x8D
+    ///   (*BCD has no direct SLC equivalent; mapped to Integer as closest fit)
+    /// </summary>
+    private static int Plc5ToSlcFileType(int t) => t switch
+    {
+        0x00 => 0x8B,   // O — Output image
+        0x01 => 0x8C,   // I — Input image
+        0x02 => 0x84,   // S — Status
+        0x03 => 0x85,   // B — Bit
+        0x04 => 0x86,   // T — Timer        (6 bytes/elem)
+        0x05 => 0x87,   // C — Counter      (6 bytes/elem)
+        0x06 => 0x88,   // R — Control      (6 bytes/elem)
+        0x07 => 0x89,   // N — Integer      (2 bytes/elem)
+        0x08 => 0x8A,   // F — Float        (4 bytes/elem)
+        0x09 => 0x89,   // D — BCD (no SLC equivalent, map to Integer)
+        0x0A => 0x8D,   // ST — String      (84 bytes/elem)
+        _    => t       // already SLC 500 code (>= 0x80) or unrecognised — pass through
+    };
+
+    /// <summary>
+    /// Parses the address portion of a Word Range Read/Write payload and returns the
+    /// resolved file coordinates and the index of the first data byte.
+    ///
+    /// Two wire formats are handled:
+    ///
+    ///   A) PLC-5 standard (1770-6.5.16 §7-8)
+    ///      [wordOffset 2B LE] [totalTrans 2B LE — ignored]
+    ///      [logical address — binary or ASCII (variable)]
+    ///      [sizeWords 2B LE]
+    ///
+    ///   B) RSLinx flat 10-byte header (observed from DF1 capture)
+    ///      [00 00] [sizeWords 1B] [00]
+    ///      [fileNum 2B LE] [fileType 1B] [element 1B] [subElement 1B] [byteCount 1B]
+    ///
+    ///   Format is identified by inspecting the candidate mask byte at payload[4]:
+    ///   a valid PLC-5 binary address mask has level count 2–4 in bits [7:4].
+    ///   RSLinx flat format has fileNum_hi (0x00) there, giving level count 0.
+    ///
+    /// fileType is always returned as an SLC 500 code (translated via Plc5ToSlcFileType).
+    /// On success, <paramref name="dataStart"/> points to the first write-data byte
+    /// (for Read, it points past the end of the address fields — not used).
+    /// </summary>
+    private bool TryDecodeWordRangeAddress(
+        byte[] payload,
+        out int fileNumber, out int fileType,
+        out int element,    out int subElement,
+        out int wordOffset, out int sizeWords,
+        out int dataStart)
+    {
+        fileNumber = fileType = element = subElement = wordOffset = sizeWords = dataStart = 0;
+        if (payload == null || payload.Length < 8) return false;
+
+        // Discriminate by the candidate mask byte at payload[4].
+        // Standard format: payload[4] is the binary address mask byte, level count 2–4.
+        // RSLinx flat:     payload[4] is fileNum_hi (0x00), level count = 0.
+        // ASCII marker:    payload[4] == 0x00 && payload[5] == 0x24 ('$').
+        int levelCount = (payload[4] >> 4) & 0x0F;
+        bool isStandard = (levelCount >= 2 && levelCount <= 4)
+                          || (payload[4] == 0x00 && payload.Length > 5 && payload[5] == 0x24);
+
+        if (isStandard)
+        {
+            // --- Format A: PLC-5 standard ---
+            if (payload.Length < 9) return false;
+
+            int idx = 0;
+            wordOffset = payload[idx] | (payload[idx + 1] << 8); idx += 2;
+            idx += 2; // skip totalTrans — not used
+
+            bool ok = (payload[idx] == 0x00 && idx + 1 < payload.Length && payload[idx + 1] == 0x24)
+                ? Plc5AddressDecoder.TryParseAsciiAddress(payload, ref idx,
+                      out fileNumber, out fileType, out element, out subElement)
+                : Plc5AddressDecoder.Decode(payload, ref idx,
+                      out fileNumber, out fileType, out element, out subElement);
+            if (!ok) return false;
+
+            if (idx + 2 > payload.Length) return false;
+            sizeWords = payload[idx] | (payload[idx + 1] << 8); idx += 2;
+            dataStart = idx;
+        }
         else
-            SendDataResponse(src, tns, 0x4F, data, clientContext);
+        {
+            // --- Format B: RSLinx flat 10-byte header ---
+            // [00 00] [sizeWords 1B] [00] [fileNum 2B LE] [fileType 1B] [element 1B] [sub 1B] [byteCount 1B]
+            if (payload.Length < 10) return false;
+
+            wordOffset = 0;
+            sizeWords  = payload[2];
+            // payload[3]    = 0x00 padding
+            // payload[4..5] = 0x0F 0x00 (unknown constant, ignored)
+            fileNumber  = payload[6];
+            element     = payload[7];
+            subElement  = payload[8];
+            int byteCount = payload[9];
+
+            // Resolve fileType from fileNumber — PlcMemory is authoritative
+            fileType  = _memory.GetFileTypeForNumber(fileNumber);
+            if (fileType == 0) return false;   // file not registered
+
+            dataStart = 10;
+            Logger.Info(this, $"WR flat format: file={fileNumber} type=0x{fileType:X2} elem={element} words={sizeWords}");
+        }
+
+        // Normalize PLC-5 wire codes to SLC 500 internal codes used by PlcMemory
+        fileType = Plc5ToSlcFileType(fileType);
+        return sizeWords > 0;
     }
 
     // ─── Response Helpers ────────────────────────────────────────────────────

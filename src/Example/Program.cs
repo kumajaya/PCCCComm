@@ -1448,7 +1448,6 @@ class Program
         SelfTest_StringReadWrite(pccc);
         SelfTest_BoundaryConditions(pccc);
         SelfTest_ProcessorMode(pccc);
-        SelfTest_Echo(pccc);
         SelfTest_InitializeMemory(pccc);
         SelfTest_LinkParameters(pccc);
         SelfTest_ReadModifyWrite(pccc);
@@ -1978,41 +1977,7 @@ class Program
         }
     }
 
-    // ── Test group 12: Echo command ─────────────────────────────────────────
-    private static void SelfTest_Echo(Comm.PCCCComm pccc)
-    {
-        Console.WriteLine("── Echo Test ──────────────────────────────────────");
-        byte[] testData = { 0x01, 0x02, 0x03, 0xAA, 0xBB, 0xCC };
-        // Build PDU: DST, SRC, CMD, STS, TNS_LO, TNS_HI, FNC, data...
-        byte[] pdu = new byte[7 + testData.Length];
-        pdu[0] = (byte)pccc.TargetNode;
-        pdu[1] = (byte)pccc.MyNode;
-        pdu[2] = 0x0F;
-        pdu[3] = 0x00;
-        pdu[4] = 0x00; // TNS low (library will assign)
-        pdu[5] = 0x00; // TNS high
-        pdu[6] = 0x00; // Echo FNC
-        Array.Copy(testData, 0, pdu, 7, testData.Length);
-
-        var (status, response, _) = pccc.SendRawPduAndGetResponse(pdu);
-        bool ok = status == 0 && response != null && response.Length >= 6 + testData.Length;
-        if (ok && response != null)
-        {
-            // Extract data from response (skip DST,SRC,CMD,STS,TNS,FNC? depends on withFunc)
-            // For Echo, response should have FUNC byte (0x00) and data
-            const int dataStart = 6; // no FNC byte in Echo reply
-            if (response.Length > dataStart + testData.Length - 1)
-            {
-                byte[] respData = new byte[testData.Length];
-                Array.Copy(response, dataStart, respData, 0, testData.Length);
-                ok = respData.SequenceEqual(testData);
-            }
-            else ok = false;
-        }
-        TestResult("Echo returns same data", ok, ok ? "" : status != 0 ? $"status {status}" : "data mismatch");
-    }
-
-     // ── Test group 13: Initialize Memory ────────────────────────────────────
+     // ── Test group 12: Initialize Memory ────────────────────────────────────
     private static void SelfTest_InitializeMemory(Comm.PCCCComm pccc)
     {
         Console.WriteLine("── Initialize Memory Test ─────────────────────────");
@@ -2056,7 +2021,7 @@ class Program
         TestResult("ST18:2 reset to empty after InitializeMemory", st18ok, st18ok ? "" : $"got {st18val}");
     }
 
-    // ── Test group 14: Link Parameters (DH485) ──────────────────────────────
+    // ── Test group 13: Link Parameters (DH485) ──────────────────────────────
     private static void SelfTest_LinkParameters(Comm.PCCCComm pccc)
     {
         Console.WriteLine("── Link Parameters Test ───────────────────────────");
@@ -2106,7 +2071,7 @@ class Program
         return pdu;
     }
 
-    // ── Test group 15: Read-Modify-Write (FNC 0x26) ─────────────────────────
+    // ── Test group 14: Read-Modify-Write (FNC 0x26) ─────────────────────────
     private static void SelfTest_ReadModifyWrite(Comm.PCCCComm pccc)
     {
         Console.WriteLine("── Read-Modify-Write Test ─────────────────────────");
