@@ -297,6 +297,7 @@ public static class PCCCConstants
         Message    = 0x92,
         Pid        = 0x93,
         Pls        = 0x94,
+        DataMonitor = 0xA4,   // Data Monitor File type (0xA4)
     }
 
     public static class SlcFileTypeInfo
@@ -310,6 +311,7 @@ public static class PCCCConstants
             SlcFileTypeCode.Message => 50,
             SlcFileTypeCode.Pid => 46,
             SlcFileTypeCode.Pls => 12,
+            SlcFileTypeCode.DataMonitor => 40,
             _ => 2
         };
 
@@ -359,6 +361,12 @@ public static class PCCCConstants
         /// <summary>Maximum bytes per physical write = 238.</summary>
         public const int MaxPhysicalWriteBytes = 238;
         public const int MaxReadModifyWriteBodyBytes = 243;
+        /// <summary>Maximum read payload for Data Monitor File (0xA4) = 120 bytes (0x78).</summary>
+        public const int MaxDataMonitorReadBytes = 0x78;
+        /// <summary>Maximum write payload for Data Monitor File (0xA4) = 120 bytes (0x78).</summary>
+        public const int MaxDataMonitorWriteBytes = 0x78;
+        /// <summary>Bytes per element for Data Monitor File (0xA4) = 40 bytes (0x28).</summary>
+        public const int DataMonitorElementBytes = 0x28;
     }
 
     // ========================================================================

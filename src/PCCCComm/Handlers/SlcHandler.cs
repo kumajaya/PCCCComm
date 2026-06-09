@@ -30,6 +30,8 @@ namespace PCCCComm.Handlers;
 /// PCCC protocol handler for SLC 500 and MicroLogix families.
 /// Implements Protected Typed Logical Read/Write (FNC 0xA1/0xA2, 0xAA) and
 /// SLC-specific upload/download procedures.
+/// 
+/// Reference: Allen‑Bradley Publication 1770‑6.5.16 (DF1 Protocol and Command Set)
 /// </summary>
 public class SlcHandler : IPlcHandler
 {
@@ -59,33 +61,62 @@ public class SlcHandler : IPlcHandler
     
     private void OnFileProgress(PCCCComm.FileProgressEventArgs e) => _context.RaiseFileProgress(e);
 
-    // ─── Private Helper Methods (copied from PCCCComm) ────────────────────
+    // ─── Private Helper Methods ────────────────────────────────────────────
+
+    private bool IsMicroLogixFamily => _processorType switch
+    {
+        (byte)PCCCConstants.ProcessorTypeCode.ML1000 or
+        (byte)PCCCConstants.ProcessorTypeCode.ML1100 or
+        (byte)PCCCConstants.ProcessorTypeCode.ML1200 or
+        (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP or
+        (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP => true,
+        _ => false
+    };
+
+    private bool IsMicroLogix1000 => _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000;
     
-    /// <summary>
+     /// <summary>
     /// Reads raw data from the PLC with automatic chunking.
-    /// Original method from PCCCComm.
+    /// This method handles the DF1 protocol's maximum payload limits and processor-specific
+    /// restrictions (SLC 5/02 80-byte limit, string files 168-byte limit, timer/counter 234-byte limit,
+    /// MicroLogix 1000 95-byte limit, Data Monitor File 0xA4 120-byte limit).
+    /// 
+    /// Original method from DF1Comm.vb (ReadRawData). The implementation respects the
+    /// Df1Limits constants defined in PCCCConstants.
+    /// 
+    /// Reference: AB Publication 1770-6.5.16, Chapter 7 (Protected Typed Logical Read)
     /// </summary>
     private byte[] ReadRawDataWithChunking(ref DataAddress addr, int numberOfBytes, out int finalStatus)
     {
-        // [COPY EXACT IMPLEMENTATION FROM PCCCComm.ReadRawDataWithChunking]
-        // Replace:
-        //   _protocol! -> _protocol
-        //   MyNode/TargetNode -> properties
-        //   _processorType -> _processorType
-        //   _disableEvent -> not used here
         finalStatus = 0;
         int filePosition = 0;
         byte[] result = new byte[numberOfBytes];
 
+        // Determine processor-specific maximum read chunk size
+        int maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadBytes; // 236 default
+        if (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000)
+            maxReadChunk = 95; // MicroLogix 1000 limit per AB specification
+
         while (filePosition < numberOfBytes && finalStatus == 0)
         {
-            int toRead = Math.Min(numberOfBytes - filePosition, PCCCConstants.Df1Limits.MaxReadPayloadBytes);
+            int toRead = Math.Min(numberOfBytes - filePosition, maxReadChunk);
+            
+            // String file (ST) restriction: max 168 bytes (two elements) per read
             if (toRead > PCCCConstants.Df1Limits.MaxStringReadBytes && addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
                 toRead = PCCCConstants.Df1Limits.MaxStringReadBytes;
+            
+            // Timer/Counter file restriction: read in multiples of 6 bytes, max 234 bytes
             if (toRead > PCCCConstants.Df1Limits.MaxTimerCounterReadBytes && (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
                 toRead = PCCCConstants.Df1Limits.MaxTimerCounterReadBytes;
+            
+            // SLC 5/02 limitation: max 0x50 (80) bytes per read
             if (toRead > PCCCConstants.Df1Limits.MaxSlc502ReadBytes && _processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502)
                 toRead = PCCCConstants.Df1Limits.MaxSlc502ReadBytes;
+            
+            // Data Monitor File (type 0xA4) limitation: max 0x78 (120) bytes per read
+            if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.DataMonitor && toRead > PCCCConstants.Df1Limits.MaxDataMonitorReadBytes)
+                toRead = PCCCConstants.Df1Limits.MaxDataMonitorReadBytes;
+            
             if (toRead <= 0) break;
 
             var req = PCCCMessage.CreateReadRequest(addr, toRead, 0, (byte)MyNode, (byte)TargetNode);
@@ -100,20 +131,28 @@ public class SlcHandler : IPlcHandler
             Array.Copy(reply.Data, 0, result, filePosition, bytesRead);
             filePosition += bytesRead;
 
+            // Advance address pointer for next chunk
             const byte stringFileType = (byte)PCCCConstants.SlcFileTypeCode.String; // 0x8D, 84 bytes per element
-            const int stringElementBytes = 84; // size of one ST file element
+            const int stringElementBytes = 84;
 
             if (addr.FileType == stringFileType)
-                addr.Element += toRead / stringElementBytes; // move to next string element
+                addr.Element += toRead / stringElementBytes;
+            else if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.DataMonitor)
+                addr.Element += toRead / PCCCConstants.Df1Limits.DataMonitorElementBytes;
             else
-                addr.SubElement += toRead / 2;               // move by words (2 bytes each)
+                addr.SubElement += toRead / 2; // move by words (2 bytes each)
         }
         return result;
     }
 
     /// <summary>
     /// Writes raw data to the PLC with automatic chunking.
-    /// Original method from PCCCComm.
+    /// Handles DF1 protocol's maximum write payload (164 bytes) and special file type restrictions,
+    /// including MicroLogix 1000 89-byte limit and Data Monitor File 0xA4 120-byte limit.
+    /// 
+    /// Original method from DF1Comm.vb (WriteRawData).
+    /// 
+    /// Reference: AB Publication 1770-6.5.16, Chapter 7 (Protected Typed Logical Write)
     /// </summary>
     private int WriteRawDataWithChunking(DataAddress addr, byte[] dataToWrite)
     {
@@ -121,10 +160,21 @@ public class SlcHandler : IPlcHandler
         int filePosition = 0;
         int reply = 0;
 
+        // Determine processor-specific maximum write chunk size
+        int maxWriteChunk = PCCCConstants.Df1Limits.MaxWritePayloadBytes; // 164 default
+        if (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000)
+            maxWriteChunk = 89; // MicroLogix 1000 limit per AB specification
+
         while (filePosition < dataToWrite.Length && reply == 0)
         {
-            int toWrite = Math.Min(dataToWrite.Length - filePosition, PCCCConstants.Df1Limits.MaxWritePayloadBytes);
-            if (addr.FileType >= 0xA1 && toWrite > 0x78) toWrite = 0x78;
+            int toWrite = Math.Min(dataToWrite.Length - filePosition, maxWriteChunk);
+            
+            // Special case for file types >= 0xA1 (including Data Monitor File 0xA4) – limit to 120 bytes (0x78)
+            // This matches the original DF1Comm.vb behavior
+            if (addr.FileType >= 0xA1 && toWrite > PCCCConstants.Df1Limits.MaxDataMonitorWriteBytes) 
+                toWrite = PCCCConstants.Df1Limits.MaxDataMonitorWriteBytes;
+            
+            // Note: Data Monitor File (type 0xA4) also has 0x28 byte element size; the above condition already handles the 120 limit
 
             var req = PCCCMessage.CreateWriteRequest(addr, dataToWrite, filePosition, toWrite, 0, (byte)MyNode, (byte)TargetNode);
             
@@ -141,11 +191,14 @@ public class SlcHandler : IPlcHandler
                 filePosition += toWrite;
             }
 
+            // Advance address pointer
             const byte stringFileType = (byte)PCCCConstants.SlcFileTypeCode.String;
             const int stringElementBytes = 84;
 
             if (addr.FileType == stringFileType)
                 addr.Element += toWrite / stringElementBytes;
+            else if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.DataMonitor)
+                addr.Element += toWrite / PCCCConstants.Df1Limits.DataMonitorElementBytes;
             else
                 addr.SubElement += toWrite / 2;
         }
@@ -154,9 +207,18 @@ public class SlcHandler : IPlcHandler
     }
 
     /// <summary>
-    /// Reads the file directory (file zero data) from the processor.
-    /// Original method from PCCCComm.
+    /// Reads the file directory (File 0) from the processor.
+    /// This directory contains metadata about all program and data files.
+    /// 
+    /// Original method from DF1Comm.vb (ReadFileDirectory).
+    /// The offset and file type vary by processor type:
+    ///   - SLC 5/02 and ML1000: file type 0, element 0x23
+    ///   - ML1100/1200/1500: file type 2, element 0x2F
+    ///   - Others (SLC 5/03+): file type 1, element 0x23
+    /// 
+    /// Reference: AB Publication 1770-6.5.16, Chapter 10 (File Directory structure)
     /// </summary>
+    /// <returns>Raw directory data bytes</returns>
     private byte[] ReadFileDirectory()
     {
         // Ensure processor type is known
@@ -184,9 +246,11 @@ public class SlcHandler : IPlcHandler
                 break;
         }
 
+        // Step 1: Read the directory size (2 bytes at the specified offset)
         byte[] data = ReadRawDataWithChunking(ref pAddr, 2, out int reply);
         if (reply != 0) throw new PCCCException("Failed to Get Program Directory Size - " + PCCCErrors.DecodeStatus(reply));
 
+        // Step 2: Read the entire directory using the size obtained above
         pAddr.Element = 0;
         pAddr.SubElement = 0;
         int size = data[0] + data[1] * 256;
@@ -195,6 +259,9 @@ public class SlcHandler : IPlcHandler
         return fzd;
     }
 
+    /// <summary>
+    /// Converts a file type code to bytes per element and human-readable type name.
+    /// </summary>
     private static int FileTypeToBytesPerElement(byte code, out string fileTypeStr)
     {
         var type = (PCCCConstants.SlcFileTypeCode)code;
@@ -202,7 +269,14 @@ public class SlcHandler : IPlcHandler
         return PCCCConstants.SlcFileTypeInfo.GetBytesPerElement(type);
     }
 
-    // ─── Helper to detect file-based transfer support ──────────────────────
+    /// <summary>
+    /// Determines whether the processor supports file-based transfer (OpenFile/FileRead/FileWrite).
+    /// Supported processors: SLC 5/03, 5/04, 5/05, MicroLogix 1100, 1200, 1500.
+    /// 
+    /// For unsupported processors (SLC 5/01, 5/02, ML1000), physical-based upload/download is used.
+    /// 
+    /// Reference: AB Publication 1770-6.5.16, Chapter 12 (Upload/Download procedures)
+    /// </summary>
     private bool SupportsFileBasedTransfer()
     {
         return _processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC503 ||
@@ -215,11 +289,12 @@ public class SlcHandler : IPlcHandler
     }
 
     // ─── Public API Implementation ─────────────────────────────────────────
-    // (Existing public methods from original are kept as is, they are already implemented)
     
     /// <summary>
     /// Gets the processor type code.
-    /// Original documentation: Returns the processor type code (e.g., 0x49 for SLC 5/03).
+    /// Returns the processor type code (e.g., 0x49 for SLC 5/03, 0x5B for SLC 5/04, 0x58 for ML1000).
+    /// 
+    /// Original method from DF1Comm.vb (GetProcessorType).
     /// </summary>
     public int GetProcessorType()
     {
@@ -227,6 +302,12 @@ public class SlcHandler : IPlcHandler
         return _processorType;
     }
 
+    /// <summary>
+    /// Returns raw diagnostic status data (24 bytes) from the processor.
+    /// This data includes processor type, mode, catalog string, and RAM size.
+    /// 
+    /// Reference: AB Publication 1770-6.5.16, Chapter 10
+    /// </summary>
     public byte[]? GetDiagnosticStatusRaw()
     {
         var req = PCCCMessage.CreateDiagnosticStatusRequest(0, (byte)MyNode, (byte)TargetNode);
@@ -236,22 +317,74 @@ public class SlcHandler : IPlcHandler
         return reply.Data;
     }
 
+    /// <summary>
+    /// Places the processor in Run mode.
+    /// For MicroLogix 1000: uses FNC 0x3A with mode value 2.
+    /// For other SLC/ML processors: uses FNC 0x80 with mode value 6 (Remote Run).
+    /// 
+    /// Original method from DF1Comm.vb (SetRunMode).
+    /// 
+    /// Reference: AB Publication 1770-6.5.16, page 7-5 (Change Mode) and page 7-26 (Set CPU Mode)
+    /// </summary>
     public void SetRunMode()
     {
-        if (_processorType == 0)
-            _processorType = GetProcessorType();
-        bool isMl = (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000);
-        _protocol.SetRunMode(isMl, (byte)MyNode, (byte)TargetNode);
+        byte modeValue;
+        bool useFnc3A; // true = FNC 0x3A, false = FNC 0x80
+
+        if (IsMicroLogixFamily)
+        {
+            useFnc3A = true;
+            modeValue = 0x02; // Remote Run untuk semua MicroLogix
+        }
+        else
+        {
+            useFnc3A = false;
+            modeValue = 0x06; // Remote Run untuk SLC
+        }
+
+        var req = PCCCMessage.CreateChangeModeRequest(modeValue, useFnc3A, 0, (byte)MyNode, (byte)TargetNode);
+        _protocol.SendRequest(req, out int sts);
+        if (sts != PCCCConstants.Sts.Success)
+            throw new PCCCException($"SetRunMode failed: {PCCCErrors.DecodeStatus(sts)}");
     }
 
+    /// <summary>
+    /// Places the processor in Program mode.
+    /// For MicroLogix 1000: uses FNC 0x3A with mode value 0.
+    /// For other SLC/ML processors: uses FNC 0x80 with mode value 1 (Remote Program).
+    /// 
+    /// Original method from DF1Comm.vb (SetProgramMode).
+    /// </summary>
     public void SetProgramMode()
     {
-        if (_processorType == 0)
-            _processorType = GetProcessorType();
-        bool isMl = (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000);
-        _protocol.SetProgramMode(isMl, (byte)MyNode, (byte)TargetNode);
+        byte modeValue;
+        bool useFnc3A;
+
+        if (IsMicroLogix1000)
+        {
+            useFnc3A = true;
+            modeValue = 0x00; // Program/Load untuk ML1000 (local program)
+        }
+        else if (IsMicroLogixFamily)
+        {
+            useFnc3A = true;
+            modeValue = 0x01; // Remote Program untuk ML1100/1200/1500
+        }
+        else
+        {
+            useFnc3A = false;
+            modeValue = 0x01; // Remote Program untuk SLC
+        }
+
+        var req = PCCCMessage.CreateChangeModeRequest(modeValue, useFnc3A, 0, (byte)MyNode, (byte)TargetNode);
+        _protocol.SendRequest(req, out int sts);
+        if (sts != PCCCConstants.Sts.Success)
+            throw new PCCCException($"SetProgramMode failed: {PCCCErrors.DecodeStatus(sts)}");
     }
 
+    /// <summary>
+    /// Sets the CPU mode using a raw mode value via FNC 0x80 (Change Mode).
+    /// </summary>
     public int SetCpuMode(byte modeValue)
     {
         var req = PCCCMessage.CreateChangeModeRequest(modeValue, false, 0, (byte)MyNode, (byte)TargetNode);
@@ -259,6 +392,13 @@ public class SlcHandler : IPlcHandler
         return sts;
     }
 
+    /// <summary>
+    /// Returns 1 if the processor is in Run mode, 0 otherwise.
+    /// Reads diagnostic status and checks byte 18 (mode code).
+    /// Run mode codes: 0x06 (Remote Run) or 0x1E (Local Run).
+    /// 
+    /// Reference: AB Publication 1770-6.5.16, Chapter 10 (Status Bytes)
+    /// </summary>
     public int GetRunMode()
     {
         var req = PCCCMessage.CreateDiagnosticStatusRequest(0, (byte)MyNode, (byte)TargetNode);
@@ -269,6 +409,7 @@ public class SlcHandler : IPlcHandler
         return (modeCode == 0x06 || modeCode == 0x1E) ? 1 : 0;
     }
 
+    /// <summary>Disables forces on the processor (CMD=0x0F, FNC=0x41).</summary>
     public int DisableForces()
     {
         var req = PCCCMessage.CreateDisableForcesRequest(0, (byte)MyNode, (byte)TargetNode);
@@ -276,23 +417,35 @@ public class SlcHandler : IPlcHandler
         return sts;
     }
 
+    /// <summary>Enables forces on the processor (CMD=0x0F, FNC=0x42).</summary>
     public void EnableForces()
     {
         _protocol.EnableForces((byte)MyNode, (byte)TargetNode);
     }
 
+    /// <summary>Clears all forces on the processor (CMD=0x0F, FNC=0x43).</summary>
     public void ClearForces()
     {
         _protocol.ClearForces((byte)MyNode, (byte)TargetNode);
     }
 
+    // ─── Read/Write Operations ─────────────────────────────────────────────
+
     /// <summary>
     /// Reads data from the specified address and returns it as strings.
-    /// Supports integer, float, string, timer/counter, and bit-level addressing.
+    /// Supports integer, float, string, timer/counter, long, message, and bit-level addressing.
+    /// 
+    /// Original method from DF1Comm.vb (ReadAny).
+    /// 
+    /// Example addresses:
+    ///   "N7:0"        – read integer at N7:0
+    ///   "F8:0"        – read float at F8:0
+    ///   "ST9:0"       – read string at ST9:0
+    ///   "T4:0.ACC"    – read timer accumulator
+    ///   "B3:0/5"      – read bit 5 of B3:0
     /// </summary>
     public string[] ReadAny(string startAddress, int numberOfElements)
     {
-        // Implementation unchanged
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
@@ -308,6 +461,7 @@ public class SlcHandler : IPlcHandler
         int numberOfBytes = (arrayElements + 1) * bytesPerElem;
 
         // Special adjustment for timer/counter sub-element reads
+        // When reading multiple ACC or PRE values, each element is 2 bytes, but the underlying file has 6 bytes per element
         if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
             numberOfBytes = (numberOfBytes * 3) - 4;
 
@@ -325,6 +479,7 @@ public class SlcHandler : IPlcHandler
                     result[i] = BitConverter.ToSingle(returnedData, i * 4).ToString();
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.String:
+                // SLC string format: bytes 0-1 = length (LE), bytes 2-83 = character data (ASCII)
                 for (int i = 0; i <= arrayElements; i++)
                 {
                     int strLen = BitConverter.ToInt16(returnedData, i * 84);
@@ -361,7 +516,7 @@ public class SlcHandler : IPlcHandler
                 break;
         }
 
-        // Bit-level extraction
+        // Bit-level extraction (for addresses like "B3:0/5")
         if (p.BitNumber >= 0 && p.BitNumber < 16)
         {
             string[] bitResult = new string[numberOfElements];
@@ -377,8 +532,10 @@ public class SlcHandler : IPlcHandler
         return result;
     }
 
+    /// <summary>Reads a single element from the specified address.</summary>
     public string ReadAny(string startAddress) => ReadAny(startAddress, 1)[0];
 
+    /// <summary>Reads integer values from the specified address.</summary>
     public int[] ReadInt(string startAddress, int numberOfElements)
     {
         string[] result = ReadAny(startAddress, numberOfElements);
@@ -387,6 +544,15 @@ public class SlcHandler : IPlcHandler
         return ints;
     }
 
+    /// <summary>
+    /// Performs a read-modify-write operation on multiple addresses.
+    /// Reads each specified word, applies AND mask (resets bits where mask bit = 0),
+    /// then OR mask (sets bits where mask bit = 1), and writes back.
+    /// 
+    /// Supported only on SLC processors. Not implemented for PLC-5 due to different address format.
+    /// 
+    /// Reference: AB Publication 1770-6.5.16, page 7-20
+    /// </summary>
     public int ReadModifyWrite(string[] addresses, ushort[] andMasks, ushort[] orMasks)
     {
         if (addresses == null || addresses.Length == 0)
@@ -419,6 +585,10 @@ public class SlcHandler : IPlcHandler
         return status == 0 ? string.Empty : PCCCErrors.DecodeStatus(status);
     }
 
+    /// <summary>
+    /// Writes multiple integer values to the specified address.
+    /// Supports both standard integer (16-bit) and long integer (32-bit) files.
+    /// </summary>
     public int WriteData(string startAddress, int numberOfElements, int[] dataToWrite)
     {
         DataAddress p = PCCCParser.Parse(startAddress);
@@ -441,9 +611,11 @@ public class SlcHandler : IPlcHandler
         return WriteRawDataWithChunking(p, converted);
     }
 
+    /// <summary>Writes a single float value to the specified address.</summary>
     public int WriteData(string startAddress, float dataToWrite)
         => WriteData(startAddress, 1, new float[] { dataToWrite });
 
+    /// <summary>Writes multiple float values to the specified address.</summary>
     public int WriteData(string startAddress, int numberOfElements, float[] dataToWrite)
     {
         DataAddress p = PCCCParser.Parse(startAddress);
@@ -475,6 +647,13 @@ public class SlcHandler : IPlcHandler
         return WriteRawDataWithChunking(p, converted);
     }
 
+    /// <summary>
+    /// Writes a string to an ST file (type 0x8D) or word-packed integer file.
+    /// For ST files: writes length word (LE) followed by character data (max 82 chars).
+    /// For integer files: packs characters into 16-bit words (high byte, low byte).
+    /// 
+    /// Original method from DF1Comm.vb (WriteData for string).
+    /// </summary>
     public int WriteData(string startAddress, string dataToWrite)
     {
         if (string.IsNullOrEmpty(dataToWrite)) return 0;
@@ -482,7 +661,7 @@ public class SlcHandler : IPlcHandler
 
         DataAddress p = PCCCParser.Parse(startAddress);
         
-        // ST file (SLC 500 String file, type 0x8D)
+        // ST file (SLC 500 String file, type 0x8D) – 84 bytes per element: 2-byte length + 82 chars
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
         {
             byte[] stElement = new byte[84];
@@ -495,6 +674,8 @@ public class SlcHandler : IPlcHandler
         }
         else
         {
+            // Write string to integer file (word-packed): each character occupies one byte,
+            // packed into words with high byte first.
             int[]? words = StringConverter.StringToWords(dataToWrite);
             if (words == null) return -1;
             byte[] converted = new byte[words.Length * 2 + 2];
@@ -508,23 +689,29 @@ public class SlcHandler : IPlcHandler
         }
     }
 
-    // ─── Data Memory ───────────────────────────────────────────────────────
+    // ─── Data Memory Enumeration ─────────────────────────────────────────
 
     /// <summary>
     /// Returns a list of data files present in the processor.
     /// Uses file-based read (OpenFile/FileRead) when supported by the processor,
     /// otherwise falls back to physical (Protected Typed Logical Read) method.
+    /// 
+    /// Original method from DF1Comm.vb (GetDataMemory).
     /// </summary>
     public DataFileDetails[] GetDataMemory()
     {
-        // If processor supports file-based transfer (SLC 5/03+ or MicroLogix 1100/1200/1500)
-        // use the more reliable file-based method, which is also used by upload/download.
         if (SupportsFileBasedTransfer())
             return GetDataMemoryFileBased();
         else
             return GetDataMemoryPhysicalBased();
     }
 
+    /// <summary>
+    /// Returns data file information specific to MicroLogix 1500.
+    /// This method reads File 0, Type 2 (different directory structure than standard SLC).
+    /// 
+    /// Original method from DF1Comm.vb (GetML1500DataMemory).
+    /// </summary>
     public DataFileDetails[] GetML1500DataMemory()
     {
         var pAddr = new DataAddress { FileNumber = 0, FileType = 2, Element = 0x2F };
@@ -557,6 +744,8 @@ public class SlcHandler : IPlcHandler
     /// Reads the data file directory using traditional Protected Typed Logical Read (FNC 0xA1).
     /// This method works on all SLC/MicroLogix processors, including older ones that do not
     /// support file-based transfer (SLC 5/01, 5/02, ML1000).
+    /// 
+    /// Original method from DF1Comm.vb (GetDataMemory physical-based fallback).
     /// </summary>
     public DataFileDetails[] GetDataMemoryPhysicalBased()
     {
@@ -612,14 +801,9 @@ public class SlcHandler : IPlcHandler
     /// (SLC 5/03, 5/04, 5/05, MicroLogix 1100, 1200, 1500). It is more reliable
     /// and consistent with the upload/download mechanism.
     /// </summary>
-    /// <returns>Array of DataFileDetails for all data files found.</returns>
     private DataFileDetails[] GetDataMemoryFileBased()
     {
-        // Step 1: Open the program directory (file number 0, type 0x24)
         ushort dirTag = OpenFile(0, 0x24);
-
-        // Step 2: Read directory size from byte offset 70 (word offset 35)
-        // The size is stored as a 16-bit little-endian value at offset 70.
         byte[] sizeData = FileReadWithChunking(dirTag, 70, 2);
         if (sizeData.Length < 2)
             throw new PCCCException("Failed to read directory size via file-based read.");
@@ -628,26 +812,19 @@ public class SlcHandler : IPlcHandler
         if (dirSize <= 0 || dirSize > 65535)
             throw new PCCCException($"Invalid directory size from file-based read: {dirSize}");
 
-        // Step 3: Read the entire directory using chunked reads
         byte[] directory = FileReadWithChunking(dirTag, 0, dirSize);
-
-        // Step 4: Close the directory file
         CloseFile(dirTag);
-
-        // Step 5: Parse the directory data (same as physical method)
         return ParseDirectory(directory);
     }
 
     /// <summary>
     /// Parses raw directory bytes into a list of data file details.
-    /// This method contains the common parsing logic used by both physical-based
-    /// and file-based directory reads.
+    /// Common parsing logic used by both physical-based and file-based directory reads.
+    /// 
+    /// Directory format per AB Publication 1770-6.5.16, Chapter 10.
     /// </summary>
-    /// <param name="fzd">Raw directory data (File 0) from the PLC.</param>
-    /// <returns>Array of DataFileDetails for all data files found.</returns>
     private DataFileDetails[] ParseDirectory(byte[] fzd)
     {
-        // Number of data tables from directory header (offset 52/53)
         int numberOfDataTables = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
                             + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] * 256;
         var dataFiles = new List<DataFileDetails>();
@@ -700,11 +877,17 @@ public class SlcHandler : IPlcHandler
             entriesParsed++;
             filePosition += bytesPerRow;
         }
-
         return dataFiles.ToArray();
     }
 
     // ─── I/O Configuration ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns the number of slots in the chassis.
+    /// For MicroLogix processors (no chassis), returns 0.
+    /// 
+    /// Original method from DF1Comm.vb (GetSlotCount).
+    /// </summary>
     public int GetSlotCount()
     {
         byte[] body = { 4, 0, 0x60, 0, 0 };
@@ -715,6 +898,12 @@ public class SlcHandler : IPlcHandler
         return reply.Data[0] > 0 ? reply.Data[0] - 1 : 0;
     }
 
+    /// <summary>
+    /// Returns I/O configuration for all slots.
+    /// For ML1500, calls GetML1500IOConfig(); otherwise GetSLCIOConfig().
+    /// 
+    /// Original method from DF1Comm.vb (GetIOConfig).
+    /// </summary>
     public IOConfig[] GetIOConfig()
     {
         int pt = GetProcessorType();
@@ -722,6 +911,9 @@ public class SlcHandler : IPlcHandler
             ? GetML1500IOConfig() : GetSLCIOConfig();
     }
 
+    /// <summary>
+    /// Gets I/O configuration for standard SLC chassis.
+    /// </summary>
     private IOConfig[] GetSLCIOConfig()
     {
         int slots = GetSlotCount();
@@ -745,9 +937,14 @@ public class SlcHandler : IPlcHandler
         return result;
     }
 
+    /// <summary>
+    /// Gets I/O configuration for MicroLogix 1500.
+    /// This processor has a different I/O configuration file structure (type 0x62).
+    /// 
+    /// Original method from DF1Comm.vb (GetML1500IOConfig).
+    /// </summary>
     private IOConfig[] GetML1500IOConfig()
     {
-        // ... unchanged, omitted for brevity (already in original)
         byte[] body = { 4, 0, 0x62, 0, 0 };
         var req = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetIOConfig, body);
         var reply = _protocol.SendRequest(req, out int sts);
@@ -818,7 +1015,13 @@ public class SlcHandler : IPlcHandler
         return result;
     }
 
-    // ─── Upload / Download (Facade) ────────────────────────────────────────
+    // ─── Upload / Download ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Uploads the entire program and data from the PLC.
+    /// Automatically selects file-based transfer (SLC 5/03+ / ML1100/1200/1500)
+    /// or physical-based transfer (SLC 5/01, 5/02, ML1000).
+    /// </summary>
     public Collection<PLCFileDetails> UploadProgramData()
     {
         DisableEventFlag = true;
@@ -835,6 +1038,10 @@ public class SlcHandler : IPlcHandler
         }
     }
 
+    /// <summary>
+    /// Downloads a program to the PLC.
+    /// Automatically selects file-based transfer or physical-based transfer.
+    /// </summary>
     public void DownloadProgramData(Collection<PLCFileDetails> plcFiles)
     {
         DisableEventFlag = true;
@@ -852,12 +1059,19 @@ public class SlcHandler : IPlcHandler
     }
 
     // ─── Implementation: Physical-based (legacy) ───────────────────────────
+    // These methods are direct ports from DF1Comm.vb and work with SLC 5/01, 5/02, ML1000.
+    // They use Protected Typed Logical Read/Write instead of file-based commands.
+
     private Collection<PLCFileDetails> UploadProgramDataPhysicalBased()
     {
+        // Step 1: Read the file directory (File 0)
         byte[] fzd = ReadFileDirectory();
         var programFiles = new Collection<PLCFileDetails>();
+        
+        // Step 2: Add directory as the first file
         programFiles.Add(new PLCFileDetails { FileNumber = 0, Data = fzd, FileType = 0, NumberOfBytes = fzd.Length });
 
+        // Step 3: Raise initial progress event
         OnFileProgress(new PCCCComm.FileProgressEventArgs
         {
             FileNumber = 0,
@@ -869,18 +1083,21 @@ public class SlcHandler : IPlcHandler
             GrandTotalBytes = fzd.Length
         });
 
+        // Step 4: Parse directory header to get file counts
         int numberOfProgramFiles = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfProgramFilesLo]
                                  + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfProgramFilesHi] * 256;
         int numberOfDataFiles = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
                               + fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] * 256;
         int totalEntries = numberOfProgramFiles + numberOfDataFiles;
 
+        // Step 5: Determine starting offset and bytes per entry based on processor type
         int filePosition = (_processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000)
             ? PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetSlc502Ml1000
             : (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1200 || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP || _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1100)
                 ? PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetMl1100Ml1500
                 : PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault;
 
+        // Step 6: Calculate grand total bytes for progress reporting
         long grandTotalBytes = 0;
         int tempPos = filePosition;
         for (int j = 0; j < totalEntries && tempPos < fzd.Length; j++)
@@ -891,6 +1108,7 @@ public class SlcHandler : IPlcHandler
         }
         grandTotalBytes += fzd.Length;
 
+        // Step 7: Iterate through directory entries and read each file
         int i = 0;
         long totalBytesTransferred = fzd.Length;
         int filesCompleted = 1;
@@ -1069,19 +1287,12 @@ public class SlcHandler : IPlcHandler
         if (releaseSts != 0) throw new PCCCException("Failed to Release Sole Access - " + PCCCErrors.DecodeStatus(releaseSts));
     }
 
-    // ─── Private Helper Methods for Chunked File I/O ───────────────────────────
+    // ─── Implementation: File-based upload/download ────────────────────────
 
     /// <summary>
     /// Uploads program and data files from the PLC using file-based transfer (SLC 5/03+ and ML1100/1200/1500).
-    /// This method performs the following steps:
-    ///   1. UploadAllRequest – enter upload mode, get memory segment info (not used further).
-    ///   2. GetEditResource – secure sole access.
-    ///   3. OpenFile – open program directory (file number 0, type 0x24), get a tag handle.
-    ///   4. Read directory size – read 2 bytes at offset 70 (word offset 0x23) which contains the total size of the directory in bytes.
-    ///   5. Read entire directory – using chunked reads (FileReadWithChunking) to get the full directory data.
-    ///   6. Parse directory – iterate through directory entries to read each program/data file using OpenFile/FileRead/CloseFile.
-    ///   7. UploadCompleted – exit upload mode.
-    ///   8. ReturnEditResource – release sole access.
+    /// They use Protected Typed Logical Read/Write instead of file-based commands.
+    /// Reference: AB Publication 1770-6.5.16, Chapter 12 (Uploading from SLC 5/01, 5/02, ML1000)
     /// </summary>
     private Collection<PLCFileDetails> UploadProgramDataFileBased()
     {
@@ -1090,7 +1301,6 @@ public class SlcHandler : IPlcHandler
         
         // Step 2: Secure edit resource (sole access)
         GetEditResource();
-        
         var files = new Collection<PLCFileDetails>();
         
         // Step 3: Open program directory (file number 0, type 0x24)
@@ -1104,9 +1314,8 @@ public class SlcHandler : IPlcHandler
         // Step 5: Read entire directory using chunked reads
         byte[] directory = FileReadWithChunking(dirTag, 0, dirSize);
         files.Add(new PLCFileDetails { FileNumber = 0, FileType = 0, NumberOfBytes = dirSize, Data = directory });
-        
         CloseFile(dirTag);
-        
+
         // Step 6: Parse directory and read each program/data file
         // Directory structure (per AB Publication 1770-6.5.16, Chapter 10):
         //   Offset 46/47: number of program files (little-endian)
@@ -1117,7 +1326,7 @@ public class SlcHandler : IPlcHandler
         int numberOfDataFiles = directory[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
                             + directory[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] * 256;
         int totalEntries = numberOfProgramFiles + numberOfDataFiles;
-        
+
         // Determine starting offset and bytes per entry based on processor type
         int filePosition;
         int bytesPerEntry;
@@ -1140,7 +1349,7 @@ public class SlcHandler : IPlcHandler
             filePosition = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault;
             bytesPerEntry = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntryDefault;
         }
-        
+
         // Calculate grand total bytes for progress reporting
         long grandTotalBytes = dirSize;
         int tempPos = filePosition;
@@ -1150,30 +1359,22 @@ public class SlcHandler : IPlcHandler
             grandTotalBytes += sizeBytes;
             tempPos += bytesPerEntry;
         }
-        
+
         int i = 0;
         long totalBytesTransferred = dirSize;
         int filesCompleted = 1;
-        
+
         while (filePosition < directory.Length && i < totalEntries)
         {
             int fileType = directory[filePosition];
             int fileNumber = directory[filePosition + 3];
             int fileSizeBytes = directory[filePosition + 1] + directory[filePosition + 2] * 256;
-            
+
             // Open the file (program or data) using its number and type
             ushort fileTag = OpenFile(fileNumber, fileType);
-            byte[] fileData;
-            if (fileSizeBytes > 0)
-            {
-                fileData = FileReadWithChunking(fileTag, 0, fileSizeBytes);
-            }
-            else
-            {
-                fileData = Array.Empty<byte>();
-            }
+            byte[] fileData = fileSizeBytes > 0 ? FileReadWithChunking(fileTag, 0, fileSizeBytes) : Array.Empty<byte>();
             CloseFile(fileTag);
-            
+
             var pf = new PLCFileDetails
             {
                 FileNumber = fileNumber,
@@ -1182,10 +1383,11 @@ public class SlcHandler : IPlcHandler
                 Data = fileData
             };
             files.Add(pf);
-            
+
             totalBytesTransferred += fileSizeBytes;
             filesCompleted++;
-            
+
+            // Trigger progress event
             OnFileProgress(new PCCCComm.FileProgressEventArgs
             {
                 FileNumber = fileNumber,
@@ -1196,44 +1398,30 @@ public class SlcHandler : IPlcHandler
                 TotalBytesTransferred = totalBytesTransferred,
                 GrandTotalBytes = grandTotalBytes
             });
-            
+
             i++;
             filePosition += bytesPerEntry;
         }
-        
+
         // Step 7: Exit upload mode
         UploadCompleted();
         
         // Step 8: Release edit resource
         ReturnEditResource();
-        
         return files;
     }
 
     /// <summary>
     /// Downloads a program and data files to the PLC using file-based transfer (SLC 5/03+ and ML1100/1200/1500).
-    /// Steps:
-    ///   1. SetProgramMode – place CPU in program mode.
-    ///   2. DisableForces – disable any active forces.
-    ///   3. DownloadAllRequest – enter download mode, get segment info.
-    ///   4. GetEditResource – secure sole access.
-    ///   5. OpenFile – open program directory (file 0, type 0x24).
-    ///   6. Write directory data – write the entire directory (including size header) using FileWriteWithChunking.
-    ///   7. CloseFile – close directory file.
-    ///   8. For each program/data file (i >= 1): OpenFile, FileWriteWithChunking, CloseFile.
-    ///   9. DownloadCompleted – exit download mode.
-    ///   10. ApplyPortConfiguration – apply stored port configuration.
-    ///   11. ReturnEditResource – release sole access.
+    /// Reference: AB Publication 1770-6.5.16, Chapter 12 (Downloading from SLC 5/01, 5/02, ML1000)
     /// </summary>
     private void DownloadProgramDataFileBased(Collection<PLCFileDetails> plcFiles)
     {
         // Step 1: Set Program mode (required for download)
         SetProgramMode();
-        
         // Step 2: Disable forces (if any)
-        try { DisableForces(); }
-        catch (PCCCException) { /* ignore — forces may already be disabled */ }
-        
+        try { DisableForces(); } catch (PCCCException) { /* ignore */ }
+
         // Step 3: Enter download mode and get segment info (optional)
         byte[] segmentInfo = _protocol.DownloadAllRequest((byte)MyNode, (byte)TargetNode);
         
@@ -1248,11 +1436,11 @@ public class SlcHandler : IPlcHandler
         
         // Step 7: Close directory file
         CloseFile(dirTag);
-        
-        // --- Progress calculation for download ---
+
+        // Progress calculation for download
         long grandTotalBytes = plcFiles.Sum(f => f.Data?.Length ?? 0);
         long totalBytesTransferred = plcFiles[0].Data?.Length ?? 0;
-        int filesCompleted = 1;   // directory sudah ditulis
+        int filesCompleted = 1;
         int totalFiles = plcFiles.Count;
 
         // Trigger initial progress event for directory
@@ -1289,7 +1477,7 @@ public class SlcHandler : IPlcHandler
                 GrandTotalBytes = grandTotalBytes
             });
         }
-        
+
         // Step 9: Exit download mode
         DownloadCompleted();
         
@@ -1300,9 +1488,8 @@ public class SlcHandler : IPlcHandler
         ReturnEditResource();
     }
 
-    /// <summary>
-    /// Reads a file with automatic chunking. Converts byte offset to word offset for the protocol.
-    /// </summary>
+    // ─── File chunking helpers for file-based transfer ────────────────────
+
     private byte[] FileReadWithChunking(ushort tag, int byteOffset, int totalBytes)
     {
         if (byteOffset % 2 != 0)
@@ -1311,7 +1498,7 @@ public class SlcHandler : IPlcHandler
         using var ms = new MemoryStream(totalBytes);
         int bytesRemaining = totalBytes;
         int currentByteOffset = byteOffset;
-        int maxChunkBytes = PCCCConstants.Df1Limits.MaxReadPayloadBytes; // 236
+        int maxChunkBytes = PCCCConstants.Df1Limits.MaxReadPayloadBytes;
 
         while (bytesRemaining > 0)
         {
@@ -1321,15 +1508,12 @@ public class SlcHandler : IPlcHandler
             if (chunk == null || chunk.Length == 0)
                 throw new PCCCException($"Empty chunk received at byte offset {currentByteOffset} (word offset {wordOffset}).");
             ms.Write(chunk, 0, chunk.Length);
-            bytesRemaining    -= chunk.Length;   // actual bytes received, bukan toReadBytes
+            bytesRemaining -= chunk.Length;
             currentByteOffset += chunk.Length;
         }
         return ms.ToArray();
     }
 
-    /// <summary>
-    /// Writes a file with automatic chunking. Converts byte offset to word offset for the protocol.
-    /// </summary>
     private void FileWriteWithChunking(ushort tag, int byteOffset, byte[] data)
     {
         if (byteOffset % 2 != 0)
@@ -1337,106 +1521,74 @@ public class SlcHandler : IPlcHandler
 
         int bytesRemaining = data.Length;
         int currentByteOffset = byteOffset;
-        int maxChunkBytes = PCCCConstants.Df1Limits.MaxWritePayloadBytes; // 164
+        int maxChunkBytes = PCCCConstants.Df1Limits.MaxWritePayloadBytes;
 
         while (bytesRemaining > 0)
         {
             int toWriteBytes = Math.Min(bytesRemaining, maxChunkBytes);
             int wordOffset = currentByteOffset / 2;
-            int srcOffset = currentByteOffset - byteOffset;     // posisi di array data, bukan data.Length - bytesRemaining
+            int srcOffset = currentByteOffset - byteOffset;
             byte[] chunk = new byte[toWriteBytes];
             Array.Copy(data, srcOffset, chunk, 0, toWriteBytes);
             int sts = _protocol.FileWrite(tag, wordOffset, chunk, (byte)MyNode, (byte)TargetNode);
             if (sts != 0)
                 throw new PCCCException($"FileWrite failed at byte offset {currentByteOffset}: {PCCCErrors.DecodeStatus(sts)}");
-            bytesRemaining    -= toWriteBytes;
+            bytesRemaining -= toWriteBytes;
             currentByteOffset += toWriteBytes;
         }
     }
 
-    // ─── New public methods for file-based and diagnostic commands ─────────
+    // ─── Public methods for file-based and diagnostic commands ────────────
+    // These delegate directly to PCCCProtocol.
+
     public ushort OpenFile(int fileNumber, int fileType)
-    {
-        return _protocol.OpenFile((byte)fileNumber, (byte)fileType, (byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.OpenFile((byte)fileNumber, (byte)fileType, (byte)MyNode, (byte)TargetNode);
 
     public void CloseFile(ushort tag)
-    {
-        _protocol.CloseFile(tag, (byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.CloseFile(tag, (byte)MyNode, (byte)TargetNode);
 
     public byte[] FileRead(ushort tag, int offset, int length)
-    {
-        return _protocol.FileRead(tag, offset, length, (byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.FileRead(tag, offset, length, (byte)MyNode, (byte)TargetNode);
 
     public int FileWrite(ushort tag, int offset, byte[] data)
-    {
-        return _protocol.FileWrite(tag, offset, data, (byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.FileWrite(tag, offset, data, (byte)MyNode, (byte)TargetNode);
 
     public void GetEditResource()
-    {
-        _protocol.GetEditResource((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.GetEditResource((byte)MyNode, (byte)TargetNode);
 
     public void ReturnEditResource()
-    {
-        _protocol.ReturnEditResource((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.ReturnEditResource((byte)MyNode, (byte)TargetNode);
 
     public void UploadAllRequest()
-    {
-        _protocol.UploadAllRequest((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.UploadAllRequest((byte)MyNode, (byte)TargetNode);
 
     public void UploadCompleted()
-    {
-        _protocol.UploadCompleted((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.UploadCompleted((byte)MyNode, (byte)TargetNode);
 
     public void DownloadAllRequest()
-    {
-        _protocol.DownloadAllRequest((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.DownloadAllRequest((byte)MyNode, (byte)TargetNode);
 
     public void DownloadCompleted()
-    {
-        _protocol.DownloadCompleted((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.DownloadCompleted((byte)MyNode, (byte)TargetNode);
 
     public void ApplyPortConfiguration()
-    {
-        _protocol.ApplyPortConfiguration((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.ApplyPortConfiguration((byte)MyNode, (byte)TargetNode);
 
     public void InitializeMemory()
-    {
-        _protocol.InitializeMemory((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.InitializeMemory((byte)MyNode, (byte)TargetNode);
 
     public byte[] ReadDiagnosticCounters()
-    {
-        return _protocol.ReadDiagnosticCounters((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.ReadDiagnosticCounters((byte)MyNode, (byte)TargetNode);
 
     public void ResetDiagnosticCounters()
-    {
-        _protocol.ResetDiagnosticCounters((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.ResetDiagnosticCounters((byte)MyNode, (byte)TargetNode);
 
     public byte ReadLinkParameters()
-    {
-        return _protocol.ReadLinkParameters((byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.ReadLinkParameters((byte)MyNode, (byte)TargetNode);
 
     public void SetLinkParameters(byte maxAddress)
-    {
-        _protocol.SetLinkParameters(maxAddress, (byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.SetLinkParameters(maxAddress, (byte)MyNode, (byte)TargetNode);
 
     public byte[] Echo(byte[] data)
-    {
-        return _protocol.Echo(data, (byte)MyNode, (byte)TargetNode);
-    }
+        => _protocol.Echo(data, (byte)MyNode, (byte)TargetNode);
 }
