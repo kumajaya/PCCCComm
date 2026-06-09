@@ -1,16 +1,17 @@
 # PCCC Emulator with DF1 / EtherNet/IP transport
 
 **Purpose**  
-Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an SLC-5/04 PLC for testing DF1/EIP clients and RSLinx. This emulator does **not** depend on any external DF1 library – all DF1 framing, checksum (BCC/CRC), DLE stuffing, EIP/CIP encapsulation, and memory simulation are self‑contained.
+Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an SLC-5/04 **or PLC‑5** for testing DF1/EIP clients and RSLinx. This emulator does **not** depend on any external DF1 library – all DF1 framing, checksum (BCC/CRC), DLE stuffing, EIP/CIP encapsulation, and memory simulation are self‑contained.
 
 ## Features
 - **DF1 full‑duplex framing** with DLE STX / DLE ETX and DLE stuffing
 - **DF1 half‑duplex slave** for RS‑485 multi‑drop networks (polling, address filtering)
 - **EtherNet/IP (EIP/PCCC)** support – TCP port 44818, UDP broadcast ListIdentity
+- **PLC‑5 emulation mode** (`--family plc5`) – mimics PLC‑5 GetStatus response and supports **Typed Read (0x68) / Typed Write (0x67)** with logical binary addressing
 - CRC‑16 (calculation as per AB specification) **default** – BCC (two's complement of byte sum) also supported
-- Get Status response crafted for SLC-5/04 (processor code `0x5B`)
+- Get Status response crafted for SLC-5/04 (processor code `0x5B`) or PLC‑5 (`type extender 0xBE`, catalog "PLC-5")
 - Reads from File 0 (directory) and any data file listed in the directory
-- In‑memory PLC file store with pre‑defined files (O, I, S, B, N, F, T, C, R)
+- In‑memory PLC file store with pre‑defined files (O, I, S, B, N, F, T, C, R, ST, L)
 - Configurable serial settings via command line
 - Configurable EIP transport mode with TCP/UDP support
 - Configurable RS‑485 direction control (Auto/Rts/Dtr) for half‑duplex slave
@@ -33,12 +34,17 @@ dotnet build -c Release PCCCEmulator.csproj
 ## Run
 
 ### DF1 Serial Mode (Default)
-**Default** (COM2, 19200, no parity, node 1, CRC checksum):
+**Default** (COM2, 19200, no parity, node 1, CRC checksum, SLC emulation):
 ```bash
 dotnet run --project PCCCEmulator.csproj -- COM2
 ```
 
-Output:
+**PLC‑5 emulation mode** (same serial parameters):
+```bash
+dotnet run --project PCCCEmulator.csproj -- COM2 --family plc5
+```
+
+Output (SLC mode):
 ```
 [MEM] PCCCEmulator.Resources.DBU550.bin
       Size=9921 Magic=0xDF1A Ver=1 Type=0x49 SLC 5/04
@@ -52,6 +58,21 @@ PCCC emulator running
   Parity    : None
   Node ID   : 1
   Checksum  : Crc
+  Family    : SLC/MicroLogix
+Press Enter to stop.
+```
+
+Output (PLC‑5 mode):
+```
+[EMU] Emulation family set to Plc5
+PCCC emulator running
+  Mode      : DF1
+  Port      : COM2
+  Baud rate : 19200
+  Parity    : None
+  Node ID   : 1
+  Checksum  : Crc
+  Family    : PLC-5
 Press Enter to stop.
 ```
 
@@ -65,6 +86,9 @@ dotnet run --project PCCCEmulator.csproj -- COM3 --baud 9600 --parity even
 
 # Quiet mode (high performance, no logging)
 dotnet run --project PCCCEmulator.csproj -- COM2 --quiet
+
+# PLC‑5 emulation with different node
+dotnet run --project PCCCEmulator.csproj -- COM2 --family plc5 --node 2
 ```
 
 ### DF1 Half‑Duplex Slave Mode (RS‑485 multi‑drop)
@@ -83,8 +107,11 @@ dotnet run --project PCCCEmulator.csproj -- COM2 --mode df1slave --node 1 --rs48
 
 ### EtherNet/IP (EIP) Mode
 ```bash
-# Start emulator in EIP mode on default port 44818
+# Start emulator in EIP mode on default port 44818 (SLC mode)
 dotnet run --project PCCCEmulator.csproj -- --mode eip
+
+# PLC‑5 emulation over EIP
+dotnet run --project PCCCEmulator.csproj -- --mode eip --family plc5
 
 # Custom EIP port
 dotnet run --project PCCCEmulator.csproj -- --mode eip --port 44819
@@ -97,6 +124,7 @@ PCCC emulator running
   Mode      : EIP
   EIP Port  : 44818
   Node ID   : 1
+  Family    : SLC/MicroLogix
 Press Enter to stop.
 ```
 
@@ -135,6 +163,7 @@ Output:
 | `--node <n>` | Emulator node ID | `1` |
 | `--checksum <crc/bcc>` | Checksum mode (DF1 mode only) | `crc` |
 | `--mode <df1\|df1slave\|uic\|eip>` | Transport mode | `df1` |
+| `--family <slc\|plc5>` | Emulation family (SLC/MicroLogix or PLC‑5) | `slc` |
 | `--rs485-mode <auto\|rts\|dtr>` | RS‑485 direction control (df1slave mode) | `auto` |
 | `--rts-assert-delay <ms>` | Delay after enabling driver (df1slave mode) | `1` |
 | `--rts-deassert-delay <ms>` | Delay after last byte before disabling (df1slave mode) | `5` |
@@ -219,7 +248,7 @@ dotnet run --project ../Example/Example.csproj -- COM1 --mode df1master --target
 ### EtherNet/IP (EIP) Mode
 - Create an **EtherNet/IP** driver in RSLinx Classic.
 - Add the emulator's IP address (e.g., `127.0.0.1` or `192.168.x.x`).
-- The emulator will appear as **"1747-L551 C SLC 5/05"** in RSWho.
+- The emulator will appear as **"1747-L551 C SLC 5/05"** in SLC mode, or as **"PLC‑5"** (with catalog "PLC-5") in PLC‑5 mode.
 - **Auto-browse:** The emulator answers UDP broadcast ListIdentity on port 44818, so it appears automatically when browsing the network.
 
 **Firewall note:** UDP port 44818 must be open for RSLinx auto-browse (broadcast ListIdentity). TCP port 44818 is required for connected sessions.
@@ -228,9 +257,9 @@ dotnet run --project ../Example/Example.csproj -- COM1 --mode df1master --target
 
 *RSLinx OPC Server accessing PCCCEmulator memory in the background*
 
-## Emulated SLC-5/05 Memory Layout
+## Emulated Memory Layout
 
-The emulator simulates a specific SLC-5/04 configuration with the following data files and program files.
+The emulator simulates an SLC-5/04 configuration (default) with the following data files and program files. **When running in PLC‑5 mode, the same memory layout is used** (file types are compatible), allowing read/write access to N, B, F, T, C, ST, L files. The only difference is the GetStatus response and the command set (Typed Read/Write instead of Protected Typed Logical).
 
 ### Data Files
 
@@ -311,6 +340,7 @@ classDiagram
         +CheckSum CheckSumOptions
         +MyNode int
         +Mode TransportMode
+        +Family EmulationFamily
         +Start() void
         +Stop() void
         +SetLoggingEnabled(bool) void
@@ -327,6 +357,12 @@ classDiagram
         DF1Slave
         UIC
         EIP
+    }
+
+    class EmulationFamily {
+        <<enumeration>>
+        SlcMicroLogix
+        Plc5
     }
 
     class DF1Transport {
@@ -426,6 +462,7 @@ classDiagram
     PCCCEmulator *-- PlcMemory : composition
     PCCCEmulator o-- ILinkTransport : aggregation
     PCCCEmulator --> TransportMode : uses
+    PCCCEmulator --> EmulationFamily : uses
 
     %% EIP internal
     EIPTransport *-- EIPClient : manages 1..*
@@ -448,7 +485,7 @@ classDiagram
 | File              | Description |
 |-------------------|-------------|
 | `Program.cs`      | CLI entry point, argument parsing, usage help |
-| `PCCCEmulator.cs` | Transport factory, PDU dispatcher, command handlers, timers |
+| `PCCCEmulator.cs` | Transport factory, PDU dispatcher, command handlers, timers, **EmulationFamily** support |
 | `DF1BaseTransport.cs` | Abstract base for DF1 transports |
 | `DF1FullDuplexTransport.cs` | DF1 full‑duplex slave |
 | `DF1HalfDuplexTransport.cs` | DF1 half‑duplex slave (RS‑485) |
@@ -456,7 +493,7 @@ classDiagram
 | `EIPClient.cs`    | Per-connection EIP state, Forward Open/Close, PCCC dispatch |
 | `ILinkTransport.cs` | Transport abstraction interface |
 | `MessageDecoder.cs` | DLE stuffing/unstuffing, BCC/CRC checksum calculation |
-| `PlcMemory.cs`      | In‑memory file directory (File 0) and data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, etc.) |
+| `PlcMemory.cs`      | In‑memory file directory (File 0) and data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, ST18, etc.) |
 
 ## Extending the emulator
 - **Add new DF1/PCCC commands** – extend the dispatch logic in `PCCCEmulator.DispatchCommand()` or `DispatchFunctionCode()`
@@ -464,6 +501,7 @@ classDiagram
 - **Add new data files** – modify `PlcMemory` constructor and the file directory inside `File 0`
 - **Change element sizes** – update `_bytesPerElement` dictionary and file size arrays
 - **Simulate timers/counters** – implement background thread that updates T4 and C5 structures
+- **PLC‑5 mode enhancements** – modify `BuildPlc5GetStatusPayload()` to change processor type, catalog, or type extender as needed
 
 ## Troubleshooting
 | Issue | Likely solution |
@@ -475,6 +513,8 @@ classDiagram
 | **RSLinx cannot find device on network (EIP)** | Ensure UDP port 44818 is not blocked by firewall. Emulator answers broadcast ListIdentity for auto-browse. |
 | **pycomm3 / libplctag connection timeout (EIP)** | Verify `--mode eip` is active. Check firewall allows TCP 44818. |
 | **Half‑duplex communication fails** | Ensure client uses `--mode df1master` and emulator uses `--mode df1slave` with same node ID. For virtual serial loops, enable `--echo-suppression`. |
+| **PLC‑5 mode not detected** | Verify emulator is started with `--family plc5`. Check client's `GetProcessorFamily()` returns `Plc5`. Look for `type extender 0xBE` in GetStatus response (hex dump). |
+| **Typed Read/Write fails in PLC‑5 mode** | Ensure client uses `Plc5Handler` (auto-selected by `GetProcessorFamily`). The emulator handles `FNC 0x68` and `0x67` with logical binary address decoding. Check logs for `func=0x68` or `func=0x67`. |
 
 ## License
 Same as the DF1Comm library.

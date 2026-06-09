@@ -8,14 +8,15 @@ This document lists all PCCC (Programmable Controller Communications Command) co
 
 The table below follows the naming and grouping conventions of the official AB specification.  
 ✅ = fully implemented and tested in PCCCComm  
+⚠️ = partially implemented (see notes)  
 ❌ = not yet implemented (planned for future releases or not applicable)
 
 | # | Command | CMD | FNC | Implemented | Notes |
 |---|---------|-----|-----|-------------|-------|
 | 1 | Apply Port Configuration | 0x0F | 0x8F | ✅ | |
-| 2 | Bit Write (Write Bit) | 0x0F | 0xAB | ✅ | |
+| 2 | Bit Write (Write Bit) | 0x0F | 0xAB | ⚠️ | SLC only; PLC‑5 uses read‑modify‑write workaround |
 | 3 | Change Mode (SLC 5/03+) | 0x0F | 0x80 | ✅ | |
-| 4 | Change Mode (MicroLogix) | 0x0F | 0x3A | ✅ | |
+| 4 | Change Mode (MicroLogix) | 0x0F | 0x3A | ✅ | Also used for PLC‑5 Set CPU Mode |
 | 5 | Close File | 0x0F | 0x82 | ✅ | |
 | 6 | Diagnostic Status | 0x06 | 0x03 | ✅ | |
 | 7 | Disable Forces | 0x0F | 0x41 | ✅ | |
@@ -47,7 +48,7 @@ The table below follows the naming and grouping conventions of the official AB s
 | 33 | Read Bytes Physical | 0x0F | 0x17 | ❌ | Legacy |
 | 34 | Read Diagnostic Counters | 0x06 | 0x01 | ✅ | |
 | 35 | Read Link Parameters | 0x06 | 0x09 | ✅ | |
-| 36 | Read‑Modify‑Write | 0x0F | 0x26 | ✅ | |
+| 36 | Read‑Modify‑Write | 0x0F | 0x26 | ⚠️ | SLC only; PLC‑5 requires logical binary addressing |
 | 37 | Read‑Modify‑Write N | 0x0F | 0x79 | ❌ | |
 | 38 | Read Section Size | 0x0F | 0x29 | ❌ | |
 | 39 | Reset Diagnostic Counters | 0x06 | 0x07 | ✅ | |
@@ -61,8 +62,8 @@ The table below follows the naming and grouping conventions of the official AB s
 | 47 | Set Timeout | 0x06 | 0x04 | ❌ | |
 | 48 | Set Variables | 0x06 | 0x02 | ❌ | |
 | 49 | Shutdown | 0x0F | 0x07 | ❌ | |
-| 50 | Typed Read (Read Block) | 0x0F | 0x68 | ✅ | For Logix PCCC |
-| 51 | Typed Write (Write Block) | 0x0F | 0x67 | ✅ | For Logix PCCC |
+| 50 | Typed Read (Read Block) | 0x0F | 0x68 | ✅ | For PLC‑5 |
+| 51 | Typed Write (Write Block) | 0x0F | 0x67 | ✅ | For PLC‑5 |
 | 52 | Unprotected Bit Write | 0x05 | – | ❌ | Legacy |
 | 53 | Unprotected Read | 0x01 | – | ❌ | Legacy |
 | 54 | Unprotected Write | 0x08 | – | ❌ | Legacy |
@@ -75,8 +76,9 @@ The table below follows the naming and grouping conventions of the official AB s
 
 > **Notes:**  
 > - Commands marked with ✅ are fully implemented, tested, and ready for use.  
+> - Commands marked with ⚠️ have limitations or are implemented via workarounds (see details below).  
 > - Commands marked with ❌ are either planned for future releases or are specific to legacy PLC families (PLC‑2, 1774‑PLC, early PLC‑3) which are not the primary target of PCCCComm.  
-> - All read/write operations for SLC 500, MicroLogix, and PLC‑5 (via PCCC‑over‑CIP) are supported.  
+> - All read/write operations for **SLC 500, MicroLogix, and PLC‑5** are supported. For PLC‑5, data access uses **Typed Read (0x68)** and **Typed Write (0x67)** with logical binary addressing.  
 > - The “Legacy” note indicates commands that are rarely used in modern applications and may be added upon request.
 
 ---
@@ -89,8 +91,8 @@ The following sections describe the implemented commands in more detail, grouped
 
 | Method | CMD | FNC | Description |
 |--------|-----|-----|-------------|
-| `SetRunMode()` | 0x0F | 0x80 (SLC) / 0x3A (ML) | Places processor in RUN mode |
-| `SetProgramMode()` | 0x0F | 0x80 (SLC) / 0x3A (ML) | Places processor in PROGRAM mode |
+| `SetRunMode()` | 0x0F | 0x80 (SLC) / 0x3A (PLC‑5) | Places processor in RUN mode |
+| `SetProgramMode()` | 0x0F | 0x80 (SLC) / 0x3A (PLC‑5) | Places processor in PROGRAM mode |
 | `SetCpuMode(byte)` | 0x0F | 0x80 / 0x3A | Generic CPU mode change |
 | `GetRunMode()` | 0x06 | 0x03 | Returns 1 if in RUN mode, else 0 |
 
@@ -98,11 +100,13 @@ The following sections describe the implemented commands in more detail, grouped
 
 | Method | CMD | FNC | Description |
 |--------|-----|-----|-------------|
-| `DisableForces()` | 0x0F | 0x41 | Disables all forces |
-| `EnableForces()` | 0x0F | 0x42 | Enables forces (if any defined) |
-| `ClearForces()` | 0x0F | 0x43 | Clears all force entries |
+| `DisableForces()` | 0x0F | 0x41 | Disables all forces (SLC and PLC‑5) |
+| `EnableForces()` | 0x0F | 0x42 | Enables forces (SLC only; PLC‑5 throws `NotSupportedException`) |
+| `ClearForces()` | 0x0F | 0x43 | Clears forces (SLC only; PLC‑5 throws `NotSupportedException`) |
 
-### Read/Write Data (Protected Typed Logical)
+### Read/Write Data
+
+#### SLC / MicroLogix (Protected Typed Logical)
 
 | Method | CMD | FNC | Description |
 |--------|-----|-----|-------------|
@@ -114,6 +118,23 @@ The following sections describe the implemented commands in more detail, grouped
 | `WriteData(float[])` | 0x0F | 0xAA | Write float array |
 | `WriteData(string)` | 0x0F | 0xAA | Write string (ST file or word‑packed) |
 | `ReadModifyWrite()` | 0x0F | 0x26 | Atomic read‑modify‑write (bitwise AND/OR) |
+
+#### PLC‑5 (Typed Read / Typed Write)
+
+| Method | CMD | FNC | Description |
+|--------|-----|-----|-------------|
+| `ReadAny()` | 0x0F | 0x68 | Read any data type using logical binary addressing |
+| `ReadInt()` | 0x0F | 0x68 | Read integer array |
+| `WriteData(int)` | 0x0F | 0x67 | Write single integer |
+| `WriteData(int[])` | 0x0F | 0x67 | Write integer array |
+| `WriteData(float)` | 0x0F | 0x67 | Write single float |
+| `WriteData(float[])` | 0x0F | 0x67 | Write float array |
+| `WriteData(string)` | 0x0F | 0x67 | Write string |
+| `ReadModifyWrite()` | – | – | Not implemented (requires logical binary addressing) |
+
+**Important:**  
+- Bit-level writes on PLC‑5 are implemented via **read‑modify‑write workaround** (read whole word, modify bit, write back). This requires two transactions and is **not atomic**, but sufficient for most applications.  
+- For multi‑bit writes or atomic operations, use `WriteData` on the word address directly.
 
 ### File‑Based Upload/Download (SLC 5/03+ and ML1100/1200/1500)
 
@@ -136,15 +157,19 @@ The following sections describe the implemented commands in more detail, grouped
 
 | Method | CMD | FNC | Description |
 |--------|-----|-----|-------------|
-| `GetSlotCount()` | 0x0F | 0xA2 | Returns number of chassis slots |
-| `GetIOConfig()` | 0x0F | 0xA2 | Returns I/O configuration per slot |
+| `GetSlotCount()` | 0x0F | 0xA2 | Returns number of chassis slots (SLC only) |
+| `GetIOConfig()` | 0x0F | 0xA2 | Returns I/O configuration per slot (SLC only) |
+
+> For PLC‑5, I/O configuration commands are not yet implemented.
 
 ### Data Memory
 
 | Method | CMD | FNC | Description |
 |--------|-----|-----|-------------|
-| `GetDataMemory()` | 0x0F | 0x94 | Returns list of data files (SLC 5/03+) |
+| `GetDataMemory()` | 0x0F | 0x94 | Returns list of data files (SLC 5/03+ only) |
 | `GetML1500DataMemory()` | 0x0F | 0x94 | ML1500‑specific data file list |
+
+> For PLC‑5, `GetDataMemory()` is not yet implemented.
 
 ### Diagnostics & Testing
 
@@ -241,7 +266,10 @@ public byte[] NewCommand(byte myNode, byte targetNode)
 void NewCommand();   // or appropriate return type
 ```
 
-### Step 5: Implement Wrapper in `SlcHandler.cs`
+### Step 5: Implement Wrapper in the Appropriate Handler
+
+- For SLC/MicroLogix: add to `SlcHandler.cs`
+- For PLC‑5: add to `Plc5Handler.cs`
 
 ```csharp
 public void NewCommand()
@@ -263,6 +291,41 @@ public void NewCommand()
 ### Extended Addressing (Element >= 255)
 
 The existing `EncodeReadBody` / `EncodeWriteBody` methods in `PCCCMessage` already handle extended addressing (encoding `0xFF` + two bytes). Reuse them when adding new read/write commands.
+
+### PLC‑5 Logical Binary Addressing
+
+For PLC‑5, the `Plc5Handler` provides `EncodePlc5LogicalAddress()` which encodes a logical binary address according to 1770‑6.5.16 Chapter 13. Use this helper when implementing new read/write commands for PLC‑5.
+
+---
+
+## PCCCEmulator – Testing and Simulation
+
+The library includes a **PCCCEmulator** that can simulate both SLC and PLC‑5 processors. The emulator supports:
+
+- DF1 full‑duplex (serial), DF1 half‑duplex slave, EtherNet/IP (EIP/PCCC)
+- Full read/write access to N, B, F, T, C, ST, L files with automatic chunking
+- Mode control (Run/Program) via Set CPU Mode (FNC 0x3A)
+- Force management (Disable only for PLC‑5)
+- Diagnostic counters and link parameters
+- Echo, InitializeMemory
+
+To run the emulator in PLC‑5 mode:
+
+```bash
+dotnet run --project src/PCCCEmulator -- COM2 --family plc5
+```
+
+To run in default SLC mode:
+
+```bash
+dotnet run --project src/PCCCEmulator -- COM2
+```
+
+For a complete self‑test of the library against the emulator, use the `Example` project:
+
+```bash
+dotnet run --project src/Example -- COM1
+```
 
 ---
 
