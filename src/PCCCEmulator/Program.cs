@@ -31,7 +31,8 @@ using System.IO.Ports;
 ///   --parity <none|odd|even> : parity mode (default none)
 ///   --node <n>               : emulator node id (default 1)
 ///   --checksum <crc|bcc>     : checksum mode (default crc)
-///   --mode <df1|dh485|eip>   : transport mode (default df1)
+///   --mode <df1|df1slave|uic|eip> : transport mode (default df1)
+///   --family <slc|plc5>      : emulation family (default slc). plc5 enables PLC-5 mode
 ///   --quiet, -q              : disable logging for maximum performance
 ///   --help, -h               : show usage
 ///
@@ -39,6 +40,7 @@ using System.IO.Ports;
 ///   dotnet run -- COM2 --baud 19200 --checksum crc
 ///   dotnet run -- --mode eip --port 44818
 ///   dotnet run -- COM2 --quiet                          # High performance mode
+///   dotnet run -- COM2 --family plc5                    # PLC-5 emulation mode
 /// </summary>
 class Program
 {
@@ -56,6 +58,7 @@ class Program
         int rtsDeassertDelay = 5;
         int eipPort = 44818;
         bool quietMode = false;
+        string family = "slc";
 
         // Parse positional port argument
         if (args.Length > 0 && !args[0].StartsWith("--"))
@@ -114,6 +117,10 @@ class Program
             {
                 quietMode = true;
             }
+            else if (a == "--family" && i + 1 < args.Length)
+            {
+                family = args[++i].ToLowerInvariant();
+            }
             else if (a == "--help" || a == "-h")
             {
                 PrintUsage();
@@ -156,6 +163,9 @@ class Program
             emulator.RtsDeassertDelayMs = rtsDeassertDelay;
         }
 
+        emulator.Family = family == "plc5" ? PCCCEmulator.EmulationFamily.Plc5 :
+                                             PCCCEmulator.EmulationFamily.SlcMicroLogix;
+
         // Disable logging if quiet mode is enabled
         if (quietMode)
             emulator.SetLoggingEnabled(false);
@@ -188,6 +198,7 @@ class Program
                 Console.WriteLine($"      Node ID   : {node}");
             }
             
+            Console.WriteLine($"      Family    : {(family == "plc5" ? "PLC-5" : "SLC/MicroLogix")}");
             Console.WriteLine($"      Logging   : {(quietMode ? "Disabled (High Performance)" : "Enabled")}");
             Logger.Always(null, "Press Enter to stop.");
             Console.ReadLine();
@@ -207,17 +218,18 @@ class Program
         Console.WriteLine("  dotnet run -- [port] [options]");
         Console.WriteLine();
         Console.WriteLine("Options:");
-        Console.WriteLine("  --baud <n>           Baud rate (default 19200)");
+        Console.WriteLine("  --baud <n>                Baud rate (default 19200)");
         Console.WriteLine("  --parity <none|odd|even>  Parity mode (default none)");
-        Console.WriteLine("  --node <n>           Emulator node ID (default 1)");
-        Console.WriteLine("  --checksum <crc|bcc> Checksum mode (default crc)");
+        Console.WriteLine("  --node <n>                Emulator node ID (default 1)");
+        Console.WriteLine("  --checksum <crc|bcc>      Checksum mode (default crc)");
         Console.WriteLine("  --mode <df1|df1slave|uic|eip> Transport mode (default df1)");
+        Console.WriteLine("  --family <slc|plc5>       Emulation family (default slc). plc5 enables PLC-5 mode");
         Console.WriteLine("  --rs485-mode <auto|rts|dtr>      RS-485 direction control (default auto)");
         Console.WriteLine("  --rts-assert-delay <ms>          Delay after enabling driver (default 1)");
         Console.WriteLine("  --rts-deassert-delay <ms>        Delay after last byte before disabling (default 5)");
-        Console.WriteLine("  --port <n>           EIP port number (default 44818)");
-        Console.WriteLine("  --quiet, -q          Disable logging for maximum performance");
-        Console.WriteLine("  --help, -h           Show this help");
+        Console.WriteLine("  --port <n>                EIP port number (default 44818)");
+        Console.WriteLine("  --quiet, -q               Disable logging for maximum performance");
+        Console.WriteLine("  --help, -h                Show this help");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run -- COM2 --baud 19200 --checksum crc");
@@ -225,6 +237,7 @@ class Program
         Console.WriteLine("  dotnet run -- COM2 --mode df1slave --node 3");
         Console.WriteLine("  dotnet run -- --mode eip --port 44818");
         Console.WriteLine("  dotnet run -- COM2 --quiet                    # High performance mode");
+        Console.WriteLine("  dotnet run -- COM2 --family plc5              # PLC-5 emulation mode");
         Console.WriteLine();
         Console.WriteLine("Note: Disabling logging eliminates string allocations and");
         Console.WriteLine("      significantly improves throughput under high load.");

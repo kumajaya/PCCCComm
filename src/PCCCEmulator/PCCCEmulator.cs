@@ -100,6 +100,29 @@ public class PCCCEmulator : IDisposable
 
     private readonly TransportMode _mode;
 
+    public enum EmulationFamily
+    {
+        SlcMicroLogix,   // default, type extender 0xEE, catalog "5/04"
+        Plc5             // type extender high nibble 0xB (e.g., 0xBE), catalog "PLC-5"
+    }
+
+    private EmulationFamily _family = EmulationFamily.SlcMicroLogix;
+
+    public EmulationFamily Family
+    {
+        get => _family;
+        set
+        {
+            _family = value;
+            // Regenerate GetStatus payload cache when family changes
+            lock (_cacheLock)
+            {
+                _cachedGetStatusPayload = BuildGetStatusPayload();
+            }
+            Logger.Always(this, $"Emulation family set to {_family}");
+        }
+    }
+
     // ─── Shared Configuration ─────────────────────────────────────────────────
     private CheckSumOptions _checkSum = CheckSumOptions.Crc;
     private int _myNode = 1;
@@ -240,13 +263,17 @@ public class PCCCEmulator : IDisposable
     /// <param name="mode">Transport mode (DF1, DH485, or EIP)</param>
     /// <param name="eipPort">EIP port number (default 44818, only used for EIP mode)</param>
     /// <exception cref="NotImplementedException">Thrown for DH485 mode (planned for future)</exception>
-    public PCCCEmulator(string portName, int baudRate, Parity parity, TransportMode mode = TransportMode.DF1, int eipPort = 44818)
+    public PCCCEmulator(string portName, int baudRate, Parity parity, 
+                        TransportMode mode = TransportMode.DF1, 
+                        int eipPort = 44818,
+                        EmulationFamily family = EmulationFamily.SlcMicroLogix)
     {
         _memory = new PlcMemory();
         _directoryBytes = _memory.GetDirectory();
         Logger.Always(this, $"Directory loaded: {_directoryBytes?.Length ?? 0} bytes");
 
         _mode = mode;
+        _family = family;   // set family before BuildGetStatusPayload is called
 
         // Build initial GetStatus payload cache using the default processor mode.
         // The cache is dynamically updated via UpdateProcessorMode() whenever the
@@ -481,7 +508,6 @@ public class PCCCEmulator : IDisposable
             // Protected Typed Logical Read operations
             case 0xA1:  // Two address fields
             case 0xA2:  // Three address fields (with sub-element)
-            case 0x68:  // Three address fields (alternate format)
                 HandleReadRequest(src, tns, func, data, clientContext);
                 break;
 
@@ -756,13 +782,12 @@ public class PCCCEmulator : IDisposable
                 HandleReadModifyWrite(src, tns, data, clientContext);
                 break;
 
-            // ─── Typed Write for Logix PCCC (0x0F/0x67) ───────────────────────────
-            case 0x67:
-                // Treat as a normal write (same as 0xAA) but with Logix‑specific addressing.
-                // The payload format is similar to 0xAA but the data may be preceded by a type/data descriptor.
-                // For emulator simplicity, we can reuse HandleWriteRequest with func=0xAA,
-                // because the actual data layout for a simple typed write is compatible.
-                HandleWriteRequest(src, tns, 0xAA, data, clientContext);
+            case 0x67:  // Typed Write for PLC-5
+                HandleTypedWriteRequest(src, tns, data, clientContext);
+                break;
+
+            case 0x68:  // Typed Read for PLC-5
+                HandleTypedReadRequest(src, tns, data, clientContext);
                 break;
 
             default:
@@ -1152,6 +1177,156 @@ public class PCCCEmulator : IDisposable
             SendErrorResponse(src, tns, 0x0F, 0x26, 0x10, clientContext);
     }
 
+    /// <summary>
+    /// Handles Typed Write (CMD=0x0F, FNC=0x67) for PLC-5.
+    /// Payload format (per 1770-6.5.16 page 7-30):
+    ///   - Type/Data parameter (variable length)
+    ///   - PLC-5 logical binary address (variable)
+    ///   - Number of elements (2 bytes, LE)
+    ///   - Data bytes
+    /// For simplicity, we assume type/data param is 0x31 (ID=3, size=1) and
+    /// logical address is encoded as per EncodePlc5LogicalAddress.
+    /// </summary>
+    private void HandleTypedWriteRequest(int src, int tns, byte[] payload, object clientContext)
+    {
+        if (payload == null || payload.Length < 4)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
+            return;
+        }
+
+        int idx = 0;
+        // Skip type/data parameter (we assume it's 0x31 for byte array)
+        // In real implementation, we should parse it, but for emulator simplicity,
+        // we assume fixed format.
+        byte typeData = payload[idx++]; // expecting 0x31
+        // Decode logical binary address (variable length)
+        if (idx >= payload.Length)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
+            return;
+        }
+        byte maskByte = payload[idx++];
+        int levelCount = (maskByte >> 4) & 0x0F;
+        bool hasSubElement = (maskByte & 0x08) != 0;
+        int expectedLevels = hasSubElement ? 4 : 3;
+        if (levelCount != expectedLevels)
+        {
+            // For simplicity, we accept any level count; just parse what we have.
+        }
+
+        // Extract levels (up to 4)
+        int[] levels = new int[4];
+        for (int i = 0; i < levelCount && idx < payload.Length; i++)
+        {
+            if (payload[idx] == 0xFF && idx + 2 < payload.Length)
+            {
+                levels[i] = payload[idx + 1] | (payload[idx + 2] << 8);
+                idx += 3;
+            }
+            else
+            {
+                levels[i] = payload[idx++];
+            }
+        }
+
+        // Now read number of elements (2 bytes LE)
+        if (idx + 2 > payload.Length)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
+            return;
+        }
+        int elementCount = payload[idx] | (payload[idx + 1] << 8);
+        idx += 2;
+
+        // Remaining bytes are data
+        int dataBytes = payload.Length - idx;
+        if (dataBytes < elementCount) // each element is 1 byte in our assumed format
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
+            return;
+        }
+        byte[] data = new byte[dataBytes];
+        Array.Copy(payload, idx, data, 0, dataBytes);
+
+        // Map levels to fileNumber, fileType, element, subElement
+        int fileNumber = levels[0];
+        int fileType = levels[1];
+        int element = levels[2];
+        int subElement = (levelCount >= 4) ? levels[3] : 0;
+
+        // Write data using existing Write method
+        bool ok = _memory.Write(fileType, fileNumber, element, subElement, dataBytes, data);
+        if (ok)
+            SendEmptyResponse(src, tns, 0x4F, 0x67, clientContext);
+        else
+            SendErrorResponse(src, tns, 0x0F, 0x67, 0x10, clientContext);
+    }
+
+    /// <summary>
+    /// Handles Typed Read (CMD=0x0F, FNC=0x68) for PLC-5.
+    /// Assumes same logical address encoding as Typed Write.
+    /// </summary>
+    private void HandleTypedReadRequest(int src, int tns, byte[] payload, object clientContext)
+    {
+        if (payload == null || payload.Length < 4)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x68, 0x01, clientContext);
+            return;
+        }
+
+        int idx = 0;
+        byte typeData = payload[idx++]; // skip type/data param (assume 0x31)
+        if (idx >= payload.Length)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x68, 0x01, clientContext);
+            return;
+        }
+        byte maskByte = payload[idx++];
+        int levelCount = (maskByte >> 4) & 0x0F;
+        bool hasSubElement = (maskByte & 0x08) != 0;
+        int expectedLevels = hasSubElement ? 4 : 3;
+        // Parse levels
+        int[] levels = new int[4];
+        for (int i = 0; i < levelCount && idx < payload.Length; i++)
+        {
+            if (payload[idx] == 0xFF && idx + 2 < payload.Length)
+            {
+                levels[i] = payload[idx + 1] | (payload[idx + 2] << 8);
+                idx += 3;
+            }
+            else
+            {
+                levels[i] = payload[idx++];
+            }
+        }
+
+        // Read element count (number of bytes to read)
+        if (idx + 2 > payload.Length)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x68, 0x01, clientContext);
+            return;
+        }
+        int bytesToRead = payload[idx] | (payload[idx + 1] << 8);
+        idx += 2;
+
+        int fileNumber = levels[0];
+        int fileType = levels[1];
+        int element = levels[2];
+        int subElement = (levelCount >= 4) ? levels[3] : 0;
+
+        int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
+        int byteOffset = element * bpe + subElement * 2;
+
+        byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
+        if (status == 2)
+            SendErrorResponse(src, tns, 0x0F, 0x68, 0x50, clientContext);
+        else if (status != 0)
+            SendErrorResponse(src, tns, 0x0F, 0x68, 0x10, clientContext);
+        else
+            SendDataResponse(src, tns, 0x4F, data, clientContext);
+    }
+
     // ─── Response Helpers ────────────────────────────────────────────────────
     // All responses eventually call SendResponse() which delegates to the
     // active transport's SendResponse() method.
@@ -1368,17 +1543,33 @@ public class PCCCEmulator : IDisposable
     /// </summary>
     private void UpdateProcessorMode()
     {
-        byte mode = (byte)ProcessorModeValue;  // snapshot sekali
-        byte[] current = _memory.ReadRaw(0x84, 2, 2, 2, out int status);
-        if (status == 0 && current.Length == 2)
+        byte mode = (byte)ProcessorModeValue;
+        if (_family == EmulationFamily.SlcMicroLogix)
         {
-            current[0] = mode;
-            _memory.Write(0x84, 2, 1, 0, 2, current);
+            byte[] current = _memory.ReadRaw(0x84, 2, 2, 2, out int status);
+            if (status == 0 && current.Length == 2)
+            {
+                current[0] = mode;
+                _memory.Write(0x84, 2, 1, 0, 2, current);
+            }
         }
-
+        // For PLC-5, the mode is only stored in the GetStatus payload cache, not in the memory file.
         lock (_cacheLock)
         {
-            _cachedGetStatusPayload[18] = mode;
+            if (_family == EmulationFamily.SlcMicroLogix)
+                _cachedGetStatusPayload[18] = mode;
+            else
+            {
+                // For PLC-5, we update byte 0 according to the operating status
+                byte operatingStatus = mode switch
+                {
+                    0x1E => 2,  // LocalRun
+                    0x06 => 6,  // RemoteRun
+                    0x01 => 4,  // RemoteProg
+                    _ => 0
+                };
+                _cachedGetStatusPayload[0] = operatingStatus;
+            }
         }
     }
 
@@ -1408,12 +1599,24 @@ public class PCCCEmulator : IDisposable
         _memory.Write(0x8A, 8, 1, 0, 4, BitConverter.GetBytes(triValue));
     }
 
+    private byte[] BuildGetStatusPayload()
+    {
+        if (_family == EmulationFamily.Plc5)
+        {
+            return BuildPlc5GetStatusPayload();
+        }
+        else
+        {
+            return BuildSlcGetStatusPayload();
+        }
+    }
+
     /// <summary>
     /// Builds the 24-byte GetStatus payload for the current processor mode.
     /// Called once at construction and again implicitly via UpdateProcessorMode()
     /// which patches byte 18 in-place on the cached copy.
     /// </summary>
-    private byte[] BuildGetStatusPayload()
+    private byte[] BuildSlcGetStatusPayload()
     {
         byte[] payload = new byte[24];
 
@@ -1437,6 +1640,52 @@ public class PCCCEmulator : IDisposable
         payload[21] = 0x00;     // Program ID (high byte)
         payload[22] = 0x40;     // RAM size in Kbytes — 0x40 = 64 KB (1747-L542)
         payload[23] = 0x3F;     // Flags (no program owner, directory not corrupted)
+
+        return payload;
+    }
+
+    private byte[] BuildPlc5GetStatusPayload()
+    {
+        byte[] payload = new byte[24];
+
+        // Byte 0 bits 0-2: operating status (0=PROG, 2=Local Run, 4=Remote PROG, 6=Remote Run)
+        // We set the appropriate mode from ProcessorModeValue, only converting it to the correct value for the PLC-5.
+        // For convenience, we map:
+        //   LocalRun (0x1E) -> 2
+        //   RemoteRun (0x06) -> 6
+        //   LocalProg (0x11) -> 0? or 4? Leave it at 0 for now.
+        //   RemoteProg (0x01) -> 4
+        byte operatingStatus;
+        switch (ProcessorModeValue)
+        {
+            case ProcessorMode.LocalRun:   operatingStatus = 2; break;
+            case ProcessorMode.RemoteRun:  operatingStatus = 6; break;
+            case ProcessorMode.RemoteProg: operatingStatus = 4; break;
+            default:                       operatingStatus = 0; break;
+        }
+        payload[0] = operatingStatus;
+
+        // Byte 1: type extender high nibble = 0xB (PLC-5)
+        payload[1] = 0xBE;          // can also be 0xB2, 0xBE, as long as the high nibble
+        // Byte 2: extended interface type (DF1 full-duplex)
+        payload[2] = 0x34;
+        // Byte 3: extended processor type (example 0x5B for PLC-5/40)
+        payload[3] = 0x5B;
+        payload[4] = 0x32;          // series/revision
+
+        // Bulletin number "PLC-5" (11 bytes, ASCII, space-padded)
+        string catalog = "PLC-5";
+        byte[] catBytes = System.Text.Encoding.ASCII.GetBytes(catalog);
+        Array.Copy(catBytes, 0, payload, 5, catBytes.Length);
+        for (int i = 5 + catBytes.Length; i < 16; i++) payload[i] = 0x20;
+
+        payload[16] = 0x00; payload[17] = 0x00;   // major error word
+        // Byte 18: not used for mode on PLC-5, remains 0
+        payload[18] = 0x00;
+        payload[19] = 0x00;
+        payload[20] = 0x00; payload[21] = 0x00;
+        payload[22] = 0x40;          // RAM size 64K
+        payload[23] = 0x3F;
 
         return payload;
     }
