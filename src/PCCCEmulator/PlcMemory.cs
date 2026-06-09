@@ -207,9 +207,9 @@ public class PlcMemory
         const int numProgramFiles = 24;    // SYS×2 + LAD×22
         const int numDataFiles = 32;       // 32 data file slots
 #else
-        const int dirSize = 419;           // 79 + (34 × 10) for active-only layout (22 data + 12 prog)
+        const int dirSize = 429;           // 79 + (35 × 10) for active-only layout (23 data + 12 prog)
         const int numProgramFiles = 12;    // SYS×2 + LAD×10
-        const int numDataFiles = 22;       // 22 active data files (added ST18)
+        const int numDataFiles = 23;       // 23 active data files
 #endif
         var dir = new byte[dirSize];
 
@@ -219,6 +219,10 @@ public class PlcMemory
         WriteProgramFileEntries(dir, addr);
 
         _files[(DirectoryInternalType, DirectoryInternalNumber)] = dir;
+        // Alias for directory: allow RSLinx/RSLogix to read/write directory via file type 0x01, number 0
+        _files[(0x01, 0)] = dir;
+        _bytesPerElement[(0x01, 0)] = 2;
+        _fileTypeByNumber[0] = 0x01;
     }
 
     /// <summary>
@@ -293,6 +297,7 @@ public class PlcMemory
         Register(0x85,  82, 16);       // B16 — Binary file, 41 words
         Register(0x89,  52, 17);       // N17 — Integer file, 26 words
         Register(0x8D, 840, 18, 84);   // ST18 — String file, 10 strings × 84 bytes/elem
+        Register(0xA4, 400, 19, 40);   // Data Monitor File, 400 bytes, 40 bytes/element
 
 #if INCLUDE_INACTIVE_FILES
         // Inactive data files 18-28 (type 0x85 = Binary, size 0)
@@ -468,6 +473,12 @@ public class PlcMemory
         // Seed ST18:0 with a default string "EMULATOR OK" for self-test verification
         byte[] st18 = _files[(0x8D, 18)];
         WriteStString(st18, 0, "EMULATOR OK");
+        // Data Monitor File (type 0xA4) – 10 elements of 40 bytes each = 400 bytes
+        CreateDataFile(0xA4, 19, 400, 40);
+        // Fill with sample data (optional)
+        byte[] dmData = _files[(0xA4, 19)];
+        // Fill with number pattern 0..399 for debugging
+        for (int i = 0; i < dmData.Length; i++) dmData[i] = (byte)(i & 0xFF);
         CreateDataFile(0x85, 29,  52, 2);   // B29 — 26 words
         CreateDataFile(0x85, 30,  52, 2);   // B30 — 26 words
         CreateDataFile(0x85, 31,  52, 2);   // B31 — 26 words
