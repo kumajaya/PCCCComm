@@ -460,5 +460,57 @@ namespace PCCCComm.Pccc
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
                 PCCCConstants.Fnc.Echo, data ?? Array.Empty<byte>());
         }
+
+        /// <summary>
+        /// Creates a Typed Read request for PLC-5 (CMD=0x0F, FNC=0x68).
+        /// </summary>
+        /// <param name="logicalAddress">Encoded logical binary address (mask + levels).</param>
+        /// <param name="bytesToRead">Number of bytes to read (must be even for word-aligned data).</param>
+        /// <param name="tns">Transaction number (0 to auto-assign).</param>
+        /// <param name="myNode">Source node address.</param>
+        /// <param name="targetNode">Destination node address.</param>
+        /// <returns>PCCCMessage ready to send.</returns>
+        public static PCCCMessage CreateTypedReadRequest(byte[] logicalAddress, int bytesToRead, 
+            ushort tns, byte myNode, byte targetNode)
+        {
+            // Type/Data parameter for byte array (ID=3, size=1 byte per element)
+            // flag byte: bits 4-7 = ID (3), bits 0-3 = size (1)
+            byte typeDataParam = 0x31; // 0b0011 0001 (ID=3, size=1)
+            List<byte> body = new List<byte>();
+            body.Add(typeDataParam);
+            body.AddRange(logicalAddress);
+            // Number of elements to read = bytesToRead / bytes per element (here 1)
+            int elementsToRead = bytesToRead; // since size=1 byte/element
+            body.Add((byte)(elementsToRead & 0xFF));
+            body.Add((byte)((elementsToRead >> 8) & 0xFF));
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.TypedRead, body.ToArray());
+        }
+
+        /// <summary>
+        /// Creates a Typed Write request for PLC-5 (CMD=0x0F, FNC=0x67).
+        /// </summary>
+        /// <param name="logicalAddress">Encoded logical binary address (mask + levels).</param>
+        /// <param name="data">Data bytes to write (must be even length for word-aligned data).</param>
+        /// <param name="tns">Transaction number (0 to auto-assign).</param>
+        /// <param name="myNode">Source node address.</param>
+        /// <param name="targetNode">Destination node address.</param>
+        /// <returns>PCCCMessage ready to send.</returns>
+        public static PCCCMessage CreateTypedWriteRequest(byte[] logicalAddress, byte[] data,
+            ushort tns, byte myNode, byte targetNode)
+        {
+            // Type/Data parameter for byte array (ID=3, size=1 byte per element)
+            byte typeDataParam = 0x31; // 0b0011 0001
+            List<byte> body = new List<byte>();
+            body.Add(typeDataParam);
+            body.AddRange(logicalAddress);
+            // Number of elements to write = data.Length
+            int elementsToWrite = data.Length;
+            body.Add((byte)(elementsToWrite & 0xFF));
+            body.Add((byte)((elementsToWrite >> 8) & 0xFF));
+            body.AddRange(data);
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.TypedWrite, body.ToArray());
+        }
     }
 }

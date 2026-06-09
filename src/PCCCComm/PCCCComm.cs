@@ -300,7 +300,8 @@ public class PCCCComm : IDisposable, IHandlerContext
                 _handler = new SlcHandler(this, _protocol!, _processorType);
                 break;
             case PCCCConstants.ProcessorFamily.Plc5:
-                throw new NotSupportedException("PLC-5 protocol handler not yet implemented.");
+                _handler = new Plc5Handler(this, _protocol!, _processorType);
+                break;
             case PCCCConstants.ProcessorFamily.Plc3:
             case PCCCConstants.ProcessorFamily.Plc2:
             default:

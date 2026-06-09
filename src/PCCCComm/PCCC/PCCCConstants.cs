@@ -126,6 +126,8 @@ public static class PCCCConstants
         public const byte FileRead = 0xA7;
         public const byte ApplyPortConfig = 0x8F;
         public const byte InitializeMemory = 0x57;
+        public const byte TypedRead = 0x68;         // Typed Read for PLC-5 (0x68)
+        public const byte TypedWrite = 0x67;        // Typed Write for PLC-5 (0x67)
     }
 
     // ========================================================================
@@ -264,7 +266,7 @@ public static class PCCCConstants
         if (typeExtender == ResponseOffsets.DiagnosticStatus.TypeExtenderSlcMl)
             return ProcessorFamily.SlcMicroLogix;
 
-        // PLC-5: high nibble of type extender = 0xB
+        // PLC-5: high nibble of type extender = 0xB (0xB0, 0xBE, etc.)
         if ((typeExtender & ResponseOffsets.DiagnosticStatus.Plc5TypeExtenderMask) == ResponseOffsets.DiagnosticStatus.Plc5TypeExtenderMask)
             return ProcessorFamily.Plc5;
 
