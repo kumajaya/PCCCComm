@@ -254,7 +254,9 @@ public class Plc5Handler : IPlcHandler
 
     public void SetProgramMode()
     {
-        byte modeValue = 0x00;
+        // PLC-5 Set CPU Mode (FNC 0x3A) dengan mode value 0x01 = Remote Program
+        // Ref: 1770-6.5.16 page 7-26
+        byte modeValue = 0x01;   // Remote Program (dulu 0x00)
         var req = PCCCMessage.CreateChangeModeRequest(modeValue, true, 0, (byte)MyNode, (byte)TargetNode);
         _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success)
@@ -392,8 +394,29 @@ public class Plc5Handler : IPlcHandler
 
     public string WriteData(string startAddress, int dataToWrite)
     {
-        int status = WriteData(startAddress, 1, new int[] { dataToWrite });
-        return status == 0 ? string.Empty : PCCCErrors.DecodeStatus(status);
+        DataAddress p = PCCCParser.Parse(startAddress);
+        if (p.FileType == 0) throw new PCCCException("Invalid Address");
+
+        // Bit-level write
+        if (p.BitNumber >= 0 && p.BitNumber < 16)
+        {
+            // Build address without bit to read the whole word
+            string wordAddress = startAddress.Split('/')[0];
+            string[] current = ReadAny(wordAddress, 1);
+            int word = int.Parse(current[0]);
+            // Modify the specified bit
+            if (dataToWrite != 0)
+                word |= (1 << p.BitNumber);
+            else
+                word &= ~(1 << p.BitNumber);
+            // Write back using word write
+            int status = WriteData(wordAddress, 1, new int[] { word });
+            return status == 0 ? string.Empty : PCCCErrors.DecodeStatus(status);
+        }
+
+        // Normal word write
+        int normalStatus = WriteData(startAddress, 1, new int[] { dataToWrite });
+        return normalStatus == 0 ? string.Empty : PCCCErrors.DecodeStatus(normalStatus);
     }
 
     public int WriteData(string startAddress, int numberOfElements, int[] dataToWrite)
@@ -424,6 +447,21 @@ public class Plc5Handler : IPlcHandler
     public int WriteData(string startAddress, int numberOfElements, float[] dataToWrite)
     {
         DataAddress p = PCCCParser.Parse(startAddress);
+        if (p.FileType == 0) throw new PCCCException("Invalid Address");
+
+        // Bit-level write (single element only)
+        if (p.BitNumber >= 0 && p.BitNumber < 16 && numberOfElements == 1)
+        {
+            string wordAddress = startAddress.Split('/')[0];
+            string[] current = ReadAny(wordAddress, 1);
+            int word = int.Parse(current[0]);
+            if (dataToWrite[0] != 0)
+                word |= (1 << p.BitNumber);
+            else
+                word &= ~(1 << p.BitNumber);
+            return WriteData(wordAddress, 1, new int[] { word });
+        }
+
         byte[] converted = new byte[numberOfElements * p.BytesPerElements];
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Float)
         {
