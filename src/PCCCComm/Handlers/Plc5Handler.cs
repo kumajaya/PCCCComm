@@ -71,23 +71,25 @@ public class Plc5Handler : IPlcHandler
     /// Levels are 1-byte each, with 0xFF extended to 3 bytes for values >= 255.
     /// For SLC-style files: level1=file number, level2=file type, level3=element, level4=sub-element.
     /// </summary>
-    public static byte[] EncodePlc5LogicalAddress(int fileNumber, int fileType, int element, int subElement)
+    /// <param name="fileNumber">File number (0-255)</param>
+    /// <param name="fileType">PLC-5 file type code (0x00-0x0F)</param>
+    /// <param name="element">Element number (0-65535)</param>
+    /// <param name="subElement">Sub-element number (0-65535, typically for Timer/Counter members)</param>
+    /// <param name="isStructured">True if the data type has sub-element (Timer, Counter, Control, String)</param>
+    public static byte[] EncodePlc5LogicalAddress(int fileNumber, int fileType, int element, int subElement, bool isStructured)
     {
-        // Determine number of levels and their values
-        bool hasSubElement = subElement > 0;
-        int levelCount = hasSubElement ? 4 : 3;
+        // Number of levels depends on whether the address points to a structured type
+        int levelCount = isStructured ? 4 : 3;
         
-        // Prepare levels (4 max)
         byte[] levels = new byte[4];
         levels[0] = (byte)fileNumber;
         levels[1] = (byte)fileType;
         levels[2] = (byte)element;
-        levels[3] = hasSubElement ? (byte)subElement : (byte)0;
+        levels[3] = isStructured ? (byte)subElement : (byte)0;
         
-        // Build extended levels if any level >= 255
         List<byte> result = new List<byte>();
-        int maskHigh = (levelCount << 4); // bits 7-4
-        int maskLow = hasSubElement ? 0x08 : 0x00; // bit 3 = 1 for sub-element
+        int maskHigh = (levelCount << 4);
+        int maskLow = isStructured ? 0x08 : 0x00;
         result.Add((byte)(maskHigh | maskLow));
         
         for (int i = 0; i < levelCount; i++)
@@ -121,31 +123,37 @@ public class Plc5Handler : IPlcHandler
         byte[] result = new byte[numberOfBytes];
         int bytesPerElem = addr.BytesPerElements;
 
+        // Determine if the file type requires 4-level addressing (structured)
+        bool isStructured = addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control ||
+                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String;
+
         while (filePosition < numberOfBytes && finalStatus == 0)
         {
-            // Calculate number of elements to read in this chunk
             int maxChunkBytes = PCCCConstants.Df1Limits.MaxReadPayloadBytes;
             int remainingBytes = numberOfBytes - filePosition;
             int chunkBytes = Math.Min(remainingBytes, maxChunkBytes);
             
-            // For structured types (timer/counter/string), ensure we read whole elements
-            if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            if (isStructured)
             {
                 int elemAlign = (chunkBytes + bytesPerElem - 1) / bytesPerElem * bytesPerElem;
                 if (elemAlign > maxChunkBytes) elemAlign -= bytesPerElem;
                 chunkBytes = Math.Max(bytesPerElem, elemAlign);
             }
             
+            // CRITICAL FIX: Calculate the number of ELEMENTS to request, not bytes
+            int chunkElements = chunkBytes / bytesPerElem;
+
             int currentElement = addr.Element + (filePosition / bytesPerElem);
             int subElementOffset = addr.SubElement + ((filePosition % bytesPerElem) / 2);
             
             byte[] logicalAddress = EncodePlc5LogicalAddress(
-                addr.FileNumber, addr.FileType, currentElement, subElementOffset);
+                addr.FileNumber, addr.FileType, currentElement, subElementOffset, isStructured);
             
+            // Send element count, not byte count
             var req = PCCCMessage.CreateTypedReadRequest(
-                logicalAddress, chunkBytes, 0, (byte)MyNode, (byte)TargetNode);
+                logicalAddress, chunkElements, 0, (byte)MyNode, (byte)TargetNode);
             var reply = _protocol.SendRequest(req, out int sts);
             
             if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
@@ -171,16 +179,18 @@ public class Plc5Handler : IPlcHandler
         int reply = 0;
         int bytesPerElem = addr.BytesPerElements;
 
+        bool isStructured = addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control ||
+                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String;
+
         while (filePosition < dataToWrite.Length && reply == 0)
         {
             int maxChunkBytes = PCCCConstants.Df1Limits.MaxWritePayloadBytes;
             int remainingBytes = dataToWrite.Length - filePosition;
             int chunkBytes = Math.Min(remainingBytes, maxChunkBytes);
             
-            // Align to element boundary for structured types
-            if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            if (isStructured)
             {
                 int elemAlign = (chunkBytes + bytesPerElem - 1) / bytesPerElem * bytesPerElem;
                 if (elemAlign > maxChunkBytes) elemAlign -= bytesPerElem;
@@ -191,13 +201,14 @@ public class Plc5Handler : IPlcHandler
             int subElementOffset = addr.SubElement + ((filePosition % bytesPerElem) / 2);
             
             byte[] logicalAddress = EncodePlc5LogicalAddress(
-                addr.FileNumber, addr.FileType, currentElement, subElementOffset);
+                addr.FileNumber, addr.FileType, currentElement, subElementOffset, isStructured);
             
             byte[] chunkData = new byte[chunkBytes];
             Array.Copy(dataToWrite, filePosition, chunkData, 0, chunkBytes);
             
+            int chunkElements = chunkBytes / bytesPerElem;
             var req = PCCCMessage.CreateTypedWriteRequest(
-                logicalAddress, chunkData, 0, (byte)MyNode, (byte)TargetNode);
+                logicalAddress, chunkData, chunkElements, 0, (byte)MyNode, (byte)TargetNode);
             
             if (AsyncMode)
             {

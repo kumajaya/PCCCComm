@@ -112,14 +112,42 @@ public static class Plc5AddressDecoder
         if (string.IsNullOrEmpty(addr)) return false;
 
         addr = addr.ToUpperInvariant();
-        var m = Regex.Match(addr, @"^([A-Z]+)(\d+):(\d+)(?:[/\.](\w+))?$");
+        // Group2 (file number) is now optional (\d*)
+        // Group3 (element) allows hex digits because PLC-5 I/O uses octal
+        var m = Regex.Match(addr, @"^([A-Z]+)(\d*):([0-9A-Fa-f]+)(?:[/\.](\w+))?$");
         if (!m.Success) return false;
 
-        if (!int.TryParse(m.Groups[2].Value, out fileNumber)) return false;
-        if (!int.TryParse(m.Groups[3].Value, out element))    return false;
+        string filePrefix = m.Groups[1].Value;
+        string fileNumStr = m.Groups[2].Value;
+        string elementStr = m.Groups[3].Value;
+        string subStr     = m.Groups[4].Success ? m.Groups[4].Value : "";
 
-        // PLC-5 file type codes per 1770-6.5.16 Table 13-1
-        fileType = m.Groups[1].Value switch
+        // Handle implicit file numbers for PLC-5 I/O and Status
+        if (string.IsNullOrEmpty(fileNumStr))
+        {
+            if (filePrefix == "O")      fileNumber = 0;
+            else if (filePrefix == "I") fileNumber = 1;
+            else if (filePrefix == "S") fileNumber = 2;
+            else return false; // Other file types must specify number
+        }
+        else
+        {
+            if (!int.TryParse(fileNumStr, out fileNumber)) return false;
+        }
+
+        // Parse element: octal for O/I files, decimal otherwise
+        if (filePrefix == "O" || filePrefix == "I")
+        {
+            try { element = Convert.ToInt32(elementStr, 8); }
+            catch { return false; }
+        }
+        else
+        {
+            if (!int.TryParse(elementStr, out element)) return false;
+        }
+
+        // Map PLC-5 file type code (same as before)
+        fileType = filePrefix switch
         {
             "O"   => 0x00,
             "I"   => 0x01,
@@ -140,13 +168,13 @@ public static class Plc5AddressDecoder
             _     => 0x00
         };
 
-        string sub = m.Groups[4].Success ? m.Groups[4].Value : "";
-        subElement = sub switch
+        // Parse subElement (bit or timer/counter member) – unchanged from original
+        subElement = subStr switch
         {
             "PRE" => 1, "ACC" => 2,
             "EN"  => 15, "TT" => 14, "DN" => 13,
             "CU"  => 15, "CD" => 14, "OV" => 12, "UN" => 11, "UA" => 10,
-            _ => int.TryParse(sub, out int bit) ? bit : 0
+            _ => int.TryParse(subStr, out int bit) ? bit : 0
         };
 
         return true;

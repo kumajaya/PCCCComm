@@ -1136,7 +1136,7 @@ class Program
         }
 
         // Encode logical binary address for PLC-5
-        byte[] logicalAddress = Comm.Handlers.Plc5Handler.EncodePlc5LogicalAddress(fileNumber, fileTypeCode, element, 0);
+        byte[] logicalAddress = Comm.Handlers.Plc5Handler.EncodePlc5LogicalAddress(fileNumber, fileTypeCode, element, 0, false);
         try
         {
             byte[] data = pccc.WordRangeRead(logicalAddress, wordOffset, sizeWords);
@@ -1211,7 +1211,7 @@ class Program
             return;
         }
 
-        byte[] logicalAddress = Comm.Handlers.Plc5Handler.EncodePlc5LogicalAddress(fileNumber, fileTypeCode, element, 0);
+        byte[] logicalAddress = Comm.Handlers.Plc5Handler.EncodePlc5LogicalAddress(fileNumber, fileTypeCode, element, 0, false);
         try
         {
             pccc.WordRangeWrite(logicalAddress, wordOffset, dataBytes.ToArray());

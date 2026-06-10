@@ -1207,17 +1207,20 @@ public class PCCCEmulator : IDisposable
         }
         int elementCount = payload[idx] | (payload[idx + 1] << 8); idx += 2;
 
-        int dataBytes = payload.Length - idx;
-        if (dataBytes < elementCount)
+        int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
+        int expectedDataBytes = elementCount * bpe;
+        int byteOffset = element * bpe + subElement * 2;
+
+        if (payload.Length - idx < expectedDataBytes)
         {
             SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
             return;
         }
 
-        byte[] data = new byte[dataBytes];
-        Array.Copy(payload, idx, data, 0, dataBytes);
+        byte[] data = new byte[expectedDataBytes];
+        Array.Copy(payload, idx, data, 0, expectedDataBytes);
 
-        bool ok = _memory.Write(fileType, fileNumber, element, subElement, dataBytes, data);
+        bool ok = _memory.WriteRaw(fileType, fileNumber, byteOffset, expectedDataBytes, data);
         if (ok) SendEmptyResponse(src, tns, 0x4F, 0x67, clientContext);
         else    SendErrorResponse(src, tns, 0x0F, 0x67, 0x10, clientContext);
     }
@@ -1248,9 +1251,11 @@ public class PCCCEmulator : IDisposable
             SendErrorResponse(src, tns, 0x0F, 0x68, 0x01, clientContext);
             return;
         }
-        int bytesToRead = payload[idx] | (payload[idx + 1] << 8);
+        // Fix: The 2-byte field is the number of elements, not bytes.
+        int elementCount = payload[idx] | (payload[idx + 1] << 8);
 
-        int bpe        = _memory.GetBytesPerElement(fileType, fileNumber);
+        int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
+        int bytesToRead = elementCount * bpe;
         int byteOffset = element * bpe + subElement * 2;
 
         byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
@@ -1487,7 +1492,7 @@ public class PCCCEmulator : IDisposable
     ///                  0x17 = TEST-cont   0x18 = TEST-single   0x19 = TEST-step
     ///   Byte 19    : processor mode status/control high byte — fault flags
     ///   Byte 20–21 : program ID
-    ///   Byte 22    : RAM size in Kbytes — 0x20 = 32 KB (1747-L532E)
+    ///   Byte 22    : RAM size in Kbytes — 0x40 = 64 KB (1747-L542)
     ///   Byte 23    : flags (bits 2-7 = program owner node, 0x3F = no owner)
     /// </summary>
     private void SendGetStatusResponse(int dst, int tns, object clientContext)
