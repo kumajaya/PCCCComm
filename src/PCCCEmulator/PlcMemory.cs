@@ -89,7 +89,7 @@ using System.Runtime.CompilerServices;
 ///   - Aggressive inlining on hot path methods
 ///   - Lock-free hot cache reads (only content changes, references are immutable)
 /// </summary>
-public class PlcMemory
+public class PlcMemory : IDisposable
 {
     // ─── Synchronization ──────────────────────────────────────────────────────
     // ReaderWriterLockSlim provides better performance than lock() for read-heavy workloads
@@ -133,14 +133,17 @@ public class PlcMemory
     private const int DirectoryInternalType = 0xFF;
     private const int DirectoryInternalNumber = 0xFF;
 
+    private PCCCEmulator.EmulationFamily _family = PCCCEmulator.EmulationFamily.SlcMicroLogix;
+
     // ─── Constructor ──────────────────────────────────────────────────────────
     /// <summary>
     /// Initializes the PLC memory with default file structures.
     /// If an embedded program (.bin resource) is found, it will be loaded
     /// and merged with the default files.
     /// </summary>
-    public PlcMemory()
+    public PlcMemory(PCCCEmulator.EmulationFamily family = PCCCEmulator.EmulationFamily.SlcMicroLogix)
     {
+        _family = family;
         BuildDirectory();
         BuildDataFiles();
         BuildIoConfig();
@@ -296,7 +299,10 @@ public class PlcMemory
         Register(0x85,  82, 15);       // B15 — Binary file, 41 words
         Register(0x85,  82, 16);       // B16 — Binary file, 41 words
         Register(0x89,  52, 17);       // N17 — Integer file, 26 words
-        Register(0x8D, 840, 18, 84);   // ST18 — String file, 10 strings × 84 bytes/elem
+        if (_family == PCCCEmulator.EmulationFamily.Plc5)
+            Register(0x8D, 880, 18, 88);   // ST18 — String file, 10 strings × 88 bytes/elem
+        else
+            Register(0x8D, 840, 18, 84);   // ST18 — String file, 10 strings × 84 bytes/elem
         Register(0xA4, 400, 19, 40);   // Data Monitor File, 400 bytes, 40 bytes/element
 
 #if INCLUDE_INACTIVE_FILES
@@ -469,10 +475,22 @@ public class PlcMemory
         //   Bytes 2-83: character data (ASCII, one char per byte, unused bytes = 0x00)
         // Note: PCCCComm library packs chars as words (little-endian), so char 0 → byte 2,
         //       char 1 → byte 3, etc. The length field is bytes 0-1 as a 16-bit word.
-        CreateDataFile(0x8D, 18, 840, 84);
+        int stSize;
+        int stElemSize;
+        if (_family == PCCCEmulator.EmulationFamily.Plc5)
+        {
+            stSize = 10 * 88;      // 10 elemen × 88 byte = 880 bytes
+            stElemSize = 88;
+        }
+        else
+        {
+            stSize = 10 * 84;      // 10 elemen × 84 byte = 840 bytes
+            stElemSize = 84;
+        }
+        CreateDataFile(0x8D, 18, stSize, stElemSize);
         // Seed ST18:0 with a default string "EMULATOR OK" for self-test verification
         byte[] st18 = _files[(0x8D, 18)];
-        WriteStString(st18, 0, "EMULATOR OK");
+        WriteStString(st18, 0, "EMULATOR OK", _family);
         // Data Monitor File (type 0xA4) – 10 elements of 40 bytes each = 400 bytes
         CreateDataFile(0xA4, 19, 400, 40);
         // Fill with sample data (optional)
@@ -947,7 +965,7 @@ public class PlcMemory
             if (st18 != null)
             {
                 Array.Clear(st18, 0, st18.Length);
-                WriteStString(st18, 0, "EMULATOR OK");
+                WriteStString(st18, 0, "EMULATOR OK", _family);
             }
             
             for (int n = 29; n <= 31; n++)
@@ -977,7 +995,8 @@ public class PlcMemory
         {
             _rwLock.ExitWriteLock();
         }
-        
+
+        InitializeHotCache();
         Logger.Always(this, "Memory reset to default by Initialize Memory command.");
     }
 
@@ -1001,28 +1020,50 @@ public class PlcMemory
     /// <param name="buf">ST file byte array</param>
     /// <param name="elementIndex">Element index (0-based)</param>
     /// <param name="value">String to write</param>
-    public static void WriteStString(byte[] buf, int elementIndex, string value)
+    public static void WriteStString(byte[] buf, int elementIndex, string value, PCCCEmulator.EmulationFamily family)
     {
-        const int elemSize = 84;
-        const int maxChars = 82;
-        int offset = elementIndex * elemSize;
-        if (offset + elemSize > buf.Length) return;
+        if (family == PCCCEmulator.EmulationFamily.Plc5)
+        {
+            // PLC-5 ST element: 88 bytes (44 words)
+            // word 0 (byte 0-1): max length = 82 (constant)
+            // word 1 (byte 2-3): current length
+            // word 2+ (byte 4+): chars packed 2/word, low byte = char even index, high byte = char odd index
+            const int elemSize = 88;
+            const int maxChars = 82;
+            int offset = elementIndex * elemSize;
+            if (offset + elemSize > buf.Length) return;
+            if (value.Length > maxChars) value = value[..maxChars];
+            int len = value.Length;
 
-        // Clamp to max 82 chars
-        if (value.Length > maxChars) value = value[..maxChars];
-        int len = value.Length;
-
-        // Write length word (little-endian)
-        buf[offset]     = (byte)(len & 0xFF);
-        buf[offset + 1] = (byte)((len >> 8) & 0xFF);
-
-        // Write char data (one ASCII byte per byte, starting at offset+2)
-        for (int i = 0; i < len; i++)
-            buf[offset + 2 + i] = (byte)(value[i] & 0x7F);
-
-        // Zero-fill remaining char bytes
-        for (int i = len; i < maxChars; i++)
-            buf[offset + 2 + i] = 0x00;
+            buf[offset] = 82;          // max length low byte
+            buf[offset + 1] = 0;       // max length high byte
+            buf[offset + 2] = (byte)(len & 0xFF);        // current length low
+            buf[offset + 3] = (byte)((len >> 8) & 0xFF); // current length high
+            for (int i = 0; i < len; i++)
+            {
+                int wordOffset = offset + 4 + (i / 2) * 2;
+                if (i % 2 == 0)
+                    buf[wordOffset] = (byte)value[i];     // low byte
+                else
+                    buf[wordOffset + 1] = (byte)value[i]; // high byte
+            }
+            // Zero-fill remaining char bytes (optional, array already zeroed)
+        }
+        else
+        {
+            // SLC format: 84 bytes, length word at offset, then sequential chars
+            const int elemSize = 84;
+            const int maxChars = 82;
+            int offset = elementIndex * elemSize;
+            if (offset + elemSize > buf.Length) return;
+            if (value.Length > maxChars) value = value[..maxChars];
+            int len = value.Length;
+            buf[offset] = (byte)(len & 0xFF);
+            buf[offset + 1] = (byte)((len >> 8) & 0xFF);
+            for (int i = 0; i < len; i++)
+                buf[offset + 2 + i] = (byte)value[i];
+            // remaining already zero
+        }
     }
 
     // =========================================================================
@@ -1181,5 +1222,10 @@ public class PlcMemory
         
         Console.WriteLine($"      Loaded: {dataLoaded} data files, {progLoaded} program files");
         _programLoaded = true;
+    }
+
+    public void Dispose()
+    {
+        _rwLock?.Dispose();
     }
 }

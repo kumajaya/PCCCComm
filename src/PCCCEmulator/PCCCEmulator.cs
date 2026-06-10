@@ -103,7 +103,7 @@ public class PCCCEmulator : IDisposable
     public enum EmulationFamily
     {
         SlcMicroLogix,   // default, type extender 0xEE, catalog "5/04"
-        Plc5             // type extender high nibble 0xB (e.g., 0xBE), catalog "PLC-5"
+        Plc5             // processor type low nibble 0x?E (e.g., 0xBE), catalog "PLC-5"
     }
 
     private EmulationFamily _family = EmulationFamily.SlcMicroLogix;
@@ -268,12 +268,12 @@ public class PCCCEmulator : IDisposable
                         int eipPort = 44818,
                         EmulationFamily family = EmulationFamily.SlcMicroLogix)
     {
-        _memory = new PlcMemory();
+        _family = family;   // set family before BuildGetStatusPayload is called
+        _memory = new PlcMemory(_family);
         _directoryBytes = _memory.GetDirectory();
         Logger.Always(this, $"Directory loaded: {_directoryBytes?.Length ?? 0} bytes");
 
         _mode = mode;
-        _family = family;   // set family before BuildGetStatusPayload is called
 
         // Build initial GetStatus payload cache using the default processor mode.
         // The cache is dynamically updated via UpdateProcessorMode() whenever the
@@ -345,6 +345,7 @@ public class PCCCEmulator : IDisposable
         Stop();
         _timer?.Dispose();
         _waveformTimer?.Dispose();
+        _memory.Dispose();
         // EIPTransport does not implement IDisposable; Stop() above already drains
         // in-flight requests and closes all resources via its StopAsync() path.
         (_transport as IDisposable)?.Dispose();
@@ -453,8 +454,6 @@ public class PCCCEmulator : IDisposable
         bool hasFuncByte = (cmd == 0x06 || cmd == 0x0F || cmd == 0x0A) && pdu.Length >= 7;
         int func         = hasFuncByte ? pdu[6] : 0;
         int dataOffset   = hasFuncByte ? 7 : 6;
-
-        Logger.Info(this, $"dst={dst} src={src} cmd=0x{cmd:X2} tns={tns:X4} func=0x{func:X2}");
 
         // Extract data payload — everything after the header (+ FUNC byte for 0x0F)
         byte[] data = pdu.Length > dataOffset ? pdu[dataOffset..] : Array.Empty<byte>();
@@ -1181,16 +1180,6 @@ public class PCCCEmulator : IDisposable
 
     /// <summary>
     /// Handles Typed Write (CMD=0x0F, FNC=0x67) for PLC-5.
-    /// Payload format (per 1770-6.5.16 page 7-30):
-    ///   - Type/Data parameter (variable length)
-    ///   - PLC-5 logical binary address (variable)
-    ///   - Number of elements (2 bytes, LE)
-    ///   - Data bytes
-    /// For simplicity, we assume type/data param is 0x31 (ID=3, size=1) and
-    /// logical address is encoded as per EncodePlc5LogicalAddress.
-    /// </summary>
-    /// <summary>
-    /// Handles Typed Write (CMD=0x0F, FNC=0x67) for PLC-5.
     /// Payload: [typeParam 1B] [logical binary address (variable)] [elementCount 2B LE] [data...]
     /// typeParam is skipped (assumed 0x31 — word array).
     /// </summary>
@@ -1489,9 +1478,9 @@ public class PCCCEmulator : IDisposable
     ///                bit 7 = edits in processor. NOT the mode code.
     ///   Byte  1    : 0xEE — type extender
     ///   Byte  2    : 0x34 — extended interface type (DF1 full-duplex, port 0)
-    ///   Byte  3    : 0x49 — extended processor type (SLC 5/03)
+    ///   Byte  3    : 0x5B — extended processor type (SLC 5/04)
     ///   Byte  4    : series/revision
-    ///   Byte  5–15 : bulletin number "5/03" in ASCII, space-padded to 11 bytes
+    ///   Byte  5–15 : bulletin number "5/04" in ASCII, space-padded to 11 bytes
     ///   Byte 16–17 : major error word (0x0000 = no fault)
     ///   Byte 18    : processor mode status/control low byte — mode code
     ///                  0x11 = local PROG   0x1E = local RUN
@@ -1739,7 +1728,7 @@ public class PCCCEmulator : IDisposable
         payload[0] = 0x00;      // Mode/status flags (no edits active)
         payload[1] = 0xEE;      // Type extender
         payload[2] = 0x34;      // Extended interface type (DF1 full-duplex)
-        payload[3] = 0x5B;      // Extended processor type (SLC-5/05)
+        payload[3] = 0x5B;      // Extended processor type (SLC-5/04)
         payload[4] = 0x32;      // Series/revision
 
         // Bulletin number "5/04" in ASCII, space-padded to 11 bytes (bytes 5–15)
@@ -1760,17 +1749,19 @@ public class PCCCEmulator : IDisposable
         return payload;
     }
 
+    /// <summary>
+    /// Gets or sets the processor expansion byte for PLC-5 diagnostic status.
+    /// Default 0x4B (1785-L40E). Other values: 0x4A=1785-L20E, 0x59=1785-L80E, etc.
+    /// </summary>
+    public int Plc5ProcessorExpansionByte { get; set; } = 0x4B;
+
     private byte[] BuildPlc5GetStatusPayload()
     {
-        byte[] payload = new byte[24];
+        // PLC-5 status layout per 1770-6.5.16 Chapter 10, page 10-22 (36 bytes)
+        byte[] payload = new byte[36];
 
-        // Byte 0 bits 0-2: operating status (0=PROG, 2=Local Run, 4=Remote PROG, 6=Remote Run)
-        // We set the appropriate mode from ProcessorModeValue, only converting it to the correct value for the PLC-5.
-        // For convenience, we map:
-        //   LocalRun (0x1E) -> 2
-        //   RemoteRun (0x06) -> 6
-        //   LocalProg (0x11) -> 0? or 4? Leave it at 0 for now.
-        //   RemoteProg (0x01) -> 4
+        // Byte 1 (index 0): operating status (bits 0-2)
+        //   0=PROG, 2=Local Run, 4=Remote PROG, 6=Remote Run
         byte operatingStatus;
         switch (ProcessorModeValue)
         {
@@ -1781,27 +1772,75 @@ public class PCCCEmulator : IDisposable
         }
         payload[0] = operatingStatus;
 
-        // Byte 1: type extender high nibble = 0xB (PLC-5)
-        payload[1] = 0xBE;          // can also be 0xB2, 0xBE, as long as the high nibble
-        // Byte 2: extended interface type (DF1 full-duplex)
-        payload[2] = 0x34;
-        // Byte 3: extended processor type (example 0x5B for PLC-5/40)
-        payload[3] = 0x5B;
-        payload[4] = 0x32;          // series/revision
+        // Byte 2 (index 1): Processor Type (low nibble 0xB = PLC-5) and Expansion flag (high nibble 0xE)
+        payload[1] = 0xEB;   // 0xE0 | 0x0B
 
-        // Bulletin number "PLC-5" (11 bytes, ASCII, space-padded)
-        string catalog = "PLC-5";
-        byte[] catBytes = System.Text.Encoding.ASCII.GetBytes(catalog);
-        Array.Copy(catBytes, 0, payload, 5, catBytes.Length);
-        for (int i = 5 + catBytes.Length; i < 16; i++) payload[i] = 0x20;
+        // Byte 3 (index 2): Processor Expansion Byte (default 1785-L40E)
+        payload[2] = (byte)Plc5ProcessorExpansionByte; // property, default 0x4B
 
-        payload[16] = 0x00; payload[17] = 0x00;   // major error word
-        // Byte 18: not used for mode on PLC-5, remains 0
+        // Bytes 4-7 (index 3-6): size of user memory in words (32-bit LE, 64K words)
+        payload[3] = 0x00;
+        payload[4] = 0x00;
+        payload[5] = 0x01;
+        payload[6] = 0x00;
+
+        // Byte 8 (index 7): series/revision (bits 0-4 revision, bits 5-7 series)
+        payload[7] = 0x32;
+
+        // Byte 9 (index 8): processor number on DH+ link
+        payload[8] = 0x01;
+
+        // Byte 10 (index 9): I/O address (0xFD = scanner)
+        payload[9] = 0xFD;
+
+        // Byte 11 (index 10): I/O and communication parameters (double density + 115K baud)
+        payload[10] = 0x21;
+
+        // Bytes 12-13 (index 11-12): number of data table files (LE, 32 files)
+        payload[11] = 0x20;
+        payload[12] = 0x00;
+
+        // Bytes 14-15 (index 13-14): number of program type files (LE, 24 files)
+        payload[13] = 0x18;
+        payload[14] = 0x00;
+
+        // Byte 16 (index 15): forcing status
+        payload[15] = 0x00;
+        // Byte 17 (index 16): memory protect indication
+        payload[16] = 0x00;
+        // Byte 18 (index 17): bad RAM indication
+        payload[17] = 0x00;
+        // Byte 19 (index 18): debug mode
         payload[18] = 0x00;
+
+        // Bytes 20-21 (index 19-20): hold point file (LE)
         payload[19] = 0x00;
-        payload[20] = 0x00; payload[21] = 0x00;
-        payload[22] = 0x40;          // RAM size 64K
-        payload[23] = 0x3F;
+        payload[20] = 0x00;
+        // Bytes 22-23 (index 21-22): hold point element (LE)
+        payload[21] = 0x00;
+        payload[22] = 0x00;
+
+        // Bytes 24-25 (index 23-24): edit timestamp seconds (LE)
+        payload[23] = 0x00;
+        payload[24] = 0x00;
+        // Bytes 26-27 (index 25-26): edit timestamp minutes (LE)
+        payload[25] = 0x00;
+        payload[26] = 0x00;
+        // Bytes 28-29 (index 27-28): edit timestamp hours (LE)
+        payload[27] = 0x00;
+        payload[28] = 0x00;
+        // Bytes 30-31 (index 29-30): edit timestamp day (LE)
+        payload[29] = 0x00;
+        payload[30] = 0x00;
+        // Bytes 32-33 (index 31-32): edit timestamp month (LE)
+        payload[31] = 0x00;
+        payload[32] = 0x00;
+        // Bytes 34-35 (index 33-34): edit timestamp year (LE)
+        payload[33] = 0x00;
+        payload[34] = 0x00;
+
+        // Byte 36 (index 35): port number this command received on
+        payload[35] = 0x00;
 
         return payload;
     }

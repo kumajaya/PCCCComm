@@ -335,6 +335,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
                 _emulator.IncrementBadPacketsDetected();
                 _emulator.IncrementUndeliveredPackets();
                 _emulator.IncrementNoBufferNakd();
+                SendWithDirectionControl(NAK_FRAME);
                 return;
             }
 

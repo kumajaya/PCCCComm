@@ -48,7 +48,7 @@ using System.Runtime.InteropServices;
 ///   - ParseBuffer()   : protocol-specific frame detection (DLE STX for Full-Duplex, DLE ENQ+address for Half-Duplex)
 ///   - SendResponse()  : immediate (Full-Duplex) or queued (Half-Duplex) response transmission
 /// </summary>
-public abstract class DF1BaseTransport : ILinkTransport
+public abstract class DF1BaseTransport : ILinkTransport, IDisposable
 {
     // ─── Shared Fields (copied from original DF1Transport) ─────────────────────
     protected readonly PCCCEmulator _emulator;
@@ -216,11 +216,10 @@ public abstract class DF1BaseTransport : ILinkTransport
         {
             throw new Exception($"Failed to open port {_port.PortName}: {ex.Message}");
         }
-        finally
-        {
-            SetHealthStatsEnabled(!Logger.Enabled);
-            OnStart();  // Allow derived classes to perform additional startup
-        }
+
+        // Only after successful open, enable health monitor and call derived startup
+        SetHealthStatsEnabled(!Logger.Enabled);
+        OnStart();
     }
 
     /// <summary>
@@ -416,13 +415,12 @@ public abstract class DF1BaseTransport : ILinkTransport
         int cmd = innerArray[2];
         int tns = innerArray[4] | (innerArray[5] << 8);
         bool hasFunc = (innerArray.Length >= 7) && 
-                       (cmd == 0x0F || cmd == 0x06 || cmd == 0x01);
+                       (cmd == 0x0F || cmd == 0x06 || cmd == 0x0A);
         int headerLen = hasFunc ? 7 : 6;
         int dataLen = Math.Max(0, innerArray.Length - headerLen);
 
         string funcStr = hasFunc ? $"0x{innerArray[6]:X2}" : "none";
         Logger.Info(this, $"dst={dst} src={src} cmd=0x{cmd:X2} tns={tns:X4} func={funcStr} dataLen={dataLen}");
-        Logger.Hex(this, "TX:", rawFrame, rawLength);
     }
 
     /// <summary>
@@ -436,7 +434,7 @@ public abstract class DF1BaseTransport : ILinkTransport
 
         int cmd = pdu[2];
         int tns = pdu[4] | (pdu[5] << 8);
-        bool hasFunc = pdu.Length >= 7 && (cmd == 0x0F || cmd == 0x06 || cmd == 0x01);
+        bool hasFunc = pdu.Length >= 7 && (cmd == 0x0F || cmd == 0x06 || cmd == 0x0A);
         int headerLen = hasFunc ? 7 : 6;
         int dataLen = pdu.Length - headerLen;
         int func = hasFunc ? pdu[6] : 0;
@@ -631,4 +629,17 @@ public abstract class DF1BaseTransport : ILinkTransport
     /// (Full-Duplex: DLE STX; Half-Duplex: DLE ENQ + address polling).
     /// </summary>
     protected abstract void ParseBuffer();
+
+    public void Dispose()
+    {
+        if (Interlocked.CompareExchange(ref _isDisposing, 1, 0) != 0) return;
+        
+        _processingCts?.Cancel();
+        _processingCts?.Dispose();
+        
+        // Ensure port is stopped and closed
+        Stop();
+        
+        GC.SuppressFinalize(this);
+    }
 }

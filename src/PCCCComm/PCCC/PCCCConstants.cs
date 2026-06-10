@@ -267,7 +267,7 @@ public static class PCCCConstants
         if (typeExtender == ResponseOffsets.DiagnosticStatus.TypeExtenderSlcMl)
             return ProcessorFamily.SlcMicroLogix;
 
-        // PLC-5: high nibble of type extender = 0xB (0xB0, 0xBE, etc.)
+        // PLC-5: low nibble of processor type (0xE?, 0xEB, etc.)
         if ((typeExtender & ResponseOffsets.DiagnosticStatus.Plc5TypeExtenderMask) == ResponseOffsets.DiagnosticStatus.Plc5TypeExtenderMask)
             return ProcessorFamily.Plc5;
 
@@ -401,9 +401,9 @@ public static class PCCCConstants
             /// <summary>Value of type extender for SLC and MicroLogix families.</summary>
             public const byte TypeExtenderSlcMl = 0xEE;
 
-            /// <summary>Mask for high nibble of type extender to detect PLC-5 family.</summary>
-            /// <remarks>PLC-5 type extender high nibble = 0xB (e.g., 0xB?, 0xBE, etc.).</remarks>
-            public const byte Plc5TypeExtenderMask = 0xB0;
+            /// <summary>Mask for low nibble of processor type to detect PLC-5 family.</summary>
+            /// <remarks>PLC-5 processor type low nibble (e.g., 0x?B, 0xEB, etc.).</remarks>
+            public const byte Plc5TypeExtenderMask = 0x0B;
         }
 
         /// <summary>Offsets in the file directory (FileZeroData) after reading.</summary>

@@ -424,8 +424,7 @@ class Program
 
         try
         {
-            int procType = pccc.GetProcessorType();
-            Console.WriteLine($"OK  (type=0x{procType:X2}  {ProcessorTypeName(procType)})");
+            Console.WriteLine($"OK  ({ProcessorTypeName(pccc)})");
             Console.WriteLine();
             return true;
         }
@@ -790,7 +789,7 @@ class Program
                     continue;
                 }
 
-                string name = ProcessorTypeName(procType);
+                string name = SlcProcessorTypeName(procType);
                 Console.WriteLine($"FOUND  type=0x{procType:X2}  ({name})");
                 found.Add((node, procType));
             }
@@ -820,7 +819,7 @@ class Program
         {
             Console.WriteLine($"  {found.Count} node(s) found:");
             foreach (var (node, procType) in found)
-                Console.WriteLine($"    Node {node,3}  type=0x{procType:X2}  ({ProcessorTypeName(procType)})");
+                Console.WriteLine($"    Node {node,3}  type=0x{procType:X2}  ({SlcProcessorTypeName(procType)})");
         }
 
         // Restore original settings so subsequent demo, stress test, or
@@ -865,7 +864,7 @@ class Program
         try
         {
             int procType = pccc.GetProcessorType();
-            Console.WriteLine($"OK  (type=0x{procType:X2}  {ProcessorTypeName(procType)})");
+            Console.WriteLine($"OK  ({ProcessorTypeName(pccc)})");
         }
         catch (Comm.Pccc.PCCCException ex)
         {
@@ -907,12 +906,12 @@ class Program
     /// This list covers the most common SLC 500 and MicroLogix variants;
     /// unknown codes are returned as "(unknown)".
     /// </summary>
-    private static string ProcessorTypeName(int code) => code switch
+    private static string SlcProcessorTypeName(int code) => code switch
     {
         0x25 => "SLC 5/01 (series A/B)",
         0x49 => "SLC 5/03",
         0x4A => "SLC 5/03 (OS302)",
-        0x4B => "SLC 5/04",
+        0x5B => "SLC 5/04",
         0x4C => "SLC 5/05",
         0x88 => "MicroLogix 1000",
         0x89 => "MicroLogix 1000 (series C)",
@@ -921,8 +920,53 @@ class Program
         0xA2 => "MicroLogix 1400",
         0x31 => "SLC 5/02",
         0x3B => "SLC 500 (fixed)",
-        _    => "unknown",
+        _    => $"SLC/MicroLogix (expansion 0x{code:X2})"
     };
+
+    private static string Plc5ProcessorTypeName(int expansionByte) => expansionByte switch
+    {
+        0x15 => "PLC-5/40B (1785-L40B)",
+        0x22 => "PLC-5/10 (1785-LT4)",
+        0x23 => "PLC-5/60B (1785-L60B)",
+        0x28 => "PLC-5/40L (1785-L40L)",
+        0x29 => "PLC-5/60L (1785-L60L)",
+        0x31 => "PLC-5/11 (1785-L11B)",
+        0x32 => "PLC-5/20 (1785-L20B)",
+        0x33 => "PLC-5/30 (1785-L30B)",
+        0x4A => "PLC-5/20E (1785-L20E)",
+        0x4B => "PLC-5/40E (1785-L40E)",
+        0x55 => "PLC-5/25 (1785-L80B)",
+        0x59 => "PLC-5/80E (1785-L80E)",
+        _    => $"PLC-5 (expansion 0x{expansionByte:X2})"
+    };
+
+    /// <summary>
+    /// Returns a human-readable processor name based on diagnostic status.
+    /// Automatically detects SLC/MicroLogix vs PLC-5 families.
+    /// </summary>
+    private static string ProcessorTypeName(Comm.PCCCComm pccc)
+    {
+        byte[]? diag = pccc.GetDiagnosticStatusRaw();
+        if (diag == null || diag.Length < 4)
+            return "unknown";
+
+        var family = Comm.Pccc.PCCCConstants.DetectFamily(diag);
+        if (family == Comm.Pccc.PCCCConstants.ProcessorFamily.SlcMicroLogix)
+        {
+            int procType = pccc.GetProcessorType();
+            return SlcProcessorTypeName(procType);
+        }
+        else if (family == Comm.Pccc.PCCCConstants.ProcessorFamily.Plc5)
+        {
+            // PLC-5: expansion byte is at index 2 (byte 3 of document)
+            int expansionByte = diag[2];
+            return Plc5ProcessorTypeName(expansionByte);
+        }
+        else
+        {
+            return "unknown processor family";
+        }
+    }
 
 // =============================================================================
 // SECTION 3c — Watch: live address monitor

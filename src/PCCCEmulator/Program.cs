@@ -144,8 +144,11 @@ class Program
             Logger.Always(null, $"EIP mode ignores serial port '{portName}'. Using Ethernet only.");
         }
 
+        PCCCEmulator.EmulationFamily emuFamily = family == "plc5" ? 
+            PCCCEmulator.EmulationFamily.Plc5 : PCCCEmulator.EmulationFamily.SlcMicroLogix;
+
         // Create and start emulator
-        using var emulator = new PCCCEmulator(portName, baud, parity, emulatorMode, eipPort)
+        using var emulator = new PCCCEmulator(portName, baud, parity, emulatorMode, eipPort, emuFamily)
         {
             MyNode = node,
             CheckSum = checksum == "crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc
@@ -162,9 +165,6 @@ class Program
             emulator.RtsAssertDelayMs = rtsAssertDelay;
             emulator.RtsDeassertDelayMs = rtsDeassertDelay;
         }
-
-        emulator.Family = family == "plc5" ? PCCCEmulator.EmulationFamily.Plc5 :
-                                             PCCCEmulator.EmulationFamily.SlcMicroLogix;
 
         // Disable logging if quiet mode is enabled
         if (quietMode)
