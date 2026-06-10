@@ -164,8 +164,15 @@ public static class Plc5AddressDecoder
     ///      [sizeWords 2B LE]
     ///
     ///   B) RSLinx flat 10-byte header (observed from DF1 capture)
-    ///      [00 00] [sizeWords 1B] [00]
-    ///      [fileNum 2B LE] [fileType 1B] [element 1B] [subElement 1B] [byteCount 1B]
+    ///      [00 00] [sizeWords 1B] [00] [0F 00] [fileNum 1B] [element 1B] [subElement 1B] [byteCount 1B]
+    ///      - byte0-1: ignored (wordOffset, always 0)
+    ///      - byte2: sizeWords
+    ///      - byte3: 0x00
+    ///      - byte4-5: constant (0x0F 0x00) used as discriminator
+    ///      - byte6: fileNumber
+    ///      - byte7: element
+    ///      - byte8: subElement
+    ///      - byte9: byteCount (sizeWords * 2)
     ///
     ///   Format is identified by inspecting the candidate mask byte at payload[4]:
     ///   a valid PLC-5 binary address mask has level count 2–4 in bits [7:4].
@@ -192,11 +199,11 @@ public static class Plc5AddressDecoder
 
         // Discriminate by the candidate mask byte at payload[4].
         // Standard format: payload[4] is the binary address mask byte, level count 2–4.
-        // RSLinx flat:     payload[4] is fileNum_hi (0x00), level count = 0.
+        // RSLinx flat:     payload[4] is 0x0F (constant), level count = 0.
         // ASCII marker:    payload[4] == 0x00 && payload[5] == 0x24 ('$').
         int levelCount = (payload[4] >> 4) & 0x0F;
         bool isStandard = (levelCount >= 2 && levelCount <= 4)
-                          || (payload[4] == 0x00 && payload.Length > 5 && payload[5] == 0x24);
+                        || (payload[4] == 0x00 && payload.Length > 5 && payload[5] == 0x24);
 
         if (isStandard)
         {
@@ -210,9 +217,9 @@ public static class Plc5AddressDecoder
             // Decode the logical address (binary or ASCII) into components
             bool ok = (payload[idx] == 0x00 && idx + 1 < payload.Length && payload[idx + 1] == 0x24)
                 ? TryParseAsciiAddress(payload, ref idx,
-                      out fileNumber, out rawFileType, out element, out subElement)
+                    out fileNumber, out rawFileType, out element, out subElement)
                 : Decode(payload, ref idx,
-                      out fileNumber, out rawFileType, out element, out subElement);
+                    out fileNumber, out rawFileType, out element, out subElement);
             if (!ok) return false;
 
             if (idx + 2 > payload.Length) return false;
@@ -223,13 +230,12 @@ public static class Plc5AddressDecoder
         else
         {
             // --- Format B: RSLinx flat 10-byte header ---
-            // [00 00] [sizeWords 1B] [00] [fileNum 2B LE] [fileType 1B] [element 1B] [sub 1B] [byteCount 1B]
             if (payload.Length < 10) return false;
 
             wordOffset = 0;
             sizeWords  = payload[2];
             // payload[3]    = 0x00 padding
-            // payload[4..5] = 0x0F 0x00 (unknown constant, ignored)
+            // payload[4..5] = 0x0F 0x00 (constant)
             fileNumber  = payload[6];
             element     = payload[7];
             subElement  = payload[8];
@@ -237,7 +243,7 @@ public static class Plc5AddressDecoder
             rawFileType = 0;
             dataStart = 10;
             isFlatFormat = true;
-            Logger.Info(null, $"WR flat format: file={fileNumber} elem={element} words={sizeWords}");
+            // Optional debug: Logger.Debug(null, $"WR flat: file={fileNumber} elem={element} words={sizeWords}");
         }
 
         return sizeWords > 0;

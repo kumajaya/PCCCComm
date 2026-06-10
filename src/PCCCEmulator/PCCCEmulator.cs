@@ -1310,17 +1310,50 @@ public class PCCCEmulator : IDisposable
             fileType = Plc5AddressDecoder.Plc5ToSlcFileType(rawFileType);
         }
 
-        int bpe         = _memory.GetBytesPerElement(fileType, fileNumber);
+        // ─── Guard: reject bit‑level subElement (EN/TT/DN etc.) ─────────────────
+        int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
+        if (bpe > 0 && subElement * 2 >= bpe)
+        {
+            // Word Range Read does not support sub‑element access beyond word boundary
+            SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext);
+            return;
+        }
+
         int byteOffset  = wordOffset * 2 + element * bpe + subElement * 2;
         int bytesToRead = sizeWords * 2;
         int fileSize    = _memory.GetFileSize(fileType, fileNumber);
 
-        if (fileSize == 0)                                         { SendErrorResponse(src, tns, 0x0F, 0x01, 0x50, clientContext); return; }
-        if (byteOffset < 0 || byteOffset + bytesToRead > fileSize) { SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext); return; }
+        if (fileSize == 0)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x01, 0x50, clientContext);
+            return;
+        }
+        if (byteOffset < 0 || byteOffset + bytesToRead > fileSize)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext);
+            return;
+        }
 
         byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
-        if (status != 0 || data.Length != bytesToRead)             { SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext); return; }
-
+        // Swap word for RSLinx
+        if (status == 0 && fileType == 0x8A)  // float file
+        {
+            for (int i = 0; i < data.Length; i += 4)
+            {
+                // swap word: word0 (bytes i..i+1) with word1 (bytes i+2..i+3)
+                byte tmp0 = data[i];
+                byte tmp1 = data[i+1];
+                data[i]   = data[i+2];
+                data[i+1] = data[i+3];
+                data[i+2] = tmp0;
+                data[i+3] = tmp1;
+            }
+        }
+        if (status != 0 || data.Length != bytesToRead)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext);
+            return;
+        }
         SendDataResponse(src, tns, 0x4F, data, clientContext);
     }
 
@@ -1356,22 +1389,58 @@ public class PCCCEmulator : IDisposable
             fileType = Plc5AddressDecoder.Plc5ToSlcFileType(rawFileType);
         }
 
+        // ─── Guard: reject bit‑level subElement (EN/TT/DN etc.) ─────────────────
+        int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
+        if (bpe > 0 && subElement * 2 >= bpe)
+        {
+            // Word Range Write does not support sub‑element access beyond word boundary
+            SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+            return;
+        }
+
         int bytesToWrite = sizeWords * 2;
-        if (payload.Length < dataStart + bytesToWrite)             { SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext); return; }
+        if (payload.Length < dataStart + bytesToWrite)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+            return;
+        }
 
         byte[] writeData = new byte[bytesToWrite];
         Array.Copy(payload, dataStart, writeData, 0, bytesToWrite);
 
-        int bpe        = _memory.GetBytesPerElement(fileType, fileNumber);
         int byteOffset = wordOffset * 2 + element * bpe + subElement * 2;
         int fileSize   = _memory.GetFileSize(fileType, fileNumber);
 
-        if (fileSize == 0)                                          { SendErrorResponse(src, tns, 0x0F, 0x00, 0x50, clientContext); return; }
-        if (byteOffset < 0 || byteOffset + bytesToWrite > fileSize) { SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext); return; }
+        if (fileSize == 0)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x00, 0x50, clientContext);
+            return;
+        }
+        if (byteOffset < 0 || byteOffset + bytesToWrite > fileSize)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+            return;
+        }
+
+        if (fileType == 0x8A) // float file
+        {
+            // swap word
+            for (int i = 0; i < writeData.Length; i += 4)
+            {
+                byte tmp0 = writeData[i];
+                byte tmp1 = writeData[i+1];
+                writeData[i]   = writeData[i+2];
+                writeData[i+1] = writeData[i+3];
+                writeData[i+2] = tmp0;
+                writeData[i+3] = tmp1;
+            }
+        }
 
         bool ok = _memory.WriteRaw(fileType, fileNumber, byteOffset, bytesToWrite, writeData);
-        if (ok) SendEmptyResponse(src, tns, 0x4F, 0x00, clientContext);
-        else    SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+        if (ok)
+            SendEmptyResponse(src, tns, 0x4F, 0x00, clientContext);
+        else
+            SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
     }
 
     // ─── Response Helpers ────────────────────────────────────────────────────
