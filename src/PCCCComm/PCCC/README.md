@@ -24,7 +24,7 @@ The table below follows the naming and grouping conventions of the official AB s
 | 9 | Download All Request (Download) | 0x0F | 0x50 | ✅ | |
 | 10 | Download Completed | 0x0F | 0x52 | ✅ | |
 | 11 | Download Request (Download Privilege) | 0x0F | 0x05 | ❌ | |
-| 12 | Echo | 0x0F | 0x00 | ✅ | |
+| 12 | Echo | 0x06 | 0x00 | ✅ | |
 | 13 | Enable Outputs | 0x07 | 0x01 | ❌ | |
 | 14 | Enable PLC Scanning | 0x07 | 0x03 | ❌ | |
 | 15 | Enter Download Mode | 0x07 | 0x04 | ❌ | |
@@ -70,8 +70,8 @@ The table below follows the naming and grouping conventions of the official AB s
 | 55 | Upload All Request (Upload) | 0x0F | 0x53 | ✅ | |
 | 56 | Upload Completed | 0x0F | 0x55 | ✅ | |
 | 57 | Upload | 0x0F | 0x06 | ❌ | |
-| 58 | Word Range Read (Read Block) | 0x0F | 0x01 | ❌ | Legacy |
-| 59 | Word Range Write (Write Block) | 0x0F | 0x00 | ❌ | Legacy |
+| 58 | Word Range Read (Read Block) | 0x0F | 0x01 | ✅ | PLC‑5 only, logical binary addressing |
+| 59 | Word Range Write (Write Block) | 0x0F | 0x00 | ✅ | PLC‑5 only, logical binary addressing |
 | 60 | Write Bytes Physical (Physical Write) | 0x0F | 0x18 | ❌ | Legacy |
 
 > **Notes:**  
@@ -136,6 +136,29 @@ The following sections describe the implemented commands in more detail, grouped
 - Bit-level writes on PLC‑5 are implemented via **read‑modify‑write workaround** (read whole word, modify bit, write back). This requires two transactions and is **not atomic**, but sufficient for most applications.  
 - For multi‑bit writes or atomic operations, use `WriteData` on the word address directly.
 
+### PLC‑5 Word Range Read / Write
+
+| Method | CMD | FNC | Description |
+|--------|-----|-----|-------------|
+| `WordRangeRead(byte[] logicalAddress, int wordOffset, int sizeWords)` | 0x0F | 0x01 | Reads a block of 16‑bit words starting at a word offset within a file. |
+| `WordRangeWrite(byte[] logicalAddress, int wordOffset, byte[] data)` | 0x0F | 0x00 | Writes a block of 16‑bit words (data length must be even). |
+
+**Addressing:**  
+Only **logical binary addressing** is supported (per AB 1770‑6.5.16 Chapter 13).  
+Use `EncodePlc5LogicalAddress()` helper in `Plc5Handler` to build the address byte array.
+
+**Constraints:**  
+- Maximum data size is constrained by the link‑layer payload limits (`MaxWritePayloadBytes` = 164 bytes, i.e., 82 words).  
+- The emulator supports this command in PLC‑5 mode.  
+
+**Example (from Example client CLI):**  
+```
+PCCC> wordread N 7 0 0 5
+Read 10 bytes: 11 22 33 44 55 66 00 00 00 00
+PCCC> wordwrite N 7 0 0 1122 3344 5566
+Wrote 3 word(s) successfully.
+```
+
 ### File‑Based Upload/Download (SLC 5/03+ and ML1100/1200/1500)
 
 | Method | CMD | FNC | Description |
@@ -181,7 +204,7 @@ The following sections describe the implemented commands in more detail, grouped
 | `ResetDiagnosticCounters()` | 0x06 | 0x07 | Reset diagnostic counters |
 | `ReadLinkParameters()` | 0x06 | 0x09 | Read DH485 max node address |
 | `SetLinkParameters(byte)` | 0x06 | 0x0A | Set DH485 max node address |
-| `Echo(byte[])` | 0x0F | 0x00 | Echo test (returns same data) |
+| `Echo(byte[])` | 0x06 | 0x00 | Echo test (returns same data) |
 | `InitializeMemory()` | 0x0F | 0x57 | Reset processor memory (destructive) |
 | `ApplyPortConfiguration()` | 0x0F | 0x8F | Apply stored port configuration |
 
@@ -307,7 +330,7 @@ The library includes a **PCCCEmulator** that can simulate both SLC and PLC‑5 p
 - Mode control (Run/Program) via Set CPU Mode (FNC 0x3A)
 - Force management (Disable only for PLC‑5)
 - Diagnostic counters and link parameters
-- Echo, InitializeMemory
+- InitializeMemory
 
 To run the emulator in PLC‑5 mode:
 

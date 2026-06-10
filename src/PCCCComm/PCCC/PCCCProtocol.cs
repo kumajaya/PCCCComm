@@ -388,6 +388,31 @@ namespace PCCCComm.Pccc
             return reply.Data;
         }
 
+        /// <summary>Performs a Word Range Read (PLC-5, FNC=0x01).</summary>
+        public byte[] WordRangeRead(byte[] logicalAddress, int wordOffset, int sizeWords,
+            byte myNode, byte targetNode)
+        {
+            var req = PCCCMessage.CreateWordRangeReadRequest(logicalAddress, wordOffset, sizeWords,
+                0, myNode, targetNode);
+            var reply = SendRequest(req, out int sts);
+            if (sts != Sts.Success)
+                throw new PCCCException($"WordRangeRead failed: {PCCCErrors.DecodeStatus(sts)}");
+            return reply?.Data ?? Array.Empty<byte>();
+        }
+
+        /// <summary>Performs a Word Range Write (PLC-5, FNC=0x00).</summary>
+        public void WordRangeWrite(byte[] logicalAddress, int wordOffset, byte[] data,
+            byte myNode, byte targetNode)
+        {
+            if (data.Length % 2 != 0)
+                throw new ArgumentException("Data length must be even for word write.", nameof(data));
+            var req = PCCCMessage.CreateWordRangeWriteRequest(logicalAddress, wordOffset, data,
+                0, myNode, targetNode);
+            var reply = SendRequest(req, out int sts);
+            if (sts != Sts.Success)
+                throw new PCCCException($"WordRangeWrite failed: {PCCCErrors.DecodeStatus(sts)}");
+        }
+
         /// <summary>
         /// Returns true if there is a pending request waiting for the given TNS.
         /// </summary>

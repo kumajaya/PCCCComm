@@ -71,7 +71,7 @@ public class Plc5Handler : IPlcHandler
     /// Levels are 1-byte each, with 0xFF extended to 3 bytes for values >= 255.
     /// For SLC-style files: level1=file number, level2=file type, level3=element, level4=sub-element.
     /// </summary>
-    private byte[] EncodePlc5LogicalAddress(int fileNumber, int fileType, int element, int subElement)
+    public static byte[] EncodePlc5LogicalAddress(int fileNumber, int fileType, int element, int subElement)
     {
         // Determine number of levels and their values
         bool hasSubElement = subElement != 0 && subElement != 99;
@@ -514,6 +514,28 @@ public class Plc5Handler : IPlcHandler
             }
             return WriteRawDataWithChunking(p, converted);
         }
+    }
+
+    public byte[] WordRangeRead(byte[] logicalAddress, int wordOffset, int sizeWords)
+    {
+        if (logicalAddress == null || logicalAddress.Length == 0)
+            throw new ArgumentException("Logical address cannot be null or empty.", nameof(logicalAddress));
+        if (sizeWords <= 0)
+            throw new ArgumentOutOfRangeException(nameof(sizeWords), "Size must be positive.");
+
+        return _protocol.WordRangeRead(logicalAddress, wordOffset, sizeWords,
+            (byte)MyNode, (byte)TargetNode);
+    }
+
+    public void WordRangeWrite(byte[] logicalAddress, int wordOffset, byte[] data)
+    {
+        if (logicalAddress == null || logicalAddress.Length == 0)
+            throw new ArgumentException("Logical address cannot be null or empty.", nameof(logicalAddress));
+        if (data == null || data.Length == 0 || data.Length % 2 != 0)
+            throw new ArgumentException("Data must be non‑empty and have even number of bytes.", nameof(data));
+
+        _protocol.WordRangeWrite(logicalAddress, wordOffset, data,
+            (byte)MyNode, (byte)TargetNode);
     }
 
     // ---------------------------------------------------------------------

@@ -460,6 +460,25 @@ public class PCCCComm : IDisposable, IHandlerContext
         return _handler!.GetML1500DataMemory();
     }
 
+    /// <summary>Word Range Read for PLC-5 (FNC=0x01).</summary>
+    public byte[] WordRangeRead(byte[] logicalAddress, int wordOffset, int sizeWords)
+    {
+        EnsureHandler();
+        if (_handler is Plc5Handler plc5)
+            return plc5.WordRangeRead(logicalAddress, wordOffset, sizeWords);
+        throw new NotSupportedException("WordRangeRead is only supported for PLC-5 processors.");
+    }
+
+    /// <summary>Word Range Write for PLC-5 (FNC=0x00).</summary>
+    public void WordRangeWrite(byte[] logicalAddress, int wordOffset, byte[] data)
+    {
+        EnsureHandler();
+        if (_handler is Plc5Handler plc5)
+            plc5.WordRangeWrite(logicalAddress, wordOffset, data);
+        else
+            throw new NotSupportedException("WordRangeWrite is only supported for PLC-5 processors.");
+    }
+
     // ─── Comms management (unchanged from original) ────────────────────────
     
     private void EnsureProtocol()

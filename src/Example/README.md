@@ -238,6 +238,8 @@ PCCC>
 | `write <addr> <val> [val…]` | Write one or more integers to address |
 | `writestring <addr> <text>` | Write ASCII string to an ST file element |
 | `sendhex <DST> <CMD> <FNC> [bytes…]` | Send raw PCCC PDU (all values hex) |
+| `wordread <fileType> <fileNumber> <element> <wordOffset> <sizeWords>` | Word Range Read (PLC‑5 only, logical binary addressing) |
+| `wordwrite <fileType> <fileNumber> <element> <wordOffset> <hex...>` | Word Range Write (PLC‑5 only, data as hex words, low byte first) |
 
 Address format examples: `N7:0`, `F8:5`, `B3:0`, `B3:0/3` (bit), `ST18:0`, `O0:0`, `I1:0`.
 
@@ -276,7 +278,46 @@ DST, CMD, FNC, and data bytes are user‑supplied in hexadecimal.
 ```
 # Read N7:0 (file 7, type 0x89, element 0, 2 bytes)
 PCCC> sendhex 01 0F A1 02 07 89 00
+      TX: 01 00 0F 00 00 00 A1 02 07 89 00
+      RX: 00 01 4F 00 A8 00 7B 00
+
+# Echo test (CMD=0x06, FNC=0x00) — returns the same data bytes
+PCCC> sendhex 01 06 00 41 42 43
+      TX: 01 00 06 00 00 00 00 41 42 43
+      RX: 00 01 46 00 1B 00 00 41 42 43
 ```
+
+### `wordread` and `wordwrite` detail
+
+These commands implement **Word Range Read (0x0F/0x01)** and **Word Range Write (0x0F/0x00)** for
+PLC‑5 processors. They operate at the word (16‑bit) level and require **logical binary addressing**
+(per AB Publication 1770‑6.5.16 Chapter 13). The address is built from the provided file type,
+file number, element number, and a word offset within that element.
+
+```
+# Read 5 words (10 bytes) from N7:0 starting at word offset 0
+PCCC> wordread N 7 0 0 5
+Read 10 bytes:
+   00 00 E7 03 00 00 00 00 00 00
+
+# Write three words (0x2211, 0x4433, 0x6655) to N7:0 offset 0
+PCCC> wordwrite N 7 0 0 1122 3344 5566
+Wrote 3 word(s) successfully.
+
+# Read back to verify
+PCCC> wordread N 7 0 0 5
+Read 10 bytes:
+   11 22 33 44 55 66 00 00 00 00
+```
+
+> **Note:** Data for `wordwrite` is supplied as hexadecimal bytes **low byte first** (little‑endian
+> word order). For example, `1122` writes `0x22` to the low byte and `0x11` to the high byte of the
+> first word. This matches the wire format used by the PCCC protocol.
+
+**Constraints:**
+- Maximum size is limited by DF1 payload (164 bytes = 82 words for write, 236 bytes = 118 words for read).
+- Only **logical binary addressing** is supported — ASCII addressing (e.g. `$N7:0`) is not implemented.
+- The target processor family must be PLC‑5; these commands are not available for SLC/MicroLogix.
 
 ### `scannodes` detail
 

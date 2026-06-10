@@ -454,10 +454,12 @@ namespace PCCCComm.Pccc
                 PCCCConstants.DiagnosticFnc.SetLinkParams, new byte[] { maxAddress });
         }
 
-        /// <summary>Creates an Echo request (0x0F/0x00).</summary>
+        /// <summary>
+        /// Creates an Echo request using CMD=0x06 (Diagnostic Status) with FNC=0x00.
+        /// </summary>
         public static PCCCMessage CreateEchoRequest(byte[] data, ushort tns, byte myNode, byte targetNode)
         {
-            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.DiagnosticStatus, 0, tns,
                 PCCCConstants.Fnc.Echo, data ?? Array.Empty<byte>());
         }
 
@@ -511,6 +513,44 @@ namespace PCCCComm.Pccc
             body.AddRange(data);
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
                 PCCCConstants.Fnc.TypedWrite, body.ToArray());
+        }
+
+        /// <summary>
+        /// Creates a Word Range Read request for PLC-5 (CMD=0x0F, FNC=0x01).
+        /// </summary>
+        public static PCCCMessage CreateWordRangeReadRequest(byte[] logicalAddress, int wordOffset, int sizeWords,
+            ushort tns, byte myNode, byte targetNode)
+        {
+            var body = new List<byte>();
+            body.Add((byte)(wordOffset & 0xFF));
+            body.Add((byte)((wordOffset >> 8) & 0xFF));
+            body.Add(0x00); body.Add(0x00); // totalTrans – ignored
+            body.AddRange(logicalAddress);
+            body.Add((byte)(sizeWords & 0xFF));
+            body.Add((byte)((sizeWords >> 8) & 0xFF));
+
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.WordRangeRead, body.ToArray());
+        }
+
+        /// <summary>
+        /// Creates a Word Range Write request for PLC-5 (CMD=0x0F, FNC=0x00).
+        /// </summary>
+        public static PCCCMessage CreateWordRangeWriteRequest(byte[] logicalAddress, int wordOffset, byte[] data,
+            ushort tns, byte myNode, byte targetNode)
+        {
+            int sizeWords = data.Length / 2;
+            var body = new List<byte>();
+            body.Add((byte)(wordOffset & 0xFF));
+            body.Add((byte)((wordOffset >> 8) & 0xFF));
+            body.Add(0x00); body.Add(0x00);
+            body.AddRange(logicalAddress);
+            body.Add((byte)(sizeWords & 0xFF));
+            body.Add((byte)((sizeWords >> 8) & 0xFF));
+            body.AddRange(data);
+
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.WordRangeWrite, body.ToArray());
         }
     }
 }

@@ -1052,6 +1052,145 @@ class Program
         Console.WriteLine($"  Watch stopped. {readCount} reads, {changeCount} change(s) in {startTime.Elapsed:hh\\:mm\\:ss}.");
     }
 
+    /// <summary>
+    /// Handles "wordread" interactive command.
+    /// Usage: wordread <file> <element> <wordOffset> <sizeWords>
+    /// Example: wordread N7 0 0 10
+    /// Reads 10 words (20 bytes) from N7:0 starting at word offset 0.
+    /// </summary>
+    private static void HandleWordRead(Comm.PCCCComm pccc, string[] parts)
+    {
+        if (parts.Length < 5)
+        {
+            Console.WriteLine("Usage: wordread <fileType> <fileNumber> <element> <wordOffset> <sizeWords>");
+            Console.WriteLine("  fileType : N, F, B, T, C, ST, etc. (case-insensitive)");
+            Console.WriteLine("  fileNumber: decimal (e.g., 7 for N7)");
+            Console.WriteLine("  element   : element number (e.g., 0)");
+            Console.WriteLine("  wordOffset: word offset within element (e.g., 0)");
+            Console.WriteLine("  sizeWords : number of 16-bit words to read");
+            Console.WriteLine("Example: wordread N 7 0 0 10");
+            return;
+        }
+
+        string fileTypeStr = parts[1].ToUpperInvariant();
+        if (!int.TryParse(parts[2], out int fileNumber) ||
+            !int.TryParse(parts[3], out int element) ||
+            !int.TryParse(parts[4], out int wordOffset) ||
+            !int.TryParse(parts[5], out int sizeWords))
+        {
+            Console.WriteLine("Invalid numeric parameters.");
+            return;
+        }
+
+        // Map file type letter to PLC-5 file type code (per 1770-6.5.16 Table 13-1)
+        int fileTypeCode = Plc5FileTypeCode(fileTypeStr);
+
+        if (fileTypeCode == 0 && fileTypeStr != "0")
+        {
+            Console.WriteLine($"Unknown file type: {fileTypeStr}");
+            return;
+        }
+
+        // Encode logical binary address for PLC-5
+        byte[] logicalAddress = Comm.Handlers.Plc5Handler.EncodePlc5LogicalAddress(fileNumber, fileTypeCode, element, 0);
+        try
+        {
+            byte[] data = pccc.WordRangeRead(logicalAddress, wordOffset, sizeWords);
+            Console.WriteLine($"Read {data.Length} bytes:");
+            WriteHex("  ", data, data.Length);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"WordRangeRead failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Handles "wordwrite" interactive command.
+    /// Usage: wordwrite <file> <element> <wordOffset> <dataHex...>
+    /// Example: wordwrite N7 0 0 0010 0020 0030
+    /// Writes 3 words (6 bytes) to N7:0 starting at word offset 0.
+    /// </summary>
+    private static void HandleWordWrite(Comm.PCCCComm pccc, string[] parts)
+    {
+        if (parts.Length < 5)
+        {
+            Console.WriteLine("Usage: wordwrite <fileType> <fileNumber> <element> <wordOffset> <dataHex...>");
+            Console.WriteLine("  dataHex : hex values (2 bytes per word, low byte first)");
+            Console.WriteLine("Example: wordwrite N 7 0 0 0010 0020 0030");
+            return;
+        }
+
+        string fileTypeStr = parts[1].ToUpperInvariant();
+        if (!int.TryParse(parts[2], out int fileNumber) ||
+            !int.TryParse(parts[3], out int element) ||
+            !int.TryParse(parts[4], out int wordOffset))
+        {
+            Console.WriteLine("Invalid numeric parameters.");
+            return;
+        }
+
+        // Parse hex data bytes
+        var dataBytes = new List<byte>();
+        for (int i = 5; i < parts.Length; i++)
+        {
+            string hex = parts[i];
+            // Allow either "0010" (2 bytes) or "10" (1 byte)
+            if (hex.Length % 2 != 0)
+            {
+                Console.WriteLine($"Invalid hex data: '{hex}' (must have even number of characters)");
+                return;
+            }
+            for (int j = 0; j < hex.Length; j += 2)
+            {
+                if (!byte.TryParse(hex.Substring(j, 2), System.Globalization.NumberStyles.HexNumber, null, out byte b))
+                {
+                    Console.WriteLine($"Invalid hex byte: '{hex.Substring(j, 2)}'");
+                    return;
+                }
+                dataBytes.Add(b);
+            }
+        }
+
+        if (dataBytes.Count % 2 != 0)
+        {
+            Console.WriteLine("Total data must be an even number of bytes (whole words).");
+            return;
+        }
+
+        // Map file type
+        int fileTypeCode = Plc5FileTypeCode(fileTypeStr);
+
+        if (fileTypeCode == 0 && fileTypeStr != "0")
+        {
+            Console.WriteLine($"Unknown file type: {fileTypeStr}");
+            return;
+        }
+
+        byte[] logicalAddress = Comm.Handlers.Plc5Handler.EncodePlc5LogicalAddress(fileNumber, fileTypeCode, element, 0);
+        try
+        {
+            pccc.WordRangeWrite(logicalAddress, wordOffset, dataBytes.ToArray());
+            Console.WriteLine($"Wrote {dataBytes.Count / 2} word(s) successfully.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"WordRangeWrite failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Translates a file type letter to PLC-5 wire file type code (1770-6.5.16 Table 13-1)
+    /// </summary>
+    private static int Plc5FileTypeCode(string letter) => letter switch
+    {
+        "O"  => 0x00, "I"  => 0x01, "S"  => 0x02, "B"  => 0x03,
+        "T"  => 0x04, "C"  => 0x05, "R"  => 0x06, "N"  => 0x07,
+        "F"  => 0x08, "D"  => 0x09, "ST" => 0x0A, "A"  => 0x0B,
+        "L"  => 0x0C, "MG" => 0x0D, "PD" => 0x0E, "PLS"=> 0x0F,
+        _    => 0x00
+    };
+
 // =============================================================================
 // SECTION 4 — Interactive CLI
 // =============================================================================
@@ -1198,6 +1337,14 @@ class Program
                     //          watch N7:5 200
                     case "watch":
                         HandleWatch(pccc, parts);
+                        break;
+
+                    case "wordread":
+                        HandleWordRead(pccc, parts);
+                        break;
+
+                    case "wordwrite":
+                        HandleWordWrite(pccc, parts);
                         break;
 
                     default:
@@ -2346,6 +2493,10 @@ class Program
         Console.WriteLine("  writestring <addr> <text>      Write string to ST file");
         Console.WriteLine("  sendhex <DST> <CMD> <FNC> [data...]");
         Console.WriteLine("                                 Send raw PCCC PDU (hex bytes)");
+        Console.WriteLine("  wordread <type> <num> <elem> <offset> <words>");
+        Console.WriteLine("                                 Word Range Read (PLC-5)");
+        Console.WriteLine("  wordwrite <type> <num> <elem> <offset> <hex...>");
+        Console.WriteLine("                                 Word Range Write (PLC-5)");
         Console.WriteLine();
         Console.WriteLine("Processor:");
         Console.WriteLine("  type                           Show processor type code");
