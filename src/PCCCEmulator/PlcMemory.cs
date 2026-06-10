@@ -64,8 +64,10 @@ using System.Runtime.CompilerServices;
 ///     15  B     41    82     B15:0–B15:40
 ///     16  B     41    82     B16:0–B16:40
 ///     17  N     26    52     N17:0–N17:25
-///     18  ST    10   840     ST18:0–ST18:9, 84 bytes/elem (2-byte len + 82 chars)
-///  19–28  —     —     —      Inactive slots (require INCLUDE_INACTIVE_FILES)
+///     18  ST    10   840/880 ST18:0–ST18:9, 84 bytes/elem (SLC) or 88 bytes/elem (PLC-5)
+///     19  L     25   100     L19:0–L19:24 (PLC-5 only), 4 bytes/elem
+///     20  A4    10   400     Data Monitor File (type 0xA4), 40 bytes/elem
+///  21–28  —     —     —      Inactive slots (reserved)
 ///     29  B     26    52     B29:0–B29:25
 ///     30  B     26    52     B30:0–B30:25
 ///     31  B     26    52     B31:0–B31:25
@@ -210,9 +212,9 @@ public class PlcMemory : IDisposable
         const int numProgramFiles = 24;    // SYS×2 + LAD×22
         const int numDataFiles = 32;       // 32 data file slots
 #else
-        const int dirSize = 429;           // 79 + (35 × 10) for active-only layout (23 data + 12 prog)
+        const int dirSize = 439;           // 79 + (36 × 10) for active-only layout (24 data + 12 prog)
         const int numProgramFiles = 12;    // SYS×2 + LAD×10
-        const int numDataFiles = 23;       // 23 active data files
+        const int numDataFiles = 24;       // 24 active data files
 #endif
         var dir = new byte[dirSize];
 
@@ -300,10 +302,15 @@ public class PlcMemory : IDisposable
         Register(0x85,  82, 16);       // B16 — Binary file, 41 words
         Register(0x89,  52, 17);       // N17 — Integer file, 26 words
         if (_family == PCCCEmulator.EmulationFamily.Plc5)
+        {
             Register(0x8D, 880, 18, 88);   // ST18 — String file, 10 strings × 88 bytes/elem
+            Register(0x0C, 100, 19, 4);    // L19 — Long integer file, 25 elemen × 4 bytes = 100 bytes
+        }
         else
+        {
             Register(0x8D, 840, 18, 84);   // ST18 — String file, 10 strings × 84 bytes/elem
-        Register(0xA4, 400, 19, 40);   // Data Monitor File, 400 bytes, 40 bytes/element
+        }
+        Register(0xA4, 400, 20, 40);   // Data Monitor File, 400 bytes, 40 bytes/element
 
 #if INCLUDE_INACTIVE_FILES
         // Inactive data files 18-28 (type 0x85 = Binary, size 0)
@@ -491,10 +498,22 @@ public class PlcMemory : IDisposable
         // Seed ST18:0 with a default string "EMULATOR OK" for self-test verification
         byte[] st18 = _files[(0x8D, 18)];
         WriteStString(st18, 0, "EMULATOR OK", _family);
+
+        // PLC-5 Long integer file (type 0x0C, 4 bytes per element)
+        // Example: L19 with 25 elements → 100 bytes
+        if (_family == PCCCEmulator.EmulationFamily.Plc5)
+        {
+            CreateDataFile(0x0C, 19, 100, 4);
+            // Optional: isi beberapa elemen dengan nilai contoh
+            byte[] longFile = _files[(0x0C, 19)];
+            BitConverter.GetBytes(123456789).CopyTo(longFile, 0);   // L19:0 = 123456789
+            BitConverter.GetBytes(-987654321).CopyTo(longFile, 4);  // L19:1 = -987654321
+        }
+
         // Data Monitor File (type 0xA4) – 10 elements of 40 bytes each = 400 bytes
-        CreateDataFile(0xA4, 19, 400, 40);
+        CreateDataFile(0xA4, 20, 400, 40);
         // Fill with sample data (optional)
-        byte[] dmData = _files[(0xA4, 19)];
+        byte[] dmData = _files[(0xA4, 20)];
         // Fill with number pattern 0..399 for debugging
         for (int i = 0; i < dmData.Length; i++) dmData[i] = (byte)(i & 0xFF);
         CreateDataFile(0x85, 29,  52, 2);   // B29 — 26 words
