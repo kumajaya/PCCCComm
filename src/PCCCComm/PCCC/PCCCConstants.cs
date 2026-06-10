@@ -106,10 +106,9 @@ public static class PCCCConstants
         public const byte EnableOutputs = 0x01;
 
         // --- I/O Configuration -----------------------------------------------
-        /// <summary>Get slot count / I/O config (0xA2).</summary>
+        /// <summary>Get slot count and I/O config (0xA2). Used for both slot count and I/O config queries,
+        /// differentiated by the data bytes in the request body.</summary>
         public const byte GetSlotCount = 0xA2;
-        /// <summary>Get I/O config (0xA2, same FNC but different data).</summary>
-        public const byte GetIOConfig = 0xA2;
 
         // --- Echo -----------------------------------------------------------
         /// <summary>Echo command (0x00).</summary>

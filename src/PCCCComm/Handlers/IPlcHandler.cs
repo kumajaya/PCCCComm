@@ -40,7 +40,8 @@ public interface IPlcHandler
     /// <summary>Sets the CPU mode using a raw mode value.</summary>
     int SetCpuMode(byte modeValue);
     
-    /// <summary>Returns 1 if the processor is in Run mode, 0 otherwise.</summary>
+    /// <summary>Returns 1 if the processor is in Run mode, 0 if not in Run mode,
+    /// or -1 if the diagnostic status could not be retrieved.</summary>
     int GetRunMode();
     
     /// <summary>Disables forces on the processor.</summary>

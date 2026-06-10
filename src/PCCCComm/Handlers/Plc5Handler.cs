@@ -74,7 +74,7 @@ public class Plc5Handler : IPlcHandler
     public static byte[] EncodePlc5LogicalAddress(int fileNumber, int fileType, int element, int subElement)
     {
         // Determine number of levels and their values
-        bool hasSubElement = subElement != 0 && subElement != 99;
+        bool hasSubElement = subElement > 0;
         int levelCount = hasSubElement ? 4 : 3;
         
         // Prepare levels (4 max)
@@ -303,6 +303,10 @@ public class Plc5Handler : IPlcHandler
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
+        // ── Override for PLC-5 String file (88 bytes/element) ──
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            p.BytesPerElements = 88;
+
         short arrayElements = (short)(numberOfElements - 1);
         if (arrayElements < 0) arrayElements = 0;
         if (p.BitNumber < 16)
@@ -332,12 +336,17 @@ public class Plc5Handler : IPlcHandler
             case (byte)PCCCConstants.SlcFileTypeCode.String:
                 for (int i = 0; i <= arrayElements; i++)
                 {
-                    int strLen = BitConverter.ToInt16(returnedData, i * 84);
+                    int baseOffset = i * 88;  // PLC-5 ST = 44 words = 88 bytes
+                    int strLen = BitConverter.ToInt16(returnedData, baseOffset + 2); // word 1 = current length
                     if (strLen > 82) strLen = 82;
                     var sb = new StringBuilder();
                     for (int j = 0; j < strLen; j++)
                     {
-                        char c = (char)returnedData[(i * 84) + 2 + j];
+                        // PLC-5: word 2+ (offset 4+), chars dikemas: low byte = char index genap, high byte = char index ganjil
+                        int wordOffset = baseOffset + 4 + (j / 2) * 2;
+                        char c = (j % 2 == 0)
+                            ? (char)returnedData[wordOffset]        // low byte = char even index
+                            : (char)returnedData[wordOffset + 1];   // high byte = char odd index
                         if (c == 0) break;
                         sb.Append(c);
                     }
@@ -422,6 +431,9 @@ public class Plc5Handler : IPlcHandler
     public int WriteData(string startAddress, int numberOfElements, int[] dataToWrite)
     {
         DataAddress p = PCCCParser.Parse(startAddress);
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            throw new PCCCException("Use WriteData(string, string) for ST files.");
+
         byte[] converted = new byte[numberOfElements * p.BytesPerElements];
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
@@ -448,6 +460,8 @@ public class Plc5Handler : IPlcHandler
     {
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            throw new PCCCException("Use WriteData(string, string) for ST files.");
 
         // Bit-level write (single element only)
         if (p.BitNumber >= 0 && p.BitNumber < 16 && numberOfElements == 1)
@@ -494,11 +508,24 @@ public class Plc5Handler : IPlcHandler
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
         {
-            byte[] stElement = new byte[84];
-            stElement[0] = (byte)(dataToWrite.Length & 0xFF);
-            stElement[1] = (byte)((dataToWrite.Length >> 8) & 0xFF);
+            // PLC-5 ST element: 88 bytes (44 words)
+            // word 0 (byte 0-1): max length = 82 (constant)
+            // word 1 (byte 2-3): current length
+            // word 2+ (byte 4+): chars dikemas 2/word, low byte = char even index, high byte = char odd index
+            p.BytesPerElements = 88;    // PLC-5 ST = 44 words = 88 bytes
+            byte[] stElement = new byte[88];
+            stElement[0] = 82;          // max length low byte
+            stElement[1] = 0;           // max length high byte
+            stElement[2] = (byte)(dataToWrite.Length & 0xFF);   // current length low
+            stElement[3] = (byte)((dataToWrite.Length >> 8) & 0xFF); // current length high
             for (int i = 0; i < dataToWrite.Length; i++)
-                stElement[2 + i] = (byte)dataToWrite[i];
+            {
+                int wordOffset = 4 + (i / 2) * 2;
+                if (i % 2 == 0)
+                    stElement[wordOffset] = (byte)dataToWrite[i];     // low byte
+                else
+                    stElement[wordOffset + 1] = (byte)dataToWrite[i]; // high byte
+            }
             return WriteRawDataWithChunking(p, stElement);
         }
         else

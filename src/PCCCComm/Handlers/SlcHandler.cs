@@ -395,7 +395,8 @@ public class SlcHandler : IPlcHandler
     /// <summary>
     /// Returns 1 if the processor is in Run mode, 0 otherwise.
     /// Reads diagnostic status and checks byte 18 (mode code).
-    /// Run mode codes: 0x06 (Remote Run) or 0x1E (Local Run).
+    /// Run mode codes: SLC 0x06 (Remote Run) or 0x1E (Local Run);
+    /// MicroLogix 0x02 (Run).
     /// 
     /// Reference: AB Publication 1770-6.5.16, Chapter 10 (Status Bytes)
     /// </summary>
@@ -403,10 +404,16 @@ public class SlcHandler : IPlcHandler
     {
         var req = PCCCMessage.CreateDiagnosticStatusRequest(0, (byte)MyNode, (byte)TargetNode);
         var reply = _protocol.SendRequest(req, out int sts);
-        if (sts != PCCCConstants.Sts.Success || reply?.Data == null || reply.Data.Length <= PCCCConstants.ResponseOffsets.DiagnosticStatus.ModeCode)
+        if (sts != PCCCConstants.Sts.Success || reply?.Data == null ||
+            reply.Data.Length <= PCCCConstants.ResponseOffsets.DiagnosticStatus.ModeCode)
             return -1;
+
         byte modeCode = reply.Data[PCCCConstants.ResponseOffsets.DiagnosticStatus.ModeCode];
-        return (modeCode == 0x06 || modeCode == 0x1E) ? 1 : 0;
+
+        if (IsMicroLogixFamily)
+            return modeCode == 0x02 ? 1 : 0;  // ML Run = 0x02
+        else
+            return (modeCode == 0x06 || modeCode == 0x1E) ? 1 : 0;  // SLC Run
     }
 
     /// <summary>Disables forces on the processor (CMD=0x0F, FNC=0x41).</summary>
@@ -919,7 +926,7 @@ public class SlcHandler : IPlcHandler
         int slots = GetSlotCount();
         if (slots <= 0) throw new PCCCException("Failed to get Slot Count");
         byte[] body = { (byte)(4 + (slots + 1) * 6 + 2), 0, 0x60, 0, 0 };
-        var req = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetIOConfig, body);
+        var req = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetSlotCount, body);
         var reply = _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
             throw new PCCCException("Failed to get IO Config - " + PCCCErrors.DecodeStatus(sts));
@@ -946,7 +953,7 @@ public class SlcHandler : IPlcHandler
     private IOConfig[] GetML1500IOConfig()
     {
         byte[] body = { 4, 0, 0x62, 0, 0 };
-        var req = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetIOConfig, body);
+        var req = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetSlotCount, body);
         var reply = _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success || reply?.Data == null || reply.Data.Length == 0)
             throw new PCCCException("Failed to get IO Config for ML1500 - " + PCCCErrors.DecodeStatus(sts));
@@ -974,7 +981,7 @@ public class SlcHandler : IPlcHandler
                 chunkBody[3] = (byte)subElement;
             }
 
-            var chunkReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetIOConfig, chunkBody);
+            var chunkReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetSlotCount, chunkBody);
             var chunkReply = _protocol.SendRequest(chunkReq, out sts);
             if (sts != PCCCConstants.Sts.Success || chunkReply?.Data == null)
                 break;
@@ -1005,7 +1012,7 @@ public class SlcHandler : IPlcHandler
 
         // Get base unit IO
         byte[] baseBody = { 8, 0, 0x60, 0, 0 };
-        var baseReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetIOConfig, baseBody);
+        var baseReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetSlotCount, baseBody);
         var baseReply = _protocol.SendRequest(baseReq, out int baseSts);
         if (baseSts != PCCCConstants.Sts.Success || baseReply?.Data == null || baseReply.Data.Length <= 6)
             throw new PCCCException("Failed to get Base IO Config for ML1500 - " + PCCCErrors.DecodeStatus(baseSts));

@@ -261,11 +261,6 @@ public class PCCCComm : IDisposable, IHandlerContext
     private void OnRawFrameSent(object? sender, byte[] e) => RawFrameSent?.Invoke(this, e);
     private void OnRawFrameReceived(object? sender, byte[] e) => RawFrameReceived?.Invoke(this, e);
 
-    // ─── Internal Helpers for Handler ──────────────────────────────────────
-    internal bool GetDisableEventFlag() => _disableEvent;
-    internal void SetDisableEventFlag(bool value) => _disableEvent = value;
-    internal void RaiseFileProgress(FileProgressEventArgs e) => FileProgress?.Invoke(this, e);
-
     // ─── Helper for selecting handler ──────────────────────────────────────
     private PCCCConstants.ProcessorFamily GetProcessorFamily()
     {
@@ -318,13 +313,14 @@ public class PCCCComm : IDisposable, IHandlerContext
     }
 
     /// <summary>Sets the CPU mode using a raw mode value.</summary>
-    public int SetCPUMode(byte modeValue)
+    public int SetCpuMode(byte modeValue)
     {
         EnsureHandler();
         return _handler!.SetCpuMode(modeValue);
     }
 
-    /// <summary>Returns 1 if the processor is in Run mode, 0 otherwise.</summary>
+    /// <summary>Returns 1 if the processor is in Run mode, 0 if not in Run mode,
+    /// or -1 if the diagnostic status could not be retrieved.</summary>
     public int GetRunMode()
     {
         EnsureHandler();
@@ -336,6 +332,20 @@ public class PCCCComm : IDisposable, IHandlerContext
     {
         EnsureHandler();
         return _handler!.DisableForces();
+    }
+
+    /// <summary>Enables forces on the processor (SLC/MicroLogix only).</summary>
+    public void EnableForces()
+    {
+        EnsureHandler();
+        _handler!.EnableForces();
+    }
+
+    /// <summary>Clears all forces from the processor (SLC/MicroLogix only).</summary>
+    public void ClearForces()
+    {
+        EnsureHandler();
+        _handler!.ClearForces();
     }
 
     /// <summary>Places the processor in Program mode.</summary>
