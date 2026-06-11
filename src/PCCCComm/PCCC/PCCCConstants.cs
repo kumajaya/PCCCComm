@@ -261,18 +261,18 @@ public static class PCCCConstants
         if (diagnosticData == null || diagnosticData.Length < 4)
             return ProcessorFamily.Unknown;
 
-        byte typeExtender = diagnosticData[ResponseOffsets.DiagnosticStatus.TypeExtender];
+        byte typeExtender = diagnosticData[ResponseOffsets.DiagnosticStatus.TypeExtenderOffset];
 
-        // SLC/MicroLogix: type extender = 0xEE
+        // SLC/MicroLogix family: type extender == 0xEE
         if (typeExtender == ResponseOffsets.DiagnosticStatus.TypeExtenderSlcMl)
             return ProcessorFamily.SlcMicroLogix;
 
-        // PLC-5: low nibble of processor type (0xE?, 0xEB, etc.)
-        if ((typeExtender & ResponseOffsets.DiagnosticStatus.Plc5TypeExtenderMask) == ResponseOffsets.DiagnosticStatus.Plc5TypeExtenderMask)
+        // PLC-5 family: low nibble of type extender == 0x0B
+        if ((typeExtender & ResponseOffsets.DiagnosticStatus.LowNibbleMask) 
+            == ResponseOffsets.DiagnosticStatus.Plc5FamilyLowNibble)
             return ProcessorFamily.Plc5;
 
         // Future: PLC-3, PLC-2 detection can be added here using other bytes
-
         return ProcessorFamily.Unknown;
     }
 
@@ -368,6 +368,68 @@ public static class PCCCConstants
         public const int MaxDataMonitorWriteBytes = 0x78;
         /// <summary>Bytes per element for Data Monitor File (0xA4) = 40 bytes (0x28).</summary>
         public const int DataMonitorElementBytes = 0x28;
+
+        /// <summary>Maximum write payload for SLC 5/01 and SLC 5/02 processors (41 words = 82 bytes).</summary>
+        /// <remarks>Reference: AB 1770-6.5.16, page 7-18.</remarks>
+        public const int MaxWritePayloadSlc501_502 = 82;
+
+        /// <summary>Maximum write payload for SLC 5/03 and SLC 5/04 processors without internet protocol (234 bytes).</summary>
+        /// <remarks>Reference: AB 1770-6.5.16, page 7-18.</remarks>
+        public const int MaxWritePayloadSlc503_504 = 234;
+
+        /// <summary>Maximum write payload for MicroLogix 1000 processors (89 bytes).</summary>
+        /// <remarks>Reference: AB 1770-6.5.16, page 7-18 (and original DF1Comm.vb implementation).</remarks>
+        public const int MaxWritePayloadMl1000 = 89;
+
+        /// <summary>Maximum read payload for SLC 5/01 and SLC 5/02 (95 bytes).</summary>
+        public const int MaxReadPayloadSlc501_502 = 95;
+
+        /// <summary>Maximum read payload for SLC 5/03 and SLC 5/04 without IP (236 bytes).</summary>
+        public const int MaxReadPayloadSlc503_504 = 236;
+
+        /// <summary>Maximum read payload for MicroLogix 1000 (95 bytes).</summary>
+        public const int MaxReadPayloadMl1000 = 95;
+
+        /// <summary>Maximum read payload for PLC-5 Typed Read (FNC 0x68).</summary>
+        /// <remarks>AB 1770-6.5.16 allows up to 240 bytes. Using 236 for safety.</remarks>
+        public const int MaxReadPayloadPlc5 = 236;
+
+        /// <summary>Maximum write payload for PLC-5 Typed Write (FNC 0x67).</summary>
+        /// <remarks>AB 1770-6.5.16 allows up to 238 bytes. Using 236 for consistency.</remarks>
+        public const int MaxWritePayloadPlc5 = 236;
+
+        /// <summary>Number of bytes per standard word (16-bit).</summary>
+        public const int BytesPerWord = 2;
+
+        /// <summary>Number of bytes per single-precision float (32-bit).</summary>
+        public const int BytesPerFloat = 4;
+
+        /// <summary>Number of bytes per long integer (32-bit).</summary>
+        public const int BytesPerLong = 4;
+
+        /// <summary>SLC 500 String file element size in bytes (84 bytes = 2-byte length + 82 chars).</summary>
+        public const int SlcStringElementBytes = 84;
+
+        /// <summary>PLC-5 String file element size in bytes (88 bytes = 44 words).</summary>
+        public const int Plc5StringElementBytes = 88;
+
+        /// <summary>SLC 500 String file maximum character length (82).</summary>
+        public const int MaxStringLength = 82;
+
+        /// <summary>SLC 500 Timer/Counter element size in bytes (6 bytes).</summary>
+        public const int SlcTimerCounterElementBytes = 6;
+
+        /// <summary>SLC 500 Message file (MG) element size in bytes (50 bytes).</summary>
+        public const int SlcMessageElementBytes = 50;
+
+        /// <summary>SLC 500 PID file element size in bytes (46 bytes).</summary>
+        public const int SlcPidElementBytes = 46;
+
+        /// <summary>SLC 500 PLS file element size in bytes (12 bytes).</summary>
+        public const int SlcPlsElementBytes = 12;
+
+        /// <summary>Minimum file type value that requires 120-byte limit for Data Monitor file (0xA1).</summary>
+        public const int MinFileTypeForExtendedLimit = 0xA1;
     }
 
     // ========================================================================
@@ -404,6 +466,30 @@ public static class PCCCConstants
             /// <summary>Mask for low nibble of processor type to detect PLC-5 family.</summary>
             /// <remarks>PLC-5 processor type low nibble (e.g., 0x?B, 0xEB, etc.).</remarks>
             public const byte Plc5TypeExtenderMask = 0x0B;
+
+            /// <summary>Offset of processor type within DATA payload (byte 3).</summary>
+            public const int ProcessorTypeOffset = 3;  // alias untuk ProcessorType
+
+            /// <summary>Offset of type extender (byte 1 of DATA).</summary>
+            public const int TypeExtenderOffset = 1;   // alias untuk TypeExtender
+
+            /// <summary>Offset of expansion byte (byte 2 of DATA) for PLC-5.</summary>
+            public const int ExpansionByteOffset = 2;  // alias untuk ExtendedInterfaceType
+
+            /// <summary>Mask to get high nibble of a byte.</summary>
+            public const byte HighNibbleMask = 0xF0;
+
+            /// <summary>Mask to get low nibble of a byte.</summary>
+            public const byte LowNibbleMask = 0x0F;
+
+            /// <summary>Value indicating expansion follows (high nibble = 0x0E).</summary>
+            public const byte ExpansionIndicatorHighNibble = 0x0E;
+
+            /// <summary>PLC-5 family low nibble identifier (0x0B).</summary>
+            public const byte Plc5FamilyLowNibble = 0x0B;
+
+            /// <summary>Shift amount to move high nibble to low nibble.</summary>
+            public const int HighNibbleShift = 4;
         }
 
         /// <summary>Offsets in the file directory (FileZeroData) after reading.</summary>

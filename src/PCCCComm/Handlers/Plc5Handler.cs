@@ -123,7 +123,6 @@ public class Plc5Handler : IPlcHandler
         byte[] result = new byte[numberOfBytes];
         int bytesPerElem = addr.BytesPerElements;
 
-        // Determine if the file type requires 4-level addressing (structured)
         bool isStructured = addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
                             addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
                             addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control ||
@@ -131,7 +130,7 @@ public class Plc5Handler : IPlcHandler
 
         while (filePosition < numberOfBytes && finalStatus == 0)
         {
-            int maxChunkBytes = PCCCConstants.Df1Limits.MaxReadPayloadBytes;
+            int maxChunkBytes = PCCCConstants.Df1Limits.MaxReadPayloadPlc5;
             int remainingBytes = numberOfBytes - filePosition;
             int chunkBytes = Math.Min(remainingBytes, maxChunkBytes);
             
@@ -142,16 +141,13 @@ public class Plc5Handler : IPlcHandler
                 chunkBytes = Math.Max(bytesPerElem, elemAlign);
             }
             
-            // CRITICAL FIX: Calculate the number of ELEMENTS to request, not bytes
             int chunkElements = chunkBytes / bytesPerElem;
-
             int currentElement = addr.Element + (filePosition / bytesPerElem);
-            int subElementOffset = addr.SubElement + ((filePosition % bytesPerElem) / 2);
+            int subElementOffset = addr.SubElement + ((filePosition % bytesPerElem) / PCCCConstants.Df1Limits.BytesPerWord);
             
             byte[] logicalAddress = EncodePlc5LogicalAddress(
                 addr.FileNumber, addr.FileType, currentElement, subElementOffset, isStructured);
             
-            // Send element count, not byte count
             var req = PCCCMessage.CreateTypedReadRequest(
                 logicalAddress, chunkElements, 0, (byte)MyNode, (byte)TargetNode);
             var reply = _protocol.SendRequest(req, out int sts);
@@ -186,7 +182,7 @@ public class Plc5Handler : IPlcHandler
 
         while (filePosition < dataToWrite.Length && reply == 0)
         {
-            int maxChunkBytes = PCCCConstants.Df1Limits.MaxWritePayloadBytes;
+            int maxChunkBytes = PCCCConstants.Df1Limits.MaxWritePayloadPlc5;
             int remainingBytes = dataToWrite.Length - filePosition;
             int chunkBytes = Math.Min(remainingBytes, maxChunkBytes);
             
@@ -198,7 +194,7 @@ public class Plc5Handler : IPlcHandler
             }
             
             int currentElement = addr.Element + (filePosition / bytesPerElem);
-            int subElementOffset = addr.SubElement + ((filePosition % bytesPerElem) / 2);
+            int subElementOffset = addr.SubElement + ((filePosition % bytesPerElem) / PCCCConstants.Df1Limits.BytesPerWord);
             
             byte[] logicalAddress = EncodePlc5LogicalAddress(
                 addr.FileNumber, addr.FileType, currentElement, subElementOffset, isStructured);
@@ -231,6 +227,12 @@ public class Plc5Handler : IPlcHandler
     // IPlcHandler implementation (diagnostics, mode, forces)
     // ---------------------------------------------------------------------
 
+    /// <summary>
+    /// Gets the processor type code from diagnostic status data.
+    /// For PLC-5 processors, checks if the type extender has high nibble 0x0E,
+    /// indicating that the actual processor type is in the expansion byte.
+    /// </summary>
+    /// <returns>Processor type code, or 0 if failed.</returns>
     public int GetProcessorType()
     {
         var req = PCCCMessage.CreateDiagnosticStatusRequest(0, (byte)MyNode, (byte)TargetNode);
@@ -238,10 +240,16 @@ public class Plc5Handler : IPlcHandler
         if (sts != PCCCConstants.Sts.Success || reply?.Data == null || reply.Data.Length < 4)
             return 0;
 
-        byte typeByte = reply.Data[1];
-        byte expansionByte = reply.Data[2];
-        bool hasExpansion = (typeByte >> 4) == 0x0E;
-        _processorType = hasExpansion ? expansionByte : typeByte;
+        // Use constants from PCCCConstants for offsets and masks (no magic numbers)
+        byte typeExtender = reply.Data[PCCCConstants.ResponseOffsets.DiagnosticStatus.TypeExtenderOffset];
+        byte expansionByte = reply.Data[PCCCConstants.ResponseOffsets.DiagnosticStatus.ExpansionByteOffset];
+        
+        // Check if high nibble of typeExtender equals 0x0E (indicates expansion byte follows)
+        int highNibble = (typeExtender & PCCCConstants.ResponseOffsets.DiagnosticStatus.HighNibbleMask) 
+                        >> PCCCConstants.ResponseOffsets.DiagnosticStatus.HighNibbleShift;
+        bool hasExpansion = (highNibble == PCCCConstants.ResponseOffsets.DiagnosticStatus.ExpansionIndicatorHighNibble);
+
+        _processorType = hasExpansion ? expansionByte : typeExtender;
         return _processorType;
     }
 
@@ -265,9 +273,9 @@ public class Plc5Handler : IPlcHandler
 
     public void SetProgramMode()
     {
-        // PLC-5 Set CPU Mode (FNC 0x3A) dengan mode value 0x01 = Remote Program
+        // PLC-5 Set CPU Mode (FNC 0x3A) with mode value 0x01 = Remote Program
         // Ref: 1770-6.5.16 page 7-26
-        byte modeValue = 0x01;   // Remote Program (dulu 0x00)
+        byte modeValue = 0x01;   // Remote Program
         var req = PCCCMessage.CreateChangeModeRequest(modeValue, true, 0, (byte)MyNode, (byte)TargetNode);
         _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success)
@@ -314,9 +322,9 @@ public class Plc5Handler : IPlcHandler
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
-        // ── Override for PLC-5 String file (88 bytes/element) ──
+        // Override for PLC-5 String file (88 bytes/element)
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
-            p.BytesPerElements = 88;
+            p.BytesPerElements = PCCCConstants.Df1Limits.Plc5StringElementBytes;
 
         short arrayElements = (short)(numberOfElements - 1);
         if (arrayElements < 0) arrayElements = 0;
@@ -342,22 +350,26 @@ public class Plc5Handler : IPlcHandler
         {
             case (byte)PCCCConstants.SlcFileTypeCode.Float:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToSingle(returnedData, i * 4).ToString();
+                    result[i] = BitConverter.ToSingle(returnedData, i * PCCCConstants.Df1Limits.BytesPerFloat).ToString();
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.String:
+                // PLC-5 ST element: 88 bytes (44 words)
+                // word 0 (byte 0-1): max length = 82 (constant)
+                // word 1 (byte 2-3): current length
+                // word 2+ (byte 4+): chars packed 2/word, low byte = even index char, high byte = odd index char
                 for (int i = 0; i <= arrayElements; i++)
                 {
-                    int baseOffset = i * 88;  // PLC-5 ST = 44 words = 88 bytes
-                    int strLen = BitConverter.ToInt16(returnedData, baseOffset + 2); // word 1 = current length
-                    if (strLen > 82) strLen = 82;
+                    int baseOffset = i * PCCCConstants.Df1Limits.Plc5StringElementBytes;
+                    int strLen = BitConverter.ToInt16(returnedData, baseOffset + PCCCConstants.Df1Limits.BytesPerWord);
+                    if (strLen > PCCCConstants.Df1Limits.MaxStringLength) 
+                        strLen = PCCCConstants.Df1Limits.MaxStringLength;
                     var sb = new StringBuilder();
                     for (int j = 0; j < strLen; j++)
                     {
-                        // PLC-5: word 2+ (offset 4+), chars dikemas: low byte = char index genap, high byte = char index ganjil
-                        int wordOffset = baseOffset + 4 + (j / 2) * 2;
+                        int wordOffset = baseOffset + 4 + (j / 2) * PCCCConstants.Df1Limits.BytesPerWord;
                         char c = (j % 2 == 0)
-                            ? (char)returnedData[wordOffset]        // low byte = char even index
-                            : (char)returnedData[wordOffset + 1];   // high byte = char odd index
+                            ? (char)returnedData[wordOffset]        // low byte = even index char
+                            : (char)returnedData[wordOffset + 1];   // high byte = odd index char
                         if (c == 0) break;
                         sb.Append(c);
                     }
@@ -368,17 +380,17 @@ public class Plc5Handler : IPlcHandler
             case (byte)PCCCConstants.SlcFileTypeCode.Counter:
                 for (int i = 0; i <= arrayElements; i++)
                 {
-                    int offset = (p.SubElement > 0) ? i * 6 : i * 2;
+                    int offset = (p.SubElement > 0) ? i * PCCCConstants.Df1Limits.SlcTimerCounterElementBytes : i * PCCCConstants.Df1Limits.BytesPerWord;
                     result[i] = BitConverter.ToInt16(returnedData, offset).ToString();
                 }
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.Long:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt32(returnedData, i * 4).ToString();
+                    result[i] = BitConverter.ToInt32(returnedData, i * PCCCConstants.Df1Limits.BytesPerLong).ToString();
                 break;
             default:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt16(returnedData, i * 2).ToString();
+                    result[i] = BitConverter.ToInt16(returnedData, i * PCCCConstants.Df1Limits.BytesPerWord).ToString();
                 break;
         }
 
@@ -449,7 +461,7 @@ public class Plc5Handler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
             for (int i = 0; i < numberOfElements; i++)
-                BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * 4);
+                BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * PCCCConstants.Df1Limits.BytesPerLong);
         }
         else
         {
@@ -457,8 +469,8 @@ public class Plc5Handler : IPlcHandler
             {
                 if (dataToWrite[i] > 32767 || dataToWrite[i] < -32768)
                     throw new PCCCException("Integer data out of range, must be between -32768 and 32767");
-                converted[i * 2] = (byte)(dataToWrite[i] & 0xFF);
-                converted[i * 2 + 1] = (byte)((dataToWrite[i] >> 8) & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord] = (byte)(dataToWrite[i] & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 1] = (byte)((dataToWrite[i] >> 8) & 0xFF);
             }
         }
         return WriteRawDataWithChunking(p, converted);
@@ -491,12 +503,12 @@ public class Plc5Handler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Float)
         {
             for (int i = 0; i < numberOfElements; i++)
-                BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * 4);
+                BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * PCCCConstants.Df1Limits.BytesPerFloat);
         }
         else if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
             for (int i = 0; i < numberOfElements; i++)
-                BitConverter.GetBytes((int)dataToWrite[i]).CopyTo(converted, i * 4);
+                BitConverter.GetBytes((int)dataToWrite[i]).CopyTo(converted, i * PCCCConstants.Df1Limits.BytesPerLong);
         }
         else
         {
@@ -504,8 +516,8 @@ public class Plc5Handler : IPlcHandler
             {
                 if (dataToWrite[i] > 32767 || dataToWrite[i] < -32768)
                     throw new PCCCException("Integer data out of range, must be between -32768 and 32767");
-                converted[i * 2] = (byte)((int)dataToWrite[i] & 0xFF);
-                converted[i * 2 + 1] = (byte)(((int)dataToWrite[i] >> 8) & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord] = (byte)((int)dataToWrite[i] & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 1] = (byte)(((int)dataToWrite[i] >> 8) & 0xFF);
             }
         }
         return WriteRawDataWithChunking(p, converted);
@@ -514,7 +526,8 @@ public class Plc5Handler : IPlcHandler
     public int WriteData(string startAddress, string dataToWrite)
     {
         if (string.IsNullOrEmpty(dataToWrite)) return 0;
-        if (dataToWrite.Length > 82) dataToWrite = dataToWrite[..82];
+        if (dataToWrite.Length > PCCCConstants.Df1Limits.MaxStringLength) 
+            dataToWrite = dataToWrite[..PCCCConstants.Df1Limits.MaxStringLength];
 
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
@@ -522,16 +535,16 @@ public class Plc5Handler : IPlcHandler
             // PLC-5 ST element: 88 bytes (44 words)
             // word 0 (byte 0-1): max length = 82 (constant)
             // word 1 (byte 2-3): current length
-            // word 2+ (byte 4+): chars dikemas 2/word, low byte = char even index, high byte = char odd index
-            p.BytesPerElements = 88;    // PLC-5 ST = 44 words = 88 bytes
-            byte[] stElement = new byte[88];
-            stElement[0] = 82;          // max length low byte
-            stElement[1] = 0;           // max length high byte
-            stElement[2] = (byte)(dataToWrite.Length & 0xFF);   // current length low
-            stElement[3] = (byte)((dataToWrite.Length >> 8) & 0xFF); // current length high
+            // word 2+ (byte 4+): chars packed 2/word, low byte = even index char, high byte = odd index char
+            p.BytesPerElements = PCCCConstants.Df1Limits.Plc5StringElementBytes;
+            byte[] stElement = new byte[PCCCConstants.Df1Limits.Plc5StringElementBytes];
+            stElement[0] = PCCCConstants.Df1Limits.MaxStringLength;          // max length low byte
+            stElement[1] = 0;                                                 // max length high byte
+            stElement[2] = (byte)(dataToWrite.Length & 0xFF);                // current length low
+            stElement[3] = (byte)((dataToWrite.Length >> 8) & 0xFF);         // current length high
             for (int i = 0; i < dataToWrite.Length; i++)
             {
-                int wordOffset = 4 + (i / 2) * 2;
+                int wordOffset = 4 + (i / 2) * PCCCConstants.Df1Limits.BytesPerWord;
                 if (i % 2 == 0)
                     stElement[wordOffset] = (byte)dataToWrite[i];     // low byte
                 else
@@ -543,12 +556,12 @@ public class Plc5Handler : IPlcHandler
         {
             int[]? words = StringConverter.StringToWords(dataToWrite);
             if (words == null) return -1;
-            byte[] converted = new byte[words.Length * 2 + 2];
+            byte[] converted = new byte[words.Length * PCCCConstants.Df1Limits.BytesPerWord + 2];
             converted[0] = (byte)dataToWrite.Length;
             for (int i = 0; i < words.Length; i++)
             {
-                converted[i * 2 + 2] = (byte)((words[i] >> 8) & 0xFF);
-                converted[i * 2 + 3] = (byte)(words[i] & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 2] = (byte)((words[i] >> 8) & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 3] = (byte)(words[i] & 0xFF);
             }
             return WriteRawDataWithChunking(p, converted);
         }

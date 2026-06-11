@@ -75,16 +75,10 @@ public class SlcHandler : IPlcHandler
 
     private bool IsMicroLogix1000 => _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000;
     
-     /// <summary>
+    /// <summary>
     /// Reads raw data from the PLC with automatic chunking.
-    /// This method handles the DF1 protocol's maximum payload limits and processor-specific
-    /// restrictions (SLC 5/02 80-byte limit, string files 168-byte limit, timer/counter 234-byte limit,
-    /// MicroLogix 1000 95-byte limit, Data Monitor File 0xA4 120-byte limit).
-    /// 
-    /// Original method from DF1Comm.vb (ReadRawData). The implementation respects the
-    /// Df1Limits constants defined in PCCCConstants.
-    /// 
-    /// Reference: AB Publication 1770-6.5.16, Chapter 7 (Protected Typed Logical Read)
+    /// Handles DF1 protocol's maximum payload limits and processor-specific restrictions.
+    /// Reference: AB 1770-6.5.16, Chapter 7 (Protected Typed Logical Read)
     /// </summary>
     private byte[] ReadRawDataWithChunking(ref DataAddress addr, int numberOfBytes, out int finalStatus)
     {
@@ -92,10 +86,31 @@ public class SlcHandler : IPlcHandler
         int filePosition = 0;
         byte[] result = new byte[numberOfBytes];
 
-        // Determine processor-specific maximum read chunk size
-        int maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadBytes; // 236 default
-        if (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000)
-            maxReadChunk = 95; // MicroLogix 1000 limit per AB specification
+        // Determine processor-specific maximum read chunk size (no magic numbers)
+        int maxReadChunk;
+        switch (_processorType)
+        {
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC502:
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC501:
+            case (byte)PCCCConstants.ProcessorTypeCode.FixedSLC500:
+                maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadSlc501_502; // 95 bytes
+                break;
+
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC503:
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC504:
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC505:
+                maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadSlc503_504; // 236 bytes
+                break;
+
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1000:
+                maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadMl1000; // 95 bytes
+                break;
+
+            default:
+                // For other processors (ML1100, ML1200, ML1500, etc.) use default 236
+                maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadBytes;
+                break;
+        }
 
         while (filePosition < numberOfBytes && finalStatus == 0)
         {
@@ -109,7 +124,7 @@ public class SlcHandler : IPlcHandler
             if (toRead > PCCCConstants.Df1Limits.MaxTimerCounterReadBytes && (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
                 toRead = PCCCConstants.Df1Limits.MaxTimerCounterReadBytes;
             
-            // SLC 5/02 limitation: max 0x50 (80) bytes per read
+            // SLC 5/02 additional limitation: max 0x50 (80) bytes per read
             if (toRead > PCCCConstants.Df1Limits.MaxSlc502ReadBytes && _processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502)
                 toRead = PCCCConstants.Df1Limits.MaxSlc502ReadBytes;
             
@@ -132,27 +147,24 @@ public class SlcHandler : IPlcHandler
             filePosition += bytesRead;
 
             // Advance address pointer for next chunk
-            const byte stringFileType = (byte)PCCCConstants.SlcFileTypeCode.String; // 0x8D, 84 bytes per element
-            const int stringElementBytes = 84;
+            const byte stringFileType = (byte)PCCCConstants.SlcFileTypeCode.String;
+            const int stringElementBytes = PCCCConstants.Df1Limits.SlcStringElementBytes;
 
             if (addr.FileType == stringFileType)
                 addr.Element += toRead / stringElementBytes;
             else if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.DataMonitor)
                 addr.Element += toRead / PCCCConstants.Df1Limits.DataMonitorElementBytes;
             else
-                addr.SubElement += toRead / 2; // move by words (2 bytes each)
+                // For word-based files, each word is 2 bytes
+                addr.SubElement += toRead / PCCCConstants.Df1Limits.BytesPerWord;
         }
         return result;
     }
 
     /// <summary>
     /// Writes raw data to the PLC with automatic chunking.
-    /// Handles DF1 protocol's maximum write payload (164 bytes) and special file type restrictions,
-    /// including MicroLogix 1000 89-byte limit and Data Monitor File 0xA4 120-byte limit.
-    /// 
-    /// Original method from DF1Comm.vb (WriteRawData).
-    /// 
-    /// Reference: AB Publication 1770-6.5.16, Chapter 7 (Protected Typed Logical Write)
+    /// Handles DF1 protocol's maximum write payload limits based on processor type.
+    /// Reference: AB 1770-6.5.16, Chapter 7 (Protected Typed Logical Write)
     /// </summary>
     private int WriteRawDataWithChunking(DataAddress addr, byte[] dataToWrite)
     {
@@ -160,22 +172,44 @@ public class SlcHandler : IPlcHandler
         int filePosition = 0;
         int reply = 0;
 
-        // Determine processor-specific maximum write chunk size
-        int maxWriteChunk = PCCCConstants.Df1Limits.MaxWritePayloadBytes; // 164 default
-        if (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000)
-            maxWriteChunk = 89; // MicroLogix 1000 limit per AB specification
+        // Determine maximum write chunk size based on processor type (no magic numbers)
+        int maxWriteChunk;
+        switch (_processorType)
+        {
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC502:
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC501:
+            case (byte)PCCCConstants.ProcessorTypeCode.FixedSLC500:
+                // SLC 5/01 and 5/02: max 82 bytes (41 words)
+                maxWriteChunk = PCCCConstants.Df1Limits.MaxWritePayloadSlc501_502;
+                break;
+
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC503:
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC504:
+            case (byte)PCCCConstants.ProcessorTypeCode.SLC505:
+                // SLC 5/03, 5/04, 5/05: max 234 bytes (without internet protocol)
+                maxWriteChunk = PCCCConstants.Df1Limits.MaxWritePayloadSlc503_504;
+                break;
+
+            case (byte)PCCCConstants.ProcessorTypeCode.ML1000:
+                // MicroLogix 1000: max 89 bytes
+                maxWriteChunk = PCCCConstants.Df1Limits.MaxWritePayloadMl1000;
+                break;
+
+            default:
+                // For other processors (ML1100, ML1200, ML1500, etc.) use default 164
+                maxWriteChunk = PCCCConstants.Df1Limits.MaxWritePayloadBytes;
+                break;
+        }
 
         while (filePosition < dataToWrite.Length && reply == 0)
         {
             int toWrite = Math.Min(dataToWrite.Length - filePosition, maxWriteChunk);
             
-            // Special case for file types >= 0xA1 (including Data Monitor File 0xA4) – limit to 120 bytes (0x78)
-            // This matches the original DF1Comm.vb behavior
-            if (addr.FileType >= 0xA1 && toWrite > PCCCConstants.Df1Limits.MaxDataMonitorWriteBytes) 
+            // Special case for file types >= 0xA1 (including Data Monitor File 0xA4) – limit to 120 bytes
+            if (addr.FileType >= PCCCConstants.Df1Limits.MinFileTypeForExtendedLimit && 
+                toWrite > PCCCConstants.Df1Limits.MaxDataMonitorWriteBytes) 
                 toWrite = PCCCConstants.Df1Limits.MaxDataMonitorWriteBytes;
             
-            // Note: Data Monitor File (type 0xA4) also has 0x28 byte element size; the above condition already handles the 120 limit
-
             var req = PCCCMessage.CreateWriteRequest(addr, dataToWrite, filePosition, toWrite, 0, (byte)MyNode, (byte)TargetNode);
             
             if (AsyncMode)
@@ -191,16 +225,17 @@ public class SlcHandler : IPlcHandler
                 filePosition += toWrite;
             }
 
-            // Advance address pointer
+            // Advance address pointer for next chunk
             const byte stringFileType = (byte)PCCCConstants.SlcFileTypeCode.String;
-            const int stringElementBytes = 84;
+            const int stringElementBytes = PCCCConstants.Df1Limits.SlcStringElementBytes;
 
             if (addr.FileType == stringFileType)
                 addr.Element += toWrite / stringElementBytes;
             else if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.DataMonitor)
                 addr.Element += toWrite / PCCCConstants.Df1Limits.DataMonitorElementBytes;
             else
-                addr.SubElement += toWrite / 2;
+                // For word-based files, each word is 2 bytes
+                addr.SubElement += toWrite / PCCCConstants.Df1Limits.BytesPerWord;
         }
         if (reply == 0) return 0;
         throw new PCCCException(PCCCErrors.DecodeStatus(reply));
@@ -334,12 +369,12 @@ public class SlcHandler : IPlcHandler
         if (IsMicroLogixFamily)
         {
             useFnc3A = true;
-            modeValue = 0x02; // Remote Run untuk semua MicroLogix
+            modeValue = 0x02; // Remote Run for all MicroLogix
         }
         else
         {
             useFnc3A = false;
-            modeValue = 0x06; // Remote Run untuk SLC
+            modeValue = 0x06; // Remote Run for SLC
         }
 
         var req = PCCCMessage.CreateChangeModeRequest(modeValue, useFnc3A, 0, (byte)MyNode, (byte)TargetNode);
@@ -363,17 +398,17 @@ public class SlcHandler : IPlcHandler
         if (IsMicroLogix1000)
         {
             useFnc3A = true;
-            modeValue = 0x00; // Program/Load untuk ML1000 (local program)
+            modeValue = 0x00; // Program/Load for ML1000 (local program)
         }
         else if (IsMicroLogixFamily)
         {
             useFnc3A = true;
-            modeValue = 0x01; // Remote Program untuk ML1100/1200/1500
+            modeValue = 0x01; // Remote Program for ML1100/1200/1500
         }
         else
         {
             useFnc3A = false;
-            modeValue = 0x01; // Remote Program untuk SLC
+            modeValue = 0x01; // Remote Program for SLC
         }
 
         var req = PCCCMessage.CreateChangeModeRequest(modeValue, useFnc3A, 0, (byte)MyNode, (byte)TargetNode);
@@ -464,7 +499,7 @@ public class SlcHandler : IPlcHandler
         // Calculate total bytes needed based on file type
         int bytesPerElem = p.BytesPerElements;
         if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
-            bytesPerElem = 2;
+            bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord; // When reading sub-element (ACC/PRE), each is 2 bytes
         int numberOfBytes = (arrayElements + 1) * bytesPerElem;
 
         // Special adjustment for timer/counter sub-element reads
@@ -483,18 +518,19 @@ public class SlcHandler : IPlcHandler
         {
             case (byte)PCCCConstants.SlcFileTypeCode.Float:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToSingle(returnedData, i * 4).ToString();
+                    result[i] = BitConverter.ToSingle(returnedData, i * PCCCConstants.Df1Limits.BytesPerFloat).ToString();
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.String:
                 // SLC string format: bytes 0-1 = length (LE), bytes 2-83 = character data (ASCII)
                 for (int i = 0; i <= arrayElements; i++)
                 {
-                    int strLen = BitConverter.ToInt16(returnedData, i * 84);
-                    if (strLen > 82) strLen = 82;
+                    int strLen = BitConverter.ToInt16(returnedData, i * PCCCConstants.Df1Limits.SlcStringElementBytes);
+                    if (strLen > PCCCConstants.Df1Limits.MaxStringLength) 
+                        strLen = PCCCConstants.Df1Limits.MaxStringLength;
                     var sb = new StringBuilder();
                     for (int j = 0; j < strLen; j++)
                     {
-                        char c = (char)returnedData[(i * 84) + 2 + j];
+                        char c = (char)returnedData[(i * PCCCConstants.Df1Limits.SlcStringElementBytes) + 2 + j];
                         if (c == 0) break;
                         sb.Append(c);
                     }
@@ -505,21 +541,21 @@ public class SlcHandler : IPlcHandler
             case (byte)PCCCConstants.SlcFileTypeCode.Counter:
                 for (int i = 0; i <= arrayElements; i++)
                 {
-                    int offset = (p.SubElement > 0) ? i * 6 : i * 2;
+                    int offset = (p.SubElement > 0) ? i * PCCCConstants.Df1Limits.SlcTimerCounterElementBytes : i * PCCCConstants.Df1Limits.BytesPerWord;
                     result[i] = BitConverter.ToInt16(returnedData, offset).ToString();
                 }
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.Long:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt32(returnedData, i * 4).ToString();
+                    result[i] = BitConverter.ToInt32(returnedData, i * PCCCConstants.Df1Limits.BytesPerLong).ToString();
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.Message:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToString(returnedData, i * 50, 50);
+                    result[i] = BitConverter.ToString(returnedData, i * PCCCConstants.Df1Limits.SlcMessageElementBytes, PCCCConstants.Df1Limits.SlcMessageElementBytes);
                 break;
             default:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt16(returnedData, i * 2).ToString();
+                    result[i] = BitConverter.ToInt16(returnedData, i * PCCCConstants.Df1Limits.BytesPerWord).ToString();
                 break;
         }
 
@@ -603,7 +639,7 @@ public class SlcHandler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
             for (int i = 0; i < numberOfElements; i++)
-                BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * 4);
+                BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * PCCCConstants.Df1Limits.BytesPerLong);
         }
         else
         {
@@ -611,8 +647,8 @@ public class SlcHandler : IPlcHandler
             {
                 if (dataToWrite[i] > 32767 || dataToWrite[i] < -32768)
                     throw new PCCCException("Integer data out of range, must be between -32768 and 32767");
-                converted[i * 2] = (byte)(dataToWrite[i] & 0xFF);
-                converted[i * 2 + 1] = (byte)((dataToWrite[i] >> 8) & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord] = (byte)(dataToWrite[i] & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 1] = (byte)((dataToWrite[i] >> 8) & 0xFF);
             }
         }
         return WriteRawDataWithChunking(p, converted);
@@ -630,7 +666,7 @@ public class SlcHandler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Float)
         {
             for (int i = 0; i < numberOfElements; i++)
-                BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * 4);
+                BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * PCCCConstants.Df1Limits.BytesPerFloat);
         }
         else if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
@@ -638,7 +674,7 @@ public class SlcHandler : IPlcHandler
             {
                 if (dataToWrite[i] > int.MaxValue || dataToWrite[i] < int.MinValue)
                     throw new PCCCException("Integer data out of range, must be between -2147483648 and 2147483647");
-                BitConverter.GetBytes((int)dataToWrite[i]).CopyTo(converted, i * 4);
+                BitConverter.GetBytes((int)dataToWrite[i]).CopyTo(converted, i * PCCCConstants.Df1Limits.BytesPerLong);
             }
         }
         else
@@ -647,8 +683,8 @@ public class SlcHandler : IPlcHandler
             {
                 if (dataToWrite[i] > 32767 || dataToWrite[i] < -32768)
                     throw new PCCCException("Integer data out of range, must be between -32768 and 32767");
-                converted[i * 2] = (byte)((int)dataToWrite[i] & 0xFF);
-                converted[i * 2 + 1] = (byte)(((int)dataToWrite[i] >> 8) & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord] = (byte)((int)dataToWrite[i] & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 1] = (byte)(((int)dataToWrite[i] >> 8) & 0xFF);
             }
         }
         return WriteRawDataWithChunking(p, converted);
@@ -664,14 +700,15 @@ public class SlcHandler : IPlcHandler
     public int WriteData(string startAddress, string dataToWrite)
     {
         if (string.IsNullOrEmpty(dataToWrite)) return 0;
-        if (dataToWrite.Length > 82) dataToWrite = dataToWrite[..82];
+        if (dataToWrite.Length > PCCCConstants.Df1Limits.MaxStringLength) 
+            dataToWrite = dataToWrite[..PCCCConstants.Df1Limits.MaxStringLength];
 
         DataAddress p = PCCCParser.Parse(startAddress);
         
         // ST file (SLC 500 String file, type 0x8D) – 84 bytes per element: 2-byte length + 82 chars
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
         {
-            byte[] stElement = new byte[84];
+            byte[] stElement = new byte[PCCCConstants.Df1Limits.SlcStringElementBytes];
             int len = dataToWrite.Length;
             stElement[0] = (byte)(len & 0xFF);
             stElement[1] = (byte)((len >> 8) & 0xFF);
@@ -685,12 +722,12 @@ public class SlcHandler : IPlcHandler
             // packed into words with high byte first.
             int[]? words = StringConverter.StringToWords(dataToWrite);
             if (words == null) return -1;
-            byte[] converted = new byte[words.Length * 2 + 2];
+            byte[] converted = new byte[words.Length * PCCCConstants.Df1Limits.BytesPerWord + 2];
             converted[0] = (byte)dataToWrite.Length;
             for (int i = 0; i < words.Length; i++)
             {
-                converted[i * 2 + 2] = (byte)((words[i] >> 8) & 0xFF);
-                converted[i * 2 + 3] = (byte)(words[i] & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 2] = (byte)((words[i] >> 8) & 0xFF);
+                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 3] = (byte)(words[i] & 0xFF);
             }
             return WriteRawDataWithChunking(p, converted);
         }
@@ -1298,8 +1335,7 @@ public class SlcHandler : IPlcHandler
 
     /// <summary>
     /// Uploads program and data files from the PLC using file-based transfer (SLC 5/03+ and ML1100/1200/1500).
-    /// They use Protected Typed Logical Read/Write instead of file-based commands.
-    /// Reference: AB Publication 1770-6.5.16, Chapter 12 (Uploading from SLC 5/01, 5/02, ML1000)
+    /// Reference: AB Publication 1770-6.5.16, Chapter 12 (Upload/Download procedures)
     /// </summary>
     private Collection<PLCFileDetails> UploadProgramDataFileBased()
     {
@@ -1420,7 +1456,7 @@ public class SlcHandler : IPlcHandler
 
     /// <summary>
     /// Downloads a program and data files to the PLC using file-based transfer (SLC 5/03+ and ML1100/1200/1500).
-    /// Reference: AB Publication 1770-6.5.16, Chapter 12 (Downloading from SLC 5/01, 5/02, ML1000)
+    /// Reference: AB Publication 1770-6.5.16, Chapter 12 (Download/Upload procedures)
     /// </summary>
     private void DownloadProgramDataFileBased(Collection<PLCFileDetails> plcFiles)
     {
@@ -1499,7 +1535,7 @@ public class SlcHandler : IPlcHandler
 
     private byte[] FileReadWithChunking(ushort tag, int byteOffset, int totalBytes)
     {
-        if (byteOffset % 2 != 0)
+        if (byteOffset % PCCCConstants.Df1Limits.BytesPerWord != 0)
             throw new PCCCException("FileRead: byte offset must be even (word‑aligned).");
 
         using var ms = new MemoryStream(totalBytes);
@@ -1510,7 +1546,7 @@ public class SlcHandler : IPlcHandler
         while (bytesRemaining > 0)
         {
             int toReadBytes = Math.Min(bytesRemaining, maxChunkBytes);
-            int wordOffset = currentByteOffset / 2;
+            int wordOffset = currentByteOffset / PCCCConstants.Df1Limits.BytesPerWord;
             byte[] chunk = _protocol.FileRead(tag, wordOffset, toReadBytes, (byte)MyNode, (byte)TargetNode);
             if (chunk == null || chunk.Length == 0)
                 throw new PCCCException($"Empty chunk received at byte offset {currentByteOffset} (word offset {wordOffset}).");
@@ -1523,7 +1559,7 @@ public class SlcHandler : IPlcHandler
 
     private void FileWriteWithChunking(ushort tag, int byteOffset, byte[] data)
     {
-        if (byteOffset % 2 != 0)
+        if (byteOffset % PCCCConstants.Df1Limits.BytesPerWord != 0)
             throw new PCCCException("FileWrite: byte offset must be even (word‑aligned).");
 
         int bytesRemaining = data.Length;
@@ -1533,7 +1569,7 @@ public class SlcHandler : IPlcHandler
         while (bytesRemaining > 0)
         {
             int toWriteBytes = Math.Min(bytesRemaining, maxChunkBytes);
-            int wordOffset = currentByteOffset / 2;
+            int wordOffset = currentByteOffset / PCCCConstants.Df1Limits.BytesPerWord;
             int srcOffset = currentByteOffset - byteOffset;
             byte[] chunk = new byte[toWriteBytes];
             Array.Copy(data, srcOffset, chunk, 0, toWriteBytes);
