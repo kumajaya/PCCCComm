@@ -40,28 +40,58 @@ public static class PlcIdentifier
     {
         try
         {
-            // Basic processor type
-            int procType = await Task.Run(() => df1.GetProcessorType());
+            byte[]? diag = await Task.Run(() => df1.GetDiagnosticStatusRaw());
+            if (diag == null || diag.Length < 4)
+                return new PlcInfo(0, $"Identify error", false, "Unknown", string.Empty, 0, 0, "UNKNOWN");
 
-            (string name, string family) = procType switch
+            var family = global::PCCCComm.Pccc.PCCCConstants.DetectFamily(diag);
+
+            int procType = 0x00;
+            (string name, string familyStr) = ("Unknown", "Unknown");
+
+            if (family == global::PCCCComm.Pccc.PCCCConstants.ProcessorFamily.SlcMicroLogix)
             {
-                0x49 => ("SLC 5/03",        "SLC"),
-                0x5B => ("SLC 5/04",        "SLC"),
-                0x88 => ("SLC 5/01",        "SLC"),
-                0x89 => ("SLC 5/02",        "SLC"),
-                0x8C => ("MicroLogix 1500", "MicroLogix"),
-                0x9C => ("SLC 5/05",        "SLC"),
-                0xB0 => ("SLC 5/05",        "SLC"),
-                0xB1 => ("SLC 5/05",        "SLC"),
-                0xB2 => ("SLC 5/05",        "SLC"),
-                0x0D => ("SLC 5/05",        "SLC"),
-                0x13 => ("SLC 5/05",        "SLC"),
-                0x14 => ("SLC 5/05",        "SLC"),
-                0x15 => ("SLC 5/05",        "SLC"),
-                0x58 => ("MicroLogix 1000", "MicroLogix"),
-                0x0B or 0x0E => ("PLC-5",   "PLC5"),
-                _    => ($"Unknown (0x{procType:X2})", "Unknown")
-            };
+                procType = await Task.Run(() => df1.GetProcessorType());
+                (name, familyStr) = procType switch
+                {
+                    0x49 => ("SLC 5/03",        "SLC"),
+                    0x5B => ("SLC 5/04",        "SLC"),
+                    0x88 => ("SLC 5/01",        "SLC"),
+                    0x89 => ("SLC 5/02",        "SLC"),
+                    0x8C => ("MicroLogix 1500", "MicroLogix"),
+                    0x9C => ("SLC 5/05",        "SLC"),
+                    0xB0 => ("SLC 5/05",        "SLC"),
+                    0xB1 => ("SLC 5/05",        "SLC"),
+                    0xB2 => ("SLC 5/05",        "SLC"),
+                    0x0D => ("SLC 5/05",        "SLC"),
+                    0x13 => ("SLC 5/05",        "SLC"),
+                    0x14 => ("SLC 5/05",        "SLC"),
+                    0x15 => ("SLC 5/05",        "SLC"),
+                    0x58 => ("MicroLogix 1000", "MicroLogix"),
+                    _    => ($"Unknown (0x{procType:X2})", "Unknown")
+                };
+            }
+            else if (family == global::PCCCComm.Pccc.PCCCConstants.ProcessorFamily.Plc5)
+            {
+                // PLC-5: expansion byte at index 2
+                procType = diag[2];
+                (name, familyStr) = procType switch
+                {
+                    0x15 => ("PLC-5/40B",       "PLC5"),
+                    0x22 => ("PLC-5/10",        "PLC5"),
+                    0x23 => ("PLC-5/60B",       "PLC5"),
+                    0x28 => ("PLC-5/40L",       "PLC5"),
+                    0x29 => ("PLC-5/60L",       "PLC5"),
+                    0x31 => ("PLC-5/11",        "PLC5"),
+                    0x32 => ("PLC-5/20",        "PLC5"),
+                    0x33 => ("PLC-5/30",        "PLC5"),
+                    0x4A => ("PLC-5/20E",       "PLC5"),
+                    0x4B => ("PLC-5/40E",       "PLC5"),
+                    0x55 => ("PLC-5/25",        "PLC5"),
+                    0x59 => ("PLC-5/80E",       "PLC5"),
+                    _    => ($"Unknown (0x{procType:X2})", "Unknown")
+                };
+            }
 
             // Defaults
             string bulletin = string.Empty;
@@ -75,32 +105,37 @@ public static class PlcIdentifier
                 byte[]? data = await Task.Run(() => df1.GetDiagnosticStatusRaw());
                 if (data != null && data.Length >= 16)
                 {
-                    // Per emulator/spec: DATA[3] = ProcessorType (redundant), DATA[5..15] = bulletin ASCII (11 bytes)
-                    if (data.Length > 3)
-                    {
-                        // If PCCCComm GetProcessorType returned something different, keep procType from GetProcessorType()
-                        // but we can override if needed:
-                        // procType = data[3];
-                    }
-
+                    // Extract bulletin (bytes 5-15) – same for both families
                     int bStart = 5;
                     int bLen = Math.Min(11, data.Length - bStart);
                     if (bLen > 0)
                         bulletin = Encoding.ASCII.GetString(data, bStart, bLen).Trim();
 
                     seriesRev = data.Length > 4 ? data[4] : (byte)0;
-                    byte mode = data.Length > 18 ? data[18] : (byte)0;
-                    modeStr = DecodeModeString(mode);
                     ramKb = data.Length > 22 ? data[22] : (byte)0;
+
+                    // Mode decoding differs by family
+                    if (family == global::PCCCComm.Pccc.PCCCConstants.ProcessorFamily.Plc5)
+                    {
+                        // PLC-5: operating status is at byte 0 (index 0)
+                        byte modeCode = data.Length > 0 ? data[0] : (byte)0;
+                        modeStr = DecodePlc5ModeString(modeCode);
+                    }
+                    else
+                    {
+                        // SLC/MicroLogix: mode code at byte 18
+                        byte modeCode = data.Length > 18 ? data[18] : (byte)0;
+                        modeStr = DecodeSlcModeString(modeCode);
+                    }
                 }
             }
             catch
             {
-                // ignore if PCCCComm doesn't support raw diagnostic read
+                // ignore
             }
 
-            bool supports = family is "SLC" or "MicroLogix";
-            return new PlcInfo(procType, name, supports, family, bulletin, seriesRev, ramKb, modeStr);
+            bool supports = familyStr is "SLC" or "MicroLogix" or "PLC5";
+            return new PlcInfo(procType, name, supports, familyStr, bulletin, seriesRev, ramKb, modeStr);
         }
         catch (Exception ex)
         {
@@ -108,14 +143,26 @@ public static class PlcIdentifier
         }
     }
 
-    public static string DecodeModeString(byte modeByte) => modeByte switch
+    // For SLC/MicroLogix
+    public static string DecodeSlcModeString(byte modeCode) => modeCode switch
     {
         0x1E => "RUN",   // local RUN  (pub. 1770-6.5.16 §10)
         0x06 => "RUN",   // remote RUN (observed on SLC 5/03, not documented in pub)
         0x11 => "PROG",  // local PROG
+        0x01 => "PROG",  // remote PROG
         0x17 => "TEST",  // TEST-continuous
         0x18 => "TEST",  // TEST-single step
         0x19 => "TEST",  // TEST-step
         _    => "PROG"   // default safe assumption
+    };
+
+    // For PLC-5
+    public static string DecodePlc5ModeString(byte operatingStatus) => operatingStatus switch
+    {
+        0x02 => "RUN",   // Local Run
+        0x06 => "RUN",   // Remote Run
+        0x00 => "PROG",  // Program Load
+        0x04 => "PROG",  // Remote Program
+        _    => "PROG"
     };
 }

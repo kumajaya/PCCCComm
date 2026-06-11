@@ -546,10 +546,20 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         try
         {
             byte[]? data = await Task.Run(() => _df1.GetDiagnosticStatusRaw());
-            if (data != null && data.Length > 18)
+            if (data != null && data.Length > 0)
             {
-                byte modeByte = data[18];
-                string modeStr = PlcIdentifier.DecodeModeString(modeByte);
+                var family = PCCCConstants.DetectFamily(data);
+                string modeStr;
+                if (family == PCCCConstants.ProcessorFamily.Plc5)
+                {
+                    byte opStatus = data[0];
+                    modeStr = PlcIdentifier.DecodePlc5ModeString(opStatus);
+                }
+                else
+                {
+                    byte modeByte = data.Length > 18 ? data[18] : (byte)0;
+                    modeStr = PlcIdentifier.DecodeSlcModeString(modeByte);
+                }
                 CurrentPlcInfo = CurrentPlcInfo with { ModeStr = modeStr };
                 string transportName = TransportType switch
                 {

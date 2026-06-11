@@ -212,9 +212,9 @@ public class PlcMemory : IDisposable
         const int numProgramFiles = 24;    // SYS×2 + LAD×22
         const int numDataFiles = 32;       // 32 data file slots
 #else
-        const int dirSize = 439;           // 79 + (36 × 10) for active-only layout (24 data + 12 prog)
+        const int dirSize = 429;           // 79 + (35 × 10) for active-only layout (23 data + 12 prog)
         const int numProgramFiles = 12;    // SYS×2 + LAD×10
-        const int numDataFiles = 24;       // 24 active data files
+        const int numDataFiles = 23;       // 23 active data files
 #endif
         var dir = new byte[dirSize];
 
@@ -309,8 +309,8 @@ public class PlcMemory : IDisposable
         else
         {
             Register(0x8D, 840, 18, 84);   // ST18 — String file, 10 strings × 84 bytes/elem
+            Register(0xA4, 400, 19, 40);   // Data Monitor File, 400 bytes, 40 bytes/element
         }
-        Register(0xA4, 400, 20, 40);   // Data Monitor File, 400 bytes, 40 bytes/element
 
 #if INCLUDE_INACTIVE_FILES
         // Inactive data files 18-28 (type 0x85 = Binary, size 0)
@@ -508,14 +508,15 @@ public class PlcMemory : IDisposable
             byte[] longFile = _files[(0x0C, 19)];
             BitConverter.GetBytes(123456789).CopyTo(longFile, 0);   // L19:0 = 123456789
             BitConverter.GetBytes(-987654321).CopyTo(longFile, 4);  // L19:1 = -987654321
+        } else
+        {
+            // Data Monitor File (type 0xA4) – 10 elements of 40 bytes each = 400 bytes
+            CreateDataFile(0xA4, 19, 400, 40);
+            // Fill with sample data (optional)
+            byte[] dmData = _files[(0xA4, 19)];
+            // Fill with number pattern 0..399 for debugging
+            for (int i = 0; i < dmData.Length; i++) dmData[i] = (byte)(i & 0xFF);            
         }
-
-        // Data Monitor File (type 0xA4) – 10 elements of 40 bytes each = 400 bytes
-        CreateDataFile(0xA4, 20, 400, 40);
-        // Fill with sample data (optional)
-        byte[] dmData = _files[(0xA4, 20)];
-        // Fill with number pattern 0..399 for debugging
-        for (int i = 0; i < dmData.Length; i++) dmData[i] = (byte)(i & 0xFF);
         CreateDataFile(0x85, 29,  52, 2);   // B29 — 26 words
         CreateDataFile(0x85, 30,  52, 2);   // B30 — 26 words
         CreateDataFile(0x85, 31,  52, 2);   // B31 — 26 words
@@ -1083,6 +1084,44 @@ public class PlcMemory : IDisposable
                 buf[offset + 2 + i] = (byte)value[i];
             // remaining already zero
         }
+    }
+
+    /// <summary>Reads from a linear physical address space (for PLC-5 upload).</summary>
+    public byte[]? ReadPhysical(int address, int length)
+    {
+        _rwLock.EnterReadLock();
+        try
+        {
+            // Implementasi sederhana: petakan alamat fisik ke file directory atau file lain.
+            // Untuk emulator, kita asumsikan physical address 0 = directory file (type 0x01, number 0)
+            byte[]? dir = Lookup(0x01, 0);
+            if (dir != null && address >= 0 && address + length <= dir.Length)
+            {
+                byte[] result = new byte[length];
+                Array.Copy(dir, address, result, 0, length);
+                return result;
+            }
+            // Perluas untuk file lain jika diperlukan
+            return null;
+        }
+        finally { _rwLock.ExitReadLock(); }
+    }
+
+    /// <summary>Writes to a linear physical address space (for PLC-5 download).</summary>
+    public bool WritePhysical(int address, byte[] data)
+    {
+        _rwLock.EnterWriteLock();
+        try
+        {
+            byte[]? dir = Lookup(0x01, 0);
+            if (dir != null && address >= 0 && address + data.Length <= dir.Length)
+            {
+                Array.Copy(data, 0, dir, address, data.Length);
+                return true;
+            }
+            return false;
+        }
+        finally { _rwLock.ExitWriteLock(); }
     }
 
     // =========================================================================
