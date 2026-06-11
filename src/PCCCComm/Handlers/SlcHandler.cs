@@ -701,7 +701,7 @@ public class SlcHandler : IPlcHandler
     {
         if (string.IsNullOrEmpty(dataToWrite)) return 0;
         if (dataToWrite.Length > PCCCConstants.Df1Limits.MaxStringLength) 
-            dataToWrite = dataToWrite[..PCCCConstants.Df1Limits.MaxStringLength];
+            dataToWrite = dataToWrite.Substring(0, PCCCConstants.Df1Limits.MaxStringLength); // ← perbaikan
 
         DataAddress p = PCCCParser.Parse(startAddress);
         

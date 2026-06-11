@@ -214,7 +214,7 @@ public class PCCCComm : IDisposable, IHandlerContext
     {
         if (!string.IsNullOrEmpty(portName))
         {
-            _comPort = portName;
+            _comPort = portName!;
             _baudRate = baud;
             _parity = parity;
         }
@@ -712,9 +712,19 @@ public class PCCCComm : IDisposable, IHandlerContext
         byte sts    = pdu[3];
         bool hasFnc = (cmd == 0x06 || cmd == 0x0F || cmd == 0x0A) && pdu.Length >= 7;
         byte? fnc   = hasFnc ? pdu[6] : (byte?)null;
-        byte[] data = pdu.Length > (hasFnc ? 7 : 6)
-                    ? pdu[(hasFnc ? 7 : 6)..]
-                    : Array.Empty<byte>();
+
+        int startIdx = hasFnc ? 7 : 6;
+        byte[] data;
+        if (pdu.Length > startIdx)
+        {
+            int length = pdu.Length - startIdx;
+            data = new byte[length];
+            Array.Copy(pdu, startIdx, data, 0, length);
+        }
+        else
+        {
+            data = Array.Empty<byte>();
+        }
 
         var req   = new PCCCMessage((byte)TargetNode, (byte)MyNode, cmd, sts, 0, fnc, data);
         var reply = _protocol.SendRequest(req, out int replySts);

@@ -317,7 +317,8 @@ public class EIPTransport : ITransport
         pkt[2] = (byte)(encapsulationLen & 0xFF);
         pkt[3] = (byte)(encapsulationLen >> 8);
         // Bytes 4-7: session handle (little-endian)
-        BitConverter.TryWriteBytes(new Span<byte>(pkt, 4, 4), _sessionHandle);
+        byte[] temp = BitConverter.GetBytes(_sessionHandle);
+        Array.Copy(temp, 0, pkt, 4, 4);
         // Bytes 8-11: status = 0x00000000 (already zero)
         // Bytes 12-19: sender context = 0 (not used by client)
         // Bytes 20-23: options = 0

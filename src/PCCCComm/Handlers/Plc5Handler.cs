@@ -527,7 +527,7 @@ public class Plc5Handler : IPlcHandler
     {
         if (string.IsNullOrEmpty(dataToWrite)) return 0;
         if (dataToWrite.Length > PCCCConstants.Df1Limits.MaxStringLength) 
-            dataToWrite = dataToWrite[..PCCCConstants.Df1Limits.MaxStringLength];
+            dataToWrite = dataToWrite.Substring(0, PCCCConstants.Df1Limits.MaxStringLength); // ← perbaikan
 
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)

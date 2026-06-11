@@ -30,17 +30,22 @@ namespace PCCCComm.Pccc;
 /// </summary>
 public static partial class PCCCParser
 {
-    [GeneratedRegex(@"^\s*(?<FileType>([SBCTRNFAIOL])|(ST)|(MG)|(PD)|(PLS))(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})(/(?<BitNumber>\d{1,4}))?\s*$", RegexOptions.IgnoreCase)]
-    private static partial Regex RE1();
+    // Regex patterns - compiled for performance (.NET Standard 2.0 compatible)
+    private static readonly Regex RE1 = new Regex(
+        @"^\s*(?<FileType>([SBCTRNFAIOL])|(ST)|(MG)|(PD)|(PLS))(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})(/(?<BitNumber>\d{1,4}))?\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    [GeneratedRegex(@"^\s*(?<FileType>[BN])(?<FileNumber>\d{1,3})(/(?<BitNumber>\d{1,4}))\s*$", RegexOptions.IgnoreCase)]
-    private static partial Regex RE2();
+    private static readonly Regex RE2 = new Regex(
+        @"^\s*(?<FileType>[BN])(?<FileNumber>\d{1,3})(/(?<BitNumber>\d{1,4}))\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    [GeneratedRegex(@"^\s*(?<FileType>[CT])(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})[.](?<SubElement>(ACC|PRE|EN|DN|TT|CU|CD|OV|UN|UA))\s*$", RegexOptions.IgnoreCase)]
-    private static partial Regex RE3();
+    private static readonly Regex RE3 = new Regex(
+        @"^\s*(?<FileType>[CT])(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})[.](?<SubElement>(ACC|PRE|EN|DN|TT|CU|CD|OV|UN|UA))\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    [GeneratedRegex(@"^\s*(?<FileType>([IOS])):(?<ElementNumber>\d{1,3})([.](?<SubElement>[0-7]))?(/(?<BitNumber>\d{1,4}))?\s*$", RegexOptions.IgnoreCase)]
-    private static partial Regex RE4();
+    private static readonly Regex RE4 = new Regex(
+        @"^\s*(?<FileType>([IOS])):(?<ElementNumber>\d{1,3})([.](?<SubElement>[0-7]))?(/(?<BitNumber>\d{1,4}))?\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>
     /// Parses an AB address string. Returns FileType=0 if the address is invalid.
@@ -56,10 +61,10 @@ public static partial class PCCCParser
         if (string.IsNullOrWhiteSpace(dataAddress))
             return result;
 
-        Match mc = RE1().Match(dataAddress);
-        if (!mc.Success) mc = RE2().Match(dataAddress);
-        if (!mc.Success) mc = RE3().Match(dataAddress);
-        if (!mc.Success) mc = RE4().Match(dataAddress);
+        Match mc = RE1.Match(dataAddress);
+        if (!mc.Success) mc = RE2.Match(dataAddress);
+        if (!mc.Success) mc = RE3.Match(dataAddress);
+        if (!mc.Success) mc = RE4.Match(dataAddress);
         if (!mc.Success) return result;
 
         // ── FileNumber ────────────────────────────────────────────────────────

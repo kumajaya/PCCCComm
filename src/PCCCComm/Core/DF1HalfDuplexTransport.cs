@@ -418,7 +418,9 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
                 _suppressEcho = false;
             if (discard >= chunk.Length)
                 return; // entire chunk was echo, ignore
-            filtered = chunk[discard..];
+            int newLen = chunk.Length - discard;
+            filtered = new byte[newLen];
+            Array.Copy(chunk, discard, filtered, 0, newLen);
         }
 
         lock (_rxLock)
