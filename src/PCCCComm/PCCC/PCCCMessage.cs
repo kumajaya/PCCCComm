@@ -463,29 +463,36 @@ namespace PCCCComm.Pccc
                 PCCCConstants.Fnc.Echo, data ?? Array.Empty<byte>());
         }
 
-    /// <summary>
-    /// Creates a Typed Read request for PLC-5 (CMD=0x0F, FNC=0x68).
-    /// </summary>
-    /// <param name="logicalAddress">Encoded logical binary address (mask + levels).</param>
-    /// <param name="elementCount">Number of elements to read (each element = 1 byte for this type parameter).</param>
-    /// <param name="tns">Transaction number (0 to auto-assign).</param>
-    /// <param name="myNode">Source node address.</param>
-    /// <param name="targetNode">Destination node address.</param>
-    /// <returns>PCCCMessage ready to send.</returns>
-    public static PCCCMessage CreateTypedReadRequest(byte[] logicalAddress, int elementCount,
-        ushort tns, byte myNode, byte targetNode)
-    {
-        // Type/Data parameter for byte array (ID=3, size=1 byte per element)
-        byte typeDataParam = 0x31; // 0b0011 0001 (ID=3, size=1)
-        List<byte> body = new List<byte>();
-        body.Add(typeDataParam);
-        body.AddRange(logicalAddress);
-        // Number of elements to read (each element = 1 byte)
-        body.Add((byte)(elementCount & 0xFF));
-        body.Add((byte)((elementCount >> 8) & 0xFF));
-        return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
-            PCCCConstants.Fnc.TypedRead, body.ToArray());
-    }
+        /// <summary>
+        /// Creates a Typed Read request for PLC-5 (CMD=0x0F, FNC=0x68).
+        /// </summary>
+        /// <param name="logicalAddress">Encoded logical binary address (mask + levels).</param>
+        /// <param name="elementCount">Number of elements to read (each element = 1 byte for this type parameter).</param>
+        /// <param name="tns">Transaction number (0 to auto-assign).</param>
+        /// <param name="myNode">Source node address.</param>
+        /// <param name="targetNode">Destination node address.</param>
+        /// <returns>PCCCMessage ready to send.</returns>
+        public static PCCCMessage CreateTypedReadRequest(byte[] logicalAddress, int elementCount,
+            ushort tns, byte myNode, byte targetNode)
+        {
+            // Format per 1770-6.5.16 §7-28:
+            // [PktOff 2B][TotTrans 2B][address var][Size(elements) 2B]
+            List<byte> body = new List<byte>();
+            // Packet Offset = 0 (2 bytes, little‑endian)
+            body.Add((byte)(PCCCConstants.Df1Limits.TypedPacketOffsetZero & 0xFF));
+            body.Add((byte)((PCCCConstants.Df1Limits.TypedPacketOffsetZero >> 8) & 0xFF));
+            // Total Transaction = elementCount (used by emulator/PLC to allocate buffers)
+            body.Add((byte)(elementCount & 0xFF));
+            body.Add((byte)((elementCount >> 8) & 0xFF));
+            // Logical binary address
+            body.AddRange(logicalAddress);
+            // Size = number of elements to read (again)
+            body.Add((byte)(elementCount & 0xFF));
+            body.Add((byte)((elementCount >> 8) & 0xFF));
+            
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.TypedRead, body.ToArray());
+        }
 
         /// <summary>
         /// Creates a Typed Write request for PLC-5 (CMD=0x0F, FNC=0x67).
@@ -497,18 +504,25 @@ namespace PCCCComm.Pccc
         /// <param name="myNode">Source node address.</param>
         /// <param name="targetNode">Destination node address.</param>
         /// <returns>PCCCMessage ready to send.</returns>
-        public static PCCCMessage CreateTypedWriteRequest(byte[] logicalAddress, byte[] data, int elementCount,
-            ushort tns, byte myNode, byte targetNode)
+        public static PCCCMessage CreateTypedWriteRequest(byte[] logicalAddress, byte[] data,
+            int elementCount, ushort tns, byte myNode, byte targetNode)
         {
-            // Type/Data parameter for byte array (ID=3, size=1 byte per element)
-            byte typeDataParam = 0x31; // 0b0011 0001
+            // Format per 1770-6.5.16 §7-30:
+            // [PktOff 2B][TotTrans 2B][address var][typeDataParam][data]
             List<byte> body = new List<byte>();
-            body.Add(typeDataParam);
-            body.AddRange(logicalAddress);
-            // Number of elements to write (provided by caller)
+            // Packet Offset = 0
+            body.Add((byte)(PCCCConstants.Df1Limits.TypedPacketOffsetZero & 0xFF));
+            body.Add((byte)((PCCCConstants.Df1Limits.TypedPacketOffsetZero >> 8) & 0xFF));
+            // Total Transaction = elementCount (used for buffer allocation)
             body.Add((byte)(elementCount & 0xFF));
             body.Add((byte)((elementCount >> 8) & 0xFF));
+            // Logical binary address
+            body.AddRange(logicalAddress);
+            // Type/Data Parameter (0x31 = byte array, 1 byte per element)
+            body.Add(PCCCConstants.Df1Limits.TypedTypeDataParamByteArray);
+            // Data bytes (must be aligned to element boundaries)
             body.AddRange(data);
+            
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
                 PCCCConstants.Fnc.TypedWrite, body.ToArray());
         }

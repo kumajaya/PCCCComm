@@ -1178,20 +1178,33 @@ public class PCCCEmulator : IDisposable
             SendErrorResponse(src, tns, 0x0F, 0x26, 0x10, clientContext);
     }
 
+    // Typed Read/Write frame field sizes per 1770-6.5.16 §7-28 and §7-30.
+    // Defined here independently of PCCCComm library to keep emulator self-contained.
+    private const int TypedPacketOffsetBytes = 2;
+    private const int TypedTotalTransBytes = 2;
+    private const int TypedSizeBytes = 2;
+    private const byte TypedSuccessReply = 0x4F; // CMD reply = 0x0F | 0x40
+
     /// <summary>
     /// Handles Typed Write (CMD=0x0F, FNC=0x67) for PLC-5.
-    /// Payload: [typeParam 1B] [logical binary address (variable)] [elementCount 2B LE] [data...]
-    /// typeParam is skipped (assumed 0x31 — word array).
+    /// Request payload per 1770-6.5.16 §7-30:
+    ///   [PktOff 2B LE] [TotTrans 2B LE] [logical binary address (variable)] [typeDataParam 1B] [data...]
     /// </summary>
     private void HandleTypedWriteRequest(int src, int tns, byte[] payload, object clientContext)
     {
-        if (payload == null || payload.Length < 4)
+        // Format: [PktOff 2B][TotTrans 2B][address...][typeDataParam][data]
+        if (payload == null || payload.Length < 6)
         {
             SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
             return;
         }
 
-        int idx = 1; // skip typeParam byte
+        int idx = 0;
+        // Skip Packet Offset (2 bytes)
+        idx += TypedPacketOffsetBytes;
+        // Skip Total Transaction (2 bytes) – not used for write in emulator
+        idx += TypedTotalTransBytes;
+
         if (!Plc5AddressDecoder.Decode(payload, ref idx,
                 out int fileNumber, out int fileType, out int element, out int subElement))
         {
@@ -1200,44 +1213,54 @@ public class PCCCEmulator : IDisposable
         }
         fileType = Plc5AddressDecoder.Plc5ToSlcFileType(fileType);
 
-        if (idx + 2 > payload.Length)
+        // Expect typeDataParam (0x31) but we don't need to validate unless desired
+        if (idx >= payload.Length)
         {
             SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
             return;
         }
-        int elementCount = payload[idx] | (payload[idx + 1] << 8); idx += 2;
+        // Optionally check that the byte equals TypedTypeDataParamByteArray
+        idx += 1;
 
         int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
-        int expectedDataBytes = elementCount * bpe;
-        int byteOffset = element * bpe + subElement * 2;
-
-        if (payload.Length - idx < expectedDataBytes)
+        // Align data length to element boundaries
+        int dataBytes = ((payload.Length - idx) / bpe) * bpe;
+        if (dataBytes <= 0)
         {
             SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
             return;
         }
 
-        byte[] data = new byte[expectedDataBytes];
-        Array.Copy(payload, idx, data, 0, expectedDataBytes);
+        int byteOffset = element * bpe + subElement * 2;
+        byte[] data = new byte[dataBytes];
+        Array.Copy(payload, idx, data, 0, dataBytes);
 
-        bool ok = _memory.WriteRaw(fileType, fileNumber, byteOffset, expectedDataBytes, data);
-        if (ok) SendEmptyResponse(src, tns, 0x4F, 0x67, clientContext);
+        bool ok = _memory.WriteRaw(fileType, fileNumber, byteOffset, dataBytes, data);
+        if (ok) SendEmptyResponse(src, tns, TypedSuccessReply, 0x67, clientContext);
         else    SendErrorResponse(src, tns, 0x0F, 0x67, 0x10, clientContext);
     }
 
     /// <summary>
     /// Handles Typed Read (CMD=0x0F, FNC=0x68) for PLC-5.
-    /// Payload: [typeParam 1B] [logical binary address (variable)] [bytesToRead 2B LE]
+    /// Request payload per 1770-6.5.16 §7-28:
+    ///   [PktOff 2B LE] [TotTrans 2B LE] [logical binary address (variable)] [Size 2B LE (element count)]
+    /// Reply: [typeDataParam var] [data]
     /// </summary>
     private void HandleTypedReadRequest(int src, int tns, byte[] payload, object clientContext)
     {
-        if (payload == null || payload.Length < 4)
+        // Format: [PktOff 2B][TotTrans 2B][address...][Size(elements) 2B]
+        if (payload == null || payload.Length < 7)
         {
             SendErrorResponse(src, tns, 0x0F, 0x68, 0x01, clientContext);
             return;
         }
 
-        int idx = 1; // skip typeParam byte
+        int idx = 0;
+        // Skip Packet Offset (2 bytes)
+        idx += TypedPacketOffsetBytes;
+        // Skip Total Transaction (2 bytes) – not used for read in emulator
+        idx += TypedTotalTransBytes;
+
         if (!Plc5AddressDecoder.Decode(payload, ref idx,
                 out int fileNumber, out int fileType, out int element, out int subElement))
         {
@@ -1246,12 +1269,11 @@ public class PCCCEmulator : IDisposable
         }
         fileType = Plc5AddressDecoder.Plc5ToSlcFileType(fileType);
 
-        if (idx + 2 > payload.Length)
+        if (idx + TypedSizeBytes > payload.Length)
         {
             SendErrorResponse(src, tns, 0x0F, 0x68, 0x01, clientContext);
             return;
         }
-        // Fix: The 2-byte field is the number of elements, not bytes.
         int elementCount = payload[idx] | (payload[idx + 1] << 8);
 
         int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
@@ -1261,7 +1283,7 @@ public class PCCCEmulator : IDisposable
         byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
         if      (status == 2) SendErrorResponse(src, tns, 0x0F, 0x68, 0x50, clientContext);
         else if (status != 0) SendErrorResponse(src, tns, 0x0F, 0x68, 0x10, clientContext);
-        else                  SendDataResponse(src, tns, 0x4F, data, clientContext);
+        else                  SendDataResponse(src, tns, TypedSuccessReply, data, clientContext);
     }
 
     /// <summary>

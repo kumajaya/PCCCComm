@@ -430,6 +430,21 @@ public static class PCCCConstants
 
         /// <summary>Minimum file type value that requires 120-byte limit for Data Monitor file (0xA1).</summary>
         public const int MinFileTypeForExtendedLimit = 0xA1;
+
+        /// <summary>Typed Read/Write packet offset field size (2 bytes).</summary>
+        public const int TypedPacketOffsetBytes = 2;
+
+        /// <summary>Typed Read/Write total transaction field size (2 bytes).</summary>
+        public const int TypedTotalTransBytes = 2;
+
+        /// <summary>Typed Read/Write Size field size (2 bytes, element count).</summary>
+        public const int TypedSizeBytes = 2;
+
+        /// <summary>Default type/data parameter for byte array (0x31 = ID=3, size=1).</summary>
+        public const byte TypedTypeDataParamByteArray = 0x31;
+
+        /// <summary>Zero packet offset (no offset into file).</summary>
+        public const ushort TypedPacketOffsetZero = 0;
     }
 
     // ========================================================================
