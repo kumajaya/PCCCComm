@@ -574,7 +574,33 @@ public class PCCCEmulator : IDisposable
             // =================================================================
             // File-based upload/download commands (SLC 5/03 and newer)
             // =================================================================
-            case 0x53:  // Upload All Request — return segment info
+            case 0x53:  // Upload All Request
+            {
+                if (_family == EmulationFamily.Plc5)
+                {
+                    // PLC-5 Procedure 2 reply per spec §7-33: 
+                    // A(1B) = number of uploadable segments 
+                    // B(8B × A) = [startAddr 4B LE][endAddr 4B LE] 
+                    // C(1B) = number of comparable segments (0)
+                    int totalBytes = _memory.GetFlatMemorySize();
+                    if (totalBytes == 0)
+                    {
+                        SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext);
+                        break;
+                    }
+                    int endAddr = totalBytes - 1;
+                    var resp = new byte[10];   // A(1) + B(8) + C(1)
+                    resp[0] = 1;               // A: 1 uploadable segment
+                    // B: start = 0x00000000
+                    // B: end address (LE)
+                    resp[5] = (byte)( endAddr        & 0xFF);
+                    resp[6] = (byte)((endAddr >>  8) & 0xFF);
+                    resp[7] = (byte)((endAddr >> 16) & 0xFF);
+                    resp[8] = (byte)((endAddr >> 24) & 0xFF);
+                    resp[9] = 0;               // C: 0 comparable segments
+                    SendDataResponse(src, tns, 0x4F, resp, clientContext);
+                }
+                else
                 {
                     // Segment info: max chunk size (2 bytes LE) + total memory size (2 bytes LE)
                     // SLC 5/03: max segment = 236 bytes, total memory = directory size
@@ -585,10 +611,18 @@ public class PCCCEmulator : IDisposable
                     segInfo[2] = (byte)(totalMemory & 0xFF);
                     segInfo[3] = (byte)((totalMemory >> 8) & 0xFF);
                     SendDataResponse(src, tns, 0x4F, segInfo, clientContext);
-                    break;
                 }
+                break;
+            }
 
-            case 0x50:  // Download All Request — return segment info
+            case 0x50:  // Download All Request
+            {
+                if (_family == EmulationFamily.Plc5)
+                {
+                    // PLC-5: empty reply per spec §7-7
+                    SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                }
+                else
                 {
                     int totalMemory = _directoryBytes?.Length ?? 0;
                     byte[] segInfo = new byte[4];
@@ -597,8 +631,9 @@ public class PCCCEmulator : IDisposable
                     segInfo[2] = (byte)(totalMemory & 0xFF);
                     segInfo[3] = (byte)((totalMemory >> 8) & 0xFF);
                     SendDataResponse(src, tns, 0x4F, segInfo, clientContext);
-                    break;
                 }
+                break;
+            }
 
             case 0x55:  // Upload Completed
             case 0x52:  // Download Completed
@@ -790,6 +825,43 @@ public class PCCCEmulator : IDisposable
             case 0x01:  // Word Range Read for PLC-5
                 HandleWordRangeRead(src, tns, data, clientContext);
                 break;
+
+            case 0x17:  // Read Bytes Physical — PLC-5 upload per spec §7-19
+            {
+                // Request payload: [physAddr 4B LE][size 1B]
+                // size: max 240, must be even
+                if (data == null || data.Length < 5)
+                {
+                    SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
+                    break;
+                }
+                int physAddr = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+                int size     = data[4];
+                byte[]? result = _memory.ReadPhysical(physAddr, size);
+                if (result == null)
+                    SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
+                else
+                    SendDataResponse(src, tns, 0x4F, result, clientContext);
+                break;
+            }
+
+            case 0x18:  // Write Bytes Physical — PLC-5 download per spec §7-35
+            {
+                // Request payload: [physAddr 4B LE][data... (max 238, must be even)]
+                if (data == null || data.Length < 5)
+                {
+                    SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
+                    break;
+                }
+                int physAddr  = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+                int dataLen   = data.Length - 4;
+                var writeData = new byte[dataLen];
+                Array.Copy(data, 4, writeData, 0, dataLen);
+                bool ok = _memory.WritePhysical(physAddr, writeData);
+                if (ok) SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                else    SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);
+                break;
+            }
 
             default:
                 SendErrorResponse(src, tns, 0x0F, func, 0x01, clientContext);

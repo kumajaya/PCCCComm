@@ -66,8 +66,8 @@ using System.Runtime.CompilerServices;
 ///     17  N     26    52     N17:0–N17:25
 ///     18  ST    10   840/880 ST18:0–ST18:9, 84 bytes/elem (SLC) or 88 bytes/elem (PLC-5)
 ///     19  L     25   100     L19:0–L19:24 (PLC-5 only), 4 bytes/elem
-///     20  A4    10   400     Data Monitor File (type 0xA4), 40 bytes/elem
-///  21–28  —     —     —      Inactive slots (reserved)
+///     19  A4    10   400     Data Monitor File (type 0xA4), 40 bytes/elem
+///  20–28  —     —     —      Inactive slots (reserved)
 ///     29  B     26    52     B29:0–B29:25
 ///     30  B     26    52     B30:0–B30:25
 ///     31  B     26    52     B31:0–B31:25
@@ -135,6 +135,12 @@ public class PlcMemory : IDisposable
     private const int DirectoryInternalType = 0xFF;
     private const int DirectoryInternalNumber = 0xFF;
 
+    // Flat memory for PLC-5 family (used by ReadBytesPhysical / WriteBytesPhysical)
+    private byte[] _flatMemory = Array.Empty<byte>();
+    private readonly Dictionary<int, int> _flatOffsetByFileNumber = new();
+    private readonly Dictionary<int, int> _flatFileTypeByNumber = new();
+    private int _flatTotalBytes;
+
     private PCCCEmulator.EmulationFamily _family = PCCCEmulator.EmulationFamily.SlcMicroLogix;
 
     // ─── Constructor ──────────────────────────────────────────────────────────
@@ -151,6 +157,7 @@ public class PlcMemory : IDisposable
         BuildIoConfig();
         BuildDownloadSeed();
         LoadEmbeddedProgram();
+        RebuildFlatMemory();   // ensures flat memory matches all files (including loaded program)
         
         InitializeHotCache();
         
@@ -224,10 +231,6 @@ public class PlcMemory : IDisposable
         WriteProgramFileEntries(dir, addr);
 
         _files[(DirectoryInternalType, DirectoryInternalNumber)] = dir;
-        // Alias for directory: allow RSLinx/RSLogix to read/write directory via file type 0x01, number 0
-        _files[(0x01, 0)] = dir;
-        _bytesPerElement[(0x01, 0)] = 2;
-        _fileTypeByNumber[0] = 0x01;
     }
 
     /// <summary>
@@ -277,6 +280,10 @@ public class PlcMemory : IDisposable
             dir[pos + 8] = 0x00;
             dir[pos + 9] = 0x00;
             
+            // Record flat memory offset for this data file (byte address)
+            _flatOffsetByFileNumber[fileNum] = addr * 2;
+            _flatFileTypeByNumber[fileNum] = type;
+
             addr += sizeBytes / 2;            // Address advances in WORDS
             _fileTypeByNumber[fileNum] = type;
             pos += 10;
@@ -304,7 +311,7 @@ public class PlcMemory : IDisposable
         if (_family == PCCCEmulator.EmulationFamily.Plc5)
         {
             Register(0x8D, 880, 18, 88);   // ST18 — String file, 10 strings × 88 bytes/elem
-            Register(0x0C, 100, 19, 4);    // L19 — Long integer file, 25 elemen × 4 bytes = 100 bytes
+            Register(0x0C, 100, 19, 4);    // L19 — Long integer file, 25 elements × 4 bytes = 100 bytes
         }
         else
         {
@@ -313,9 +320,9 @@ public class PlcMemory : IDisposable
         }
 
 #if INCLUDE_INACTIVE_FILES
-        // Inactive data files 18-28 (type 0x85 = Binary, size 0)
+        // Inactive data files 20-28 (type 0x85 = Binary, size 0)
         // These occupy directory slots but have no data and do not appear in RSLogix
-        for (int n = 18; n <= 28; n++)
+        for (int n = 20; n <= 28; n++)
         {
             dir[pos]     = 0x85;
             dir[pos + 1] = 0x00;
@@ -342,6 +349,8 @@ public class PlcMemory : IDisposable
     private void WriteProgramFileEntries(byte[] dir, int startAddr)
     {
         int pos = 79 + (_fileTypeByNumber.Count * 10);
+        // Starting byte offset for program files in flat memory (after all data files)
+        int progFlatBase = startAddr * 2;
 
         // SYS file 0 — System data storage header (2 bytes)
         dir[pos]     = 0x01;
@@ -352,6 +361,9 @@ public class PlcMemory : IDisposable
         _fileTypeByNumber[0] = 0x01;
         _files[(0x01, 0)] = new byte[2];
         _bytesPerElement[(0x01, 0)] = 0;
+        _flatOffsetByFileNumber[0] = progFlatBase;
+        _flatFileTypeByNumber[0] = 0x01;
+        progFlatBase += 2;
 
         // SYS file 1 — Reserved for future use (2 bytes)
         dir[pos]     = 0x01;
@@ -362,6 +374,9 @@ public class PlcMemory : IDisposable
         _fileTypeByNumber[1] = 0x01;
         _files[(0x01, 1)] = new byte[2];
         _bytesPerElement[(0x01, 1)] = 0;
+        _flatOffsetByFileNumber[1] = progFlatBase;
+        _flatFileTypeByNumber[1] = 0x01;
+        progFlatBase += 2;
 
         // LAD files (active program files)
         // Sizes from .ACH disassembly (bytes)
@@ -394,6 +409,11 @@ public class PlcMemory : IDisposable
             dir[pos + 2] = (byte)((sizeBytes >> 8) & 0xFF);
             dir[pos + 3] = (byte)n;
             pos += 10;
+
+            // Record flat memory offset for this program file
+            _flatOffsetByFileNumber[n] = progFlatBase;
+            _flatFileTypeByNumber[n] = fileType;
+            progFlatBase += sizeBytes;
         }
 #else
         // Active LAD files only
@@ -413,8 +433,15 @@ public class PlcMemory : IDisposable
             dir[pos + 2] = (byte)((sizeBytes >> 8) & 0xFF);
             dir[pos + 3] = (byte)n;
             pos += 10;
+
+            _flatOffsetByFileNumber[n] = progFlatBase;
+            _flatFileTypeByNumber[n] = fileType;
+            progFlatBase += sizeBytes;
         }
 #endif
+
+        // Total flat memory size (in bytes) after all data and program files
+        _flatTotalBytes = progFlatBase;
     }
 
     // =========================================================================
@@ -486,12 +513,12 @@ public class PlcMemory : IDisposable
         int stElemSize;
         if (_family == PCCCEmulator.EmulationFamily.Plc5)
         {
-            stSize = 10 * 88;      // 10 elemen × 88 byte = 880 bytes
+            stSize = 10 * 88;      // 10 elements × 88 bytes = 880 bytes
             stElemSize = 88;
         }
         else
         {
-            stSize = 10 * 84;      // 10 elemen × 84 byte = 840 bytes
+            stSize = 10 * 84;      // 10 elements × 84 bytes = 840 bytes
             stElemSize = 84;
         }
         CreateDataFile(0x8D, 18, stSize, stElemSize);
@@ -504,11 +531,12 @@ public class PlcMemory : IDisposable
         if (_family == PCCCEmulator.EmulationFamily.Plc5)
         {
             CreateDataFile(0x0C, 19, 100, 4);
-            // Optional: isi beberapa elemen dengan nilai contoh
+            // Optional: fill some elements with sample values
             byte[] longFile = _files[(0x0C, 19)];
             BitConverter.GetBytes(123456789).CopyTo(longFile, 0);   // L19:0 = 123456789
             BitConverter.GetBytes(-987654321).CopyTo(longFile, 4);  // L19:1 = -987654321
-        } else
+        }
+        else
         {
             // Data Monitor File (type 0xA4) – 10 elements of 40 bytes each = 400 bytes
             CreateDataFile(0xA4, 19, 400, 40);
@@ -595,6 +623,33 @@ public class PlcMemory : IDisposable
     private void BuildDownloadSeed()
     {
         CreateDataFile(0x63, 0, 4, 4);
+    }
+
+    // =========================================================================
+    // FLAT MEMORY MANAGEMENT (for PLC-5 family)
+    // =========================================================================
+
+    /// <summary>
+    /// Rebuilds the flat memory image from individual file data.
+    /// Called after initial construction, after loading embedded program,
+    /// and after ResetToDefault.
+    /// </summary>
+    private void RebuildFlatMemory()
+    {
+        if (_flatTotalBytes == 0)
+        {
+            _flatMemory = Array.Empty<byte>();
+            return;
+        }
+        _flatMemory = new byte[_flatTotalBytes];
+        foreach (var (fileNum, byteOffset) in _flatOffsetByFileNumber)
+        {
+            if (!_flatFileTypeByNumber.TryGetValue(fileNum, out int fileType)) continue;
+            if (!_files.TryGetValue((fileType, fileNum), out var fileData)) continue;
+            int copyLen = Math.Min(fileData.Length, _flatTotalBytes - byteOffset);
+            if (copyLen > 0)
+                Array.Copy(fileData, 0, _flatMemory, byteOffset, copyLen);
+        }
     }
 
     // =========================================================================
@@ -700,6 +755,15 @@ public class PlcMemory : IDisposable
             if (offset + lengthInBytes > data.Length) return false;
             
             Array.Copy(newData, 0, data, offset, Math.Min(newData.Length, data.Length - offset));
+
+            // Synchronize flat memory if this file is mapped and we are in PLC-5 mode
+            if (_flatOffsetByFileNumber.TryGetValue(fileNumber, out int flatBase))
+            {
+                int flatPos = flatBase + offset;
+                int copyLen = Math.Min(lengthInBytes, _flatTotalBytes - flatPos);
+                if (copyLen > 0)
+                    Array.Copy(newData, 0, _flatMemory, flatPos, copyLen);
+            }
             return true;
         }
         finally
@@ -735,6 +799,16 @@ public class PlcMemory : IDisposable
             data[offset] = (byte)(newValue & 0xFF);
             data[offset + 1] = (byte)((newValue >> 8) & 0xFF);
 
+            // Synchronize flat memory
+            if (_flatOffsetByFileNumber.TryGetValue(fileNumber, out int flatBase))
+            {
+                int flatPos = flatBase + offset;
+                if (flatPos + 2 <= _flatTotalBytes)
+                {
+                    _flatMemory[flatPos] = (byte)(newValue & 0xFF);
+                    _flatMemory[flatPos + 1] = (byte)((newValue >> 8) & 0xFF);
+                }
+            }
             return true;
         }
         finally
@@ -764,6 +838,17 @@ public class PlcMemory : IDisposable
 
             data[offset] = (byte)(newValue & 0xFF);
             data[offset + 1] = (byte)((newValue >> 8) & 0xFF);
+
+            // Synchronize flat memory
+            if (_flatOffsetByFileNumber.TryGetValue(fileNumber, out int flatBase))
+            {
+                int flatPos = flatBase + offset;
+                if (flatPos + 2 <= _flatTotalBytes)
+                {
+                    _flatMemory[flatPos] = (byte)(newValue & 0xFF);
+                    _flatMemory[flatPos + 1] = (byte)((newValue >> 8) & 0xFF);
+                }
+            }
             return true;
         }
         finally
@@ -886,7 +971,7 @@ public class PlcMemory : IDisposable
     /// Returns the raw directory file (type 0x01, number 0) bytes.
     /// </summary>
     public byte[] GetDirectory() 
-    => _files[(DirectoryInternalType, DirectoryInternalNumber)];
+        => _files[(DirectoryInternalType, DirectoryInternalNumber)];
 
     /// <summary>
     /// Writes raw bytes to a file at a given byte offset (no element/bpe conversion).
@@ -902,6 +987,15 @@ public class PlcMemory : IDisposable
             if (data == null) return false;
             if (byteOffset < 0 || byteOffset + lengthInBytes > data.Length) return false;
             Array.Copy(newData, 0, data, byteOffset, Math.Min(newData.Length, lengthInBytes));
+            
+            // Synchronize flat memory if this file is mapped
+            if (_flatOffsetByFileNumber.TryGetValue(fileNumber, out int flatBase))
+            {
+                int flatPos = flatBase + byteOffset;
+                int copyLen = Math.Min(lengthInBytes, _flatTotalBytes - flatPos);
+                if (copyLen > 0)
+                    Array.Copy(newData, 0, _flatMemory, flatPos, copyLen);
+            }
             return true;
         }
         finally
@@ -1016,6 +1110,7 @@ public class PlcMemory : IDisposable
             _rwLock.ExitWriteLock();
         }
 
+        RebuildFlatMemory();
         InitializeHotCache();
         Logger.Always(this, "Memory reset to default by Initialize Memory command.");
     }
@@ -1086,43 +1181,72 @@ public class PlcMemory : IDisposable
         }
     }
 
-    /// <summary>Reads from a linear physical address space (for PLC-5 upload).</summary>
-    public byte[]? ReadPhysical(int address, int length)
+    /// <summary>
+    /// Reads bytes from flat physical memory.
+    /// Used by ReadBytesPhysical (FNC 0x17) for PLC-5 upload.
+    /// Address is a byte address in the flat memory space.
+    /// Returns null if address or count is out of range.
+    /// </summary>
+    public byte[]? ReadPhysical(int byteAddress, int count)
     {
+        if (count <= 0 || count > 240 || count % 2 != 0) return null;
+        if (byteAddress < 0 || byteAddress + count > _flatTotalBytes) return null;
+        
         _rwLock.EnterReadLock();
         try
         {
-            // Implementasi sederhana: petakan alamat fisik ke file directory atau file lain.
-            // Untuk emulator, kita asumsikan physical address 0 = directory file (type 0x01, number 0)
-            byte[]? dir = Lookup(0x01, 0);
-            if (dir != null && address >= 0 && address + length <= dir.Length)
-            {
-                byte[] result = new byte[length];
-                Array.Copy(dir, address, result, 0, length);
-                return result;
-            }
-            // Perluas untuk file lain jika diperlukan
-            return null;
+            var result = new byte[count];
+            Array.Copy(_flatMemory, byteAddress, result, 0, count);
+            return result;
         }
         finally { _rwLock.ExitReadLock(); }
     }
 
-    /// <summary>Writes to a linear physical address space (for PLC-5 download).</summary>
-    public bool WritePhysical(int address, byte[] data)
+    /// <summary>
+    /// Writes bytes to flat physical memory and syncs back to _files.
+    /// Used by WriteBytesPhysical (FNC 0x18) for PLC-5 download.
+    /// Returns false if address or count is out of range or data is odd-length.
+    /// </summary>
+    public bool WritePhysical(int byteAddress, byte[] data)
     {
+        if (data == null || data.Length == 0 || data.Length > 238) return false;
+        if (data.Length % 2 != 0) return false;
+        if (byteAddress < 0 || byteAddress + data.Length > _flatTotalBytes) return false;
+
         _rwLock.EnterWriteLock();
         try
         {
-            byte[]? dir = Lookup(0x01, 0);
-            if (dir != null && address >= 0 && address + data.Length <= dir.Length)
+            // Update flat memory
+            Array.Copy(data, 0, _flatMemory, byteAddress, data.Length);
+
+            // Sync back to each file that overlaps this address range
+            foreach (var (fileNum, flatBase) in _flatOffsetByFileNumber)
             {
-                Array.Copy(data, 0, dir, address, data.Length);
-                return true;
+                if (!_flatFileTypeByNumber.TryGetValue(fileNum, out int ft)) continue;
+                if (!_files.TryGetValue((ft, fileNum), out var fileData)) continue;
+
+                int fileEnd      = flatBase + fileData.Length;
+                int writeEnd     = byteAddress + data.Length;
+                int overlapStart = Math.Max(byteAddress, flatBase);
+                int overlapEnd   = Math.Min(writeEnd, fileEnd);
+
+                if (overlapStart >= overlapEnd) continue;  // no overlap
+
+                int srcOff  = overlapStart - byteAddress;
+                int destOff = overlapStart - flatBase;
+                int len     = overlapEnd - overlapStart;
+                Array.Copy(data, srcOff, fileData, destOff, len);
             }
-            return false;
+            return true;
         }
         finally { _rwLock.ExitWriteLock(); }
     }
+
+    /// <summary>
+    /// Returns total flat memory size in bytes. Used by emulator to build
+    /// upload segment list for UploadAllRequest (FNC 0x53) reply.
+    /// </summary>
+    public int GetFlatMemorySize() => _flatTotalBytes;
 
     // =========================================================================
     // PRIVATE HELPERS
@@ -1280,6 +1404,8 @@ public class PlcMemory : IDisposable
         
         Console.WriteLine($"      Loaded: {dataLoaded} data files, {progLoaded} program files");
         _programLoaded = true;
+        // Rebuild flat memory to incorporate the newly loaded (or merged) files
+        RebuildFlatMemory();
     }
 
     public void Dispose()

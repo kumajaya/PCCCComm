@@ -564,5 +564,33 @@ namespace PCCCComm.Pccc
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
                 PCCCConstants.Fnc.WordRangeWrite, body.ToArray());
         }
+
+        /// <summary>Creates a Read Bytes Physical request (CMD=0x0F, FNC=0x17).</summary>
+        public static PCCCMessage CreateReadBytesPhysicalRequest(int address, int bytesToRead,
+            ushort tns, byte myNode, byte targetNode)
+        {
+            byte[] body = new byte[5];
+            body[0] = (byte)(address & 0xFF);
+            body[1] = (byte)((address >> 8) & 0xFF);
+            body[2] = (byte)((address >> 16) & 0xFF);
+            body[3] = (byte)((address >> 24) & 0xFF);
+            body[4] = (byte)bytesToRead;
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.ReadBytesPhysical, body);
+        }
+
+        /// <summary>Creates a Write Bytes Physical request (CMD=0x0F, FNC=0x18).</summary>
+        public static PCCCMessage CreateWriteBytesPhysicalRequest(int address, byte[] data,
+            ushort tns, byte myNode, byte targetNode)
+        {
+            byte[] body = new byte[4 + data.Length];
+            body[0] = (byte)(address & 0xFF);
+            body[1] = (byte)((address >> 8) & 0xFF);
+            body[2] = (byte)((address >> 16) & 0xFF);
+            body[3] = (byte)((address >> 24) & 0xFF);
+            Array.Copy(data, 0, body, 4, data.Length);
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.WriteBytesPhysical, body);
+        }
     }
 }

@@ -56,6 +56,14 @@ public class Plc5Handler : IPlcHandler
     private int TargetNode => _context.TargetNode;
     private bool AsyncMode => _context.AsyncMode;
 
+    private bool DisableEventFlag
+    {
+        get => _context.DisableEvent;
+        set => _context.DisableEvent = value;
+    }
+
+    private void OnFileProgress(PCCCComm.FileProgressEventArgs e) => _context.RaiseFileProgress(e);
+
     // ---------------------------------------------------------------------
     // Helper: Encode logical binary address for PLC-5 Typed Read/Write
     // ---------------------------------------------------------------------
@@ -593,15 +601,200 @@ public class Plc5Handler : IPlcHandler
     // Unsupported methods
     // ---------------------------------------------------------------------
 
+    /// <summary>
+    /// PLC-5 upload uses 'upload all request' (FNC 0x53) + 'read bytes physical' (FNC 0x17).
+    /// See 1770-6.5.16 Chapter 12.
+    /// </summary>
     public Collection<PLCFileDetails> UploadProgramData()
-        => throw new NotSupportedException(
-            "PLC-5 upload uses 'upload all request' (FNC 0x53) + 'read bytes physical' (FNC 0x17). " +
-            "See 1770-6.5.16 Chapter 12.");
+    {
+        DisableEventFlag = true;
+        try
+        {
+            // Step 1: UploadAllRequest — dapatkan segment list
+            byte[] segReply = _protocol.UploadAllRequest((byte)MyNode, (byte)TargetNode);
+            if (segReply == null || segReply.Length < 1)
+                throw new PCCCException("UploadAllRequest: invalid or empty reply.");
 
-    public void DownloadProgramData(Collection<PLCFileDetails> plcFiles)
-        => throw new NotSupportedException(
-            "PLC-5 download uses 'download all request' (FNC 0x50) + 'write bytes physical' (FNC 0x18). " +
-            "See 1770-6.5.16 Chapter 12.");
+            int idx = 0;
+            int uploadCount = segReply[idx++];
+            if (segReply.Length < 1 + uploadCount * 8 + 1)
+                throw new PCCCException($"UploadAllRequest: reply too short for {uploadCount} segments.");
+
+            var segments = new List<(int start, int end)>();
+            for (int i = 0; i < uploadCount; i++)
+            {
+                int start = segReply[idx]     | (segReply[idx+1] << 8) |
+                            (segReply[idx+2] << 16) | (segReply[idx+3] << 24);
+                int end   = segReply[idx+4]   | (segReply[idx+5] << 8) |
+                            (segReply[idx+6] << 16) | (segReply[idx+7] << 24);
+                segments.Add((start, end));
+                idx += 8;
+            }
+            // skip comparable segments (C dan D) — tidak digunakan untuk upload
+
+            // Step 2: ReadBytesPhysical per segment, per chunk, with progress
+            const int maxChunk = 128;  // 128 bytes per chunk (max allowed), must be even
+            var files = new Collection<PLCFileDetails>();
+            long grandTotalBytes = 0;
+            foreach (var (segStart, segEnd) in segments)
+            {
+                int totalBytes = segEnd - segStart + 1;
+                if (totalBytes % 2 != 0) totalBytes--;
+                grandTotalBytes += totalBytes;
+            }
+
+            long totalBytesTransferred = 0;
+            int filesCompleted = 0;
+            int totalFiles = segments.Count;
+
+            foreach (var (segStart, segEnd) in segments)
+            {
+                int totalBytes = segEnd - segStart + 1;
+                if (totalBytes % 2 != 0) totalBytes--;
+
+                using var ms = new MemoryStream(totalBytes);
+                int offset = 0;
+                int lastPercent = -1;
+
+                while (offset < totalBytes)
+                {
+                    int chunk = Math.Min(maxChunk, totalBytes - offset);
+                    if (chunk % 2 != 0) chunk--;
+                    if (chunk <= 0) break;
+
+                    byte[] chunkData = _protocol.ReadBytesPhysical(
+                        segStart + offset, chunk, (byte)MyNode, (byte)TargetNode);
+
+                    if (chunkData == null || chunkData.Length == 0)
+                        throw new PCCCException($"ReadBytesPhysical failed at offset 0x{segStart+offset:X}.");
+
+                    ms.Write(chunkData, 0, chunkData.Length);
+                    offset += chunkData.Length;
+                    totalBytesTransferred += chunkData.Length;
+
+                    // Report progress every ~5% or at least once per segment
+                    int percent = (int)((double)totalBytesTransferred / grandTotalBytes * 100);
+                    if (percent != lastPercent && (percent % 5 == 0 || percent == 100))
+                    {
+                        lastPercent = percent;
+                        OnFileProgress(new PCCCComm.FileProgressEventArgs
+                        {
+                            FileNumber = filesCompleted,
+                            FileType = 0,
+                            FileSizeBytes = totalBytes,
+                            FilesCompleted = filesCompleted + 1,
+                            TotalFiles = totalFiles,
+                            TotalBytesTransferred = totalBytesTransferred,
+                            GrandTotalBytes = grandTotalBytes
+                        });
+                    }
+                }
+
+                files.Add(new PLCFileDetails
+                {
+                    FileNumber    = filesCompleted,
+                    FileType      = 0x00,
+                    NumberOfBytes = (int)ms.Length,
+                    Data          = ms.ToArray()
+                });
+                filesCompleted++;
+            }
+
+            // Step 3: UploadCompleted
+            _protocol.UploadCompleted((byte)MyNode, (byte)TargetNode);
+            return files;
+        }
+        finally
+        {
+            DisableEventFlag = false;
+        }
+    }
+
+    /// <summary>
+    /// PLC-5 download uses 'download all request' (FNC 0x50) + 'write bytes physical' (FNC 0x18).
+    /// See 1770-6.5.16 Chapter 12.
+    /// </summary>
+    public void DownloadProgramData(Collection<PLCFileDetails> files)
+    {
+        if (files == null || files.Count == 0)
+            throw new ArgumentException("No data to download.");
+
+        DisableEventFlag = true;
+        try
+        {
+            // Step 1: DownloadAllRequest
+            // PLC-5 returns empty reply for DownloadAllRequest (FNC 0x50); return value not used.
+            _protocol.DownloadAllRequest((byte)MyNode, (byte)TargetNode);
+
+            // Step 2: WriteBytesPhysical per segment, per chunk, with progress
+            const int maxChunk = 128; // Max 238 bytes per spec (must be even)
+            long grandTotalBytes = files.Sum(f => f.Data?.Length ?? 0);
+            long totalBytesTransferred = 0;
+            int filesCompleted = 0;
+            int totalFiles = files.Count;
+
+            foreach (var file in files)
+            {
+                if (file.Data == null || file.Data.Length == 0) continue;
+
+                int totalBytes = file.Data.Length;
+                // NOTE: physBase=0 valid only for single-segment emulator.
+                // For real PLC-5 with multiple segments, store segStart per file during upload
+                // (e.g., as file.FileNumber * segmentSize or via a separate metadata field).
+                int physBase = 0x0000; // default; could be stored in file.FileNumber
+
+                int offset = 0;
+                int lastPercent = -1;
+
+                while (offset < totalBytes)
+                {
+                    int chunk = Math.Min(maxChunk, totalBytes - offset);
+                    if (chunk % 2 != 0) chunk--; // must be even
+                    if (chunk <= 0) break;
+
+                    var chunkData = new byte[chunk];
+                    Array.Copy(file.Data, offset, chunkData, 0, chunk);
+
+                    bool ok = _protocol.WriteBytesPhysical(
+                        physBase + offset, chunkData, (byte)MyNode, (byte)TargetNode);
+
+                    if (!ok)
+                        throw new PCCCException(
+                            $"WriteBytesPhysical failed at address 0x{physBase + offset:X8}.");
+
+                    offset += chunk;
+                    totalBytesTransferred += chunk;
+
+                    if (grandTotalBytes > 0)
+                    {
+                        int percent = (int)((double)totalBytesTransferred / grandTotalBytes * 100);
+                        if (percent != lastPercent && (percent % 5 == 0 || percent == 100))
+                        {
+                            lastPercent = percent;
+                            OnFileProgress(new PCCCComm.FileProgressEventArgs
+                            {
+                                FileNumber = filesCompleted,
+                                FileType = 0,
+                                FileSizeBytes = totalBytes,
+                                FilesCompleted = filesCompleted + 1,
+                                TotalFiles = totalFiles,
+                                TotalBytesTransferred = totalBytesTransferred,
+                                GrandTotalBytes = grandTotalBytes
+                            });
+                        }
+                    }
+                }
+                filesCompleted++;
+            }
+
+            // Step 3: DownloadCompleted
+            _protocol.DownloadCompleted((byte)MyNode, (byte)TargetNode);
+        }
+        finally
+        {
+            DisableEventFlag = false;
+        }
+    }
 
     public int GetSlotCount() => throw new NotSupportedException("I/O config not yet implemented.");
     public IOConfig[] GetIOConfig() => throw new NotSupportedException("I/O config not yet implemented.");

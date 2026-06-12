@@ -413,6 +413,26 @@ namespace PCCCComm.Pccc
                 throw new PCCCException($"WordRangeWrite failed: {PCCCErrors.DecodeStatus(sts)}");
         }
 
+        /// <summary>Reads raw physical memory from PLC-5.</summary>
+        public byte[] ReadBytesPhysical(int address, int bytesToRead, byte myNode, byte targetNode)
+        {
+            var req = PCCCMessage.CreateReadBytesPhysicalRequest(address, bytesToRead, 0, myNode, targetNode);
+            var reply = SendRequest(req, out int sts);
+            if (sts != Sts.Success || reply?.Data == null)
+                throw new PCCCException($"ReadBytesPhysical failed: {PCCCErrors.DecodeStatus(sts)}");
+            return reply.Data;
+        }
+
+        /// <summary>Writes raw physical memory to PLC-5.</summary>
+        public bool WriteBytesPhysical(int address, byte[] data, byte myNode, byte targetNode)
+        {
+            var req = PCCCMessage.CreateWriteBytesPhysicalRequest(address, data, 0, myNode, targetNode);
+            SendRequest(req, out int sts);
+            if (sts != Sts.Success)
+                throw new PCCCException($"WriteBytesPhysical failed: {PCCCErrors.DecodeStatus(sts)}");
+            return true;   // success
+        }
+
         /// <summary>
         /// Returns true if there is a pending request waiting for the given TNS.
         /// </summary>

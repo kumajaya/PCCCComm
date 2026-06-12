@@ -129,6 +129,8 @@ public static class PCCCConstants
         public const byte TypedWrite = 0x67;        // Typed Write for PLC-5 (0x67)
         public const byte WordRangeRead = 0x01;     // Word Range Read for PLC-5 (0x01)
         public const byte WordRangeWrite = 0x00;    // Word Range Write for PLC-5 (0x00)
+        public const byte ReadBytesPhysical = 0x17; // Read Bytes Physical for PLC-5 (0x17)
+        public const byte WriteBytesPhysical = 0x18; // Write Bytes Physical for PLC-5 (0x18)
     }
 
     // ========================================================================
