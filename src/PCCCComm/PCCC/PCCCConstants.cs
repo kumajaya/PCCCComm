@@ -238,6 +238,7 @@ public static class PCCCConstants
         ML1200 = 0x88,
         ML1500LSP = 0x89,
         ML1500LRP = 0x8C,
+        ML1400 = 0x9F,
     }
 
     /// <summary>

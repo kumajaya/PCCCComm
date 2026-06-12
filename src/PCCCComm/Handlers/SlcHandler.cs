@@ -69,11 +69,13 @@ public class SlcHandler : IPlcHandler
         (byte)PCCCConstants.ProcessorTypeCode.ML1100 or
         (byte)PCCCConstants.ProcessorTypeCode.ML1200 or
         (byte)PCCCConstants.ProcessorTypeCode.ML1500LSP or
-        (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP => true,
+        (byte)PCCCConstants.ProcessorTypeCode.ML1500LRP or
+        (byte)PCCCConstants.ProcessorTypeCode.ML1400 => true,
         _ => false
     };
 
     private bool IsMicroLogix1000 => _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1000;
+    private bool IsMicroLogix1400 => _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1400;
     
     /// <summary>
     /// Reads raw data from the PLC with automatic chunking.
@@ -395,7 +397,7 @@ public class SlcHandler : IPlcHandler
         byte modeValue;
         bool useFnc3A;
 
-        if (IsMicroLogix1000)
+        if (IsMicroLogix1000 || IsMicroLogix1400)
         {
             useFnc3A = true;
             modeValue = 0x00; // Program/Load for ML1000 (local program)
@@ -445,10 +447,15 @@ public class SlcHandler : IPlcHandler
 
         byte modeCode = reply.Data[PCCCConstants.ResponseOffsets.DiagnosticStatus.ModeCode];
 
-        if (IsMicroLogixFamily)
-            return modeCode == 0x02 ? 1 : 0;  // ML Run = 0x02
+        int result;
+        if (IsMicroLogix1400)
+            result = (modeCode & 0x01) == 0 ? 1 : 0;
+        else if (IsMicroLogixFamily)
+            result = modeCode == 0x02 ? 1 : 0;
         else
-            return (modeCode == 0x06 || modeCode == 0x1E) ? 1 : 0;  // SLC Run
+            result = (modeCode == 0x06 || modeCode == 0x1E) ? 1 : 0;
+
+        return result;
     }
 
     /// <summary>Disables forces on the processor (CMD=0x0F, FNC=0x41).</summary>
@@ -744,6 +751,9 @@ public class SlcHandler : IPlcHandler
     /// </summary>
     public DataFileDetails[] GetDataMemory()
     {
+        if (IsMicroLogix1400)
+            throw new NotSupportedException("GetDataMemory is not supported for MicroLogix 1400.");
+
         if (SupportsFileBasedTransfer())
             return GetDataMemoryFileBased();
         else
@@ -1068,6 +1078,9 @@ public class SlcHandler : IPlcHandler
     /// </summary>
     public Collection<PLCFileDetails> UploadProgramData()
     {
+        if (IsMicroLogix1400)
+            throw new NotSupportedException("Upload/Download is not supported for MicroLogix 1400.");
+
         DisableEventFlag = true;
         try
         {
@@ -1088,6 +1101,9 @@ public class SlcHandler : IPlcHandler
     /// </summary>
     public void DownloadProgramData(Collection<PLCFileDetails> plcFiles)
     {
+        if (IsMicroLogix1400)
+            throw new NotSupportedException("Upload/Download is not supported for MicroLogix 1400.");
+
         DisableEventFlag = true;
         try
         {

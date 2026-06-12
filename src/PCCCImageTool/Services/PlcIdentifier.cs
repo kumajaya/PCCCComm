@@ -68,6 +68,9 @@ public static class PlcIdentifier
                     0x14 => ("SLC 5/05",        "SLC"),
                     0x15 => ("SLC 5/05",        "SLC"),
                     0x58 => ("MicroLogix 1000", "MicroLogix"),
+                    0xB9 => ("MicroLogix 1100", "MicroLogix"),
+                    0x90 => ("MicroLogix 1400", "MicroLogix"),
+                    0x9F => ("MicroLogix 1400", "MicroLogix"),
                     _    => ($"Unknown (0x{procType:X2})", "Unknown")
                 };
             }
@@ -153,6 +156,10 @@ public static class PlcIdentifier
         0x17 => "TEST",  // TEST-continuous
         0x18 => "TEST",  // TEST-single step
         0x19 => "TEST",  // TEST-step
+        0x21 => "PROG",  // remote PROG
+        0x26 => "RUN",   // remote RUN
+        0x31 => "PROG",  // local PROG
+        0x3E => "RUN",   // local RUN
         _    => "PROG"   // default safe assumption
     };
 
