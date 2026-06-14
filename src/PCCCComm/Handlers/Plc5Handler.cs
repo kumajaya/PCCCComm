@@ -21,6 +21,7 @@
 
 using System.Collections.ObjectModel;
 using System.Text;
+using System.Globalization;
 using PCCCComm.Core;
 using PCCCComm.Pccc;
 
@@ -358,7 +359,7 @@ public class Plc5Handler : IPlcHandler
         {
             case (byte)PCCCConstants.SlcFileTypeCode.Float:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToSingle(returnedData, i * PCCCConstants.Df1Limits.BytesPerFloat).ToString();
+                    result[i] = BitConverter.ToSingle(returnedData, i * PCCCConstants.Df1Limits.BytesPerFloat).ToString(CultureInfo.InvariantCulture);
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.String:
                 // PLC-5 ST element: 88 bytes (44 words)
@@ -389,16 +390,16 @@ public class Plc5Handler : IPlcHandler
                 for (int i = 0; i <= arrayElements; i++)
                 {
                     int offset = (p.SubElement > 0) ? i * PCCCConstants.Df1Limits.SlcTimerCounterElementBytes : i * PCCCConstants.Df1Limits.BytesPerWord;
-                    result[i] = BitConverter.ToInt16(returnedData, offset).ToString();
+                    result[i] = BitConverter.ToInt16(returnedData, offset).ToString(CultureInfo.InvariantCulture);
                 }
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.Long:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt32(returnedData, i * PCCCConstants.Df1Limits.BytesPerLong).ToString();
+                    result[i] = BitConverter.ToInt32(returnedData, i * PCCCConstants.Df1Limits.BytesPerLong).ToString(CultureInfo.InvariantCulture);
                 break;
             default:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt16(returnedData, i * PCCCConstants.Df1Limits.BytesPerWord).ToString();
+                    result[i] = BitConverter.ToInt16(returnedData, i * PCCCConstants.Df1Limits.BytesPerWord).ToString(CultureInfo.InvariantCulture);
                 break;
         }
 
@@ -409,7 +410,7 @@ public class Plc5Handler : IPlcHandler
             for (int i = 0; i < numberOfElements; i++)
             {
                 int wordVal = Convert.ToInt32(result[wordPos]);
-                bitResult[i] = ((wordVal & (1 << bitPos)) != 0).ToString();
+                bitResult[i] = ((wordVal & (1 << bitPos)) != 0).ToString(CultureInfo.InvariantCulture);
                 if (++bitPos > 15) { bitPos = 0; wordPos++; }
             }
             return bitResult;
@@ -443,7 +444,7 @@ public class Plc5Handler : IPlcHandler
             // Build address without bit to read the whole word
             string wordAddress = startAddress.Split('/')[0];
             string[] current = ReadAny(wordAddress, 1);
-            int word = int.Parse(current[0]);
+            int word = int.Parse(current[0], CultureInfo.InvariantCulture);
             // Modify the specified bit
             if (dataToWrite != 0)
                 word |= (1 << p.BitNumber);
@@ -499,7 +500,7 @@ public class Plc5Handler : IPlcHandler
         {
             string wordAddress = startAddress.Split('/')[0];
             string[] current = ReadAny(wordAddress, 1);
-            int word = int.Parse(current[0]);
+            int word = int.Parse(current[0], CultureInfo.InvariantCulture);
             if (dataToWrite[0] != 0)
                 word |= (1 << p.BitNumber);
             else
@@ -535,7 +536,7 @@ public class Plc5Handler : IPlcHandler
     {
         if (string.IsNullOrEmpty(dataToWrite)) return 0;
         if (dataToWrite.Length > PCCCConstants.Df1Limits.MaxStringLength) 
-            dataToWrite = dataToWrite.Substring(0, PCCCConstants.Df1Limits.MaxStringLength); // ← perbaikan
+            dataToWrite = dataToWrite.Substring(0, PCCCConstants.Df1Limits.MaxStringLength);
 
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)

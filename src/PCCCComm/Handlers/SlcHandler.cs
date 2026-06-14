@@ -21,6 +21,7 @@
 
 using System.Collections.ObjectModel;
 using System.Text;
+using System.Globalization;
 using PCCCComm.Core;
 using PCCCComm.Pccc;
 
@@ -525,7 +526,7 @@ public class SlcHandler : IPlcHandler
         {
             case (byte)PCCCConstants.SlcFileTypeCode.Float:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToSingle(returnedData, i * PCCCConstants.Df1Limits.BytesPerFloat).ToString();
+                    result[i] = BitConverter.ToSingle(returnedData, i * PCCCConstants.Df1Limits.BytesPerFloat).ToString(CultureInfo.InvariantCulture);
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.String:
                 // SLC string format: bytes 0-1 = length (LE), bytes 2-83 = character data (ASCII)
@@ -549,12 +550,12 @@ public class SlcHandler : IPlcHandler
                 for (int i = 0; i <= arrayElements; i++)
                 {
                     int offset = (p.SubElement > 0) ? i * PCCCConstants.Df1Limits.SlcTimerCounterElementBytes : i * PCCCConstants.Df1Limits.BytesPerWord;
-                    result[i] = BitConverter.ToInt16(returnedData, offset).ToString();
+                    result[i] = BitConverter.ToInt16(returnedData, offset).ToString(CultureInfo.InvariantCulture);
                 }
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.Long:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt32(returnedData, i * PCCCConstants.Df1Limits.BytesPerLong).ToString();
+                    result[i] = BitConverter.ToInt32(returnedData, i * PCCCConstants.Df1Limits.BytesPerLong).ToString(CultureInfo.InvariantCulture);
                 break;
             case (byte)PCCCConstants.SlcFileTypeCode.Message:
                 for (int i = 0; i <= arrayElements; i++)
@@ -562,7 +563,7 @@ public class SlcHandler : IPlcHandler
                 break;
             default:
                 for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt16(returnedData, i * PCCCConstants.Df1Limits.BytesPerWord).ToString();
+                    result[i] = BitConverter.ToInt16(returnedData, i * PCCCConstants.Df1Limits.BytesPerWord).ToString(CultureInfo.InvariantCulture);
                 break;
         }
 
@@ -573,8 +574,8 @@ public class SlcHandler : IPlcHandler
             int bitPos = p.BitNumber, wordPos = 0;
             for (int i = 0; i < numberOfElements; i++)
             {
-                int wordVal = Convert.ToInt32(result[wordPos]);
-                bitResult[i] = ((wordVal & (1 << bitPos)) != 0).ToString();
+                int wordVal = int.Parse(result[wordPos], CultureInfo.InvariantCulture);
+                bitResult[i] = ((wordVal & (1 << bitPos)) != 0).ToString(CultureInfo.InvariantCulture);
                 if (++bitPos > 15) { bitPos = 0; wordPos++; }
             }
             return bitResult;
@@ -590,7 +591,7 @@ public class SlcHandler : IPlcHandler
     {
         string[] result = ReadAny(startAddress, numberOfElements);
         int[] ints = new int[result.Length];
-        for (int i = 0; i < result.Length; i++) ints[i] = Convert.ToInt32(result[i]);
+        for (int i = 0; i < result.Length; i++) ints[i] = int.Parse(result[i], CultureInfo.InvariantCulture);
         return ints;
     }
 
@@ -708,7 +709,7 @@ public class SlcHandler : IPlcHandler
     {
         if (string.IsNullOrEmpty(dataToWrite)) return 0;
         if (dataToWrite.Length > PCCCConstants.Df1Limits.MaxStringLength) 
-            dataToWrite = dataToWrite.Substring(0, PCCCConstants.Df1Limits.MaxStringLength); // ← perbaikan
+            dataToWrite = dataToWrite.Substring(0, PCCCConstants.Df1Limits.MaxStringLength);
 
         DataAddress p = PCCCParser.Parse(startAddress);
         
