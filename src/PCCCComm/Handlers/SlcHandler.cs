@@ -532,13 +532,17 @@ public class SlcHandler : IPlcHandler
                 // SLC string format: bytes 0-1 = length (LE), bytes 2-83 = character data (ASCII)
                 for (int i = 0; i <= arrayElements; i++)
                 {
-                    int strLen = BitConverter.ToInt16(returnedData, i * PCCCConstants.Df1Limits.SlcStringElementBytes);
-                    if (strLen > PCCCConstants.Df1Limits.MaxStringLength) 
+                    int baseOffset = i * PCCCConstants.Df1Limits.SlcStringElementBytes;
+                    int strLen = BitConverter.ToInt16(returnedData, baseOffset);
+                    if (strLen > PCCCConstants.Df1Limits.MaxStringLength)
                         strLen = PCCCConstants.Df1Limits.MaxStringLength;
                     var sb = new StringBuilder();
                     for (int j = 0; j < strLen; j++)
                     {
-                        char c = (char)returnedData[(i * PCCCConstants.Df1Limits.SlcStringElementBytes) + 2 + j];
+                        int wordOffset = baseOffset + 2 + (j / 2) * 2;
+                        char c = (j % 2 == 0)
+                            ? (char)returnedData[wordOffset + 1]  // even index = high byte
+                            : (char)returnedData[wordOffset];     // odd index = low byte
                         if (c == 0) break;
                         sb.Append(c);
                     }
