@@ -600,6 +600,105 @@ public class SlcHandler : IPlcHandler
     }
 
     /// <summary>
+    /// Reads numeric data from the specified address and returns raw values as doubles.
+    /// This method is an exact replication of <see cref="ReadAny(string, int)"/> logic,
+    /// but it converts raw PLC data directly to double without intermediate string allocation.
+    /// It supports integer, float, long, timer/counter, and bit-level addresses.
+    /// </summary>
+    /// <param name="startAddress">PCCC address (e.g., "N7:0", "F8:0", "T4:0.ACC", "B3:0/5").</param>
+    /// <param name="numberOfElements">Number of elements to read.</param>
+    /// <returns>Array of double values.</returns>
+    /// <exception cref="PCCCException">Thrown on invalid address or communication error.</exception>
+    public double[] ReadAnyValues(string startAddress, int numberOfElements)
+    {
+        // 1. Parse address (exactly as in ReadAny)
+        DataAddress p = PCCCParser.Parse(startAddress);
+        if (p.FileType == 0) throw new PCCCException("Invalid Address");
+
+        short arrayElements = (short)(numberOfElements - 1);
+        if (arrayElements < 0) arrayElements = 0;
+        if (p.BitNumber < 16)
+            arrayElements = (short)Math.Floor(numberOfElements / 16.0);
+
+        // 2. Calculate total bytes needed (identical logic to ReadAny)
+        int bytesPerElem = p.BytesPerElements;
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+            bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord; // 2 bytes per sub-element
+
+        int numberOfBytes = (arrayElements + 1) * bytesPerElem;
+
+        // Special adjustment for timer/counter sub-element reads (same as original)
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+            numberOfBytes = (numberOfBytes * 3) - 4;
+
+        // 3. Read raw data (chunking handled internally)
+        byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytes, out int reply);
+        if (reply != 0)
+            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+
+        // 4. Convert to double array
+        double[] result = new double[arrayElements + 1];
+
+        switch (p.FileType)
+        {
+            case (byte)PCCCConstants.SlcFileTypeCode.Float:
+                for (int i = 0; i <= arrayElements; i++)
+                    result[i] = BitConverter.ToSingle(returnedData, i * PCCCConstants.Df1Limits.BytesPerFloat);
+                break;
+
+            case (byte)PCCCConstants.SlcFileTypeCode.String:
+                // String files return text, not numeric values. We cannot convert to double meaningfully.
+                // Throw an exception to indicate this method is not suitable for string data.
+                throw new NotSupportedException("ReadAnyValues does not support String (ST) files. Use ReadAny instead.");
+
+            case (byte)PCCCConstants.SlcFileTypeCode.Timer:
+            case (byte)PCCCConstants.SlcFileTypeCode.Counter:
+                for (int i = 0; i <= arrayElements; i++)
+                {
+                    int offset = (p.SubElement > 0)
+                        ? i * PCCCConstants.Df1Limits.SlcTimerCounterElementBytes // 6 bytes per element
+                        : i * PCCCConstants.Df1Limits.BytesPerWord;               // 2 bytes per word
+                    result[i] = BitConverter.ToInt16(returnedData, offset);
+                }
+                break;
+
+            case (byte)PCCCConstants.SlcFileTypeCode.Long:
+                for (int i = 0; i <= arrayElements; i++)
+                    result[i] = BitConverter.ToInt32(returnedData, i * PCCCConstants.Df1Limits.BytesPerLong);
+                break;
+
+            case (byte)PCCCConstants.SlcFileTypeCode.Message:
+                throw new NotSupportedException("ReadAnyValues does not support Message files. Use ReadAny instead.");
+            default: // Integer, Binary, etc. (word-based)
+                for (int i = 0; i <= arrayElements; i++)
+                {
+                    int offset = i * PCCCConstants.Df1Limits.BytesPerWord;
+                    result[i] = BitConverter.ToInt16(returnedData, offset);
+                }
+                break;
+        }
+
+        // 5. Bit-level extraction (for addresses like "B3:0/5")
+        if (p.BitNumber >= 0 && p.BitNumber < 16)
+        {
+            double[] bitResult = new double[numberOfElements];
+            int bitPos = p.BitNumber, wordPos = 0;
+            for (int i = 0; i < numberOfElements; i++)
+            {
+                int wordVal = (int)result[wordPos];
+                bitResult[i] = ((wordVal & (1 << bitPos)) != 0) ? 1.0 : 0.0;
+                if (++bitPos > 15) { bitPos = 0; wordPos++; }
+            }
+            return bitResult;
+        }
+
+        return result;
+    }
+
+    /// <summary>Reads a single numeric element from the specified address.</summary>
+    public double ReadAnyValues(string startAddress) => ReadAnyValues(startAddress, 1)[0];
+
+    /// <summary>
     /// Performs a read-modify-write operation on multiple addresses.
     /// Reads each specified word, applies AND mask (resets bits where mask bit = 0),
     /// then OR mask (sets bits where mask bit = 1), and writes back.

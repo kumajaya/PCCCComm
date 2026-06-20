@@ -63,6 +63,12 @@ public interface IPlcHandler
     
     /// <summary>Reads integer values from the specified address.</summary>
     int[] ReadInt(string startAddress, int numberOfElements);
+
+    /// <summary>Reads data from the specified address and returns it as double.</summary>
+    double[] ReadAnyValues(string startAddress, int numberOfElements);
+    
+    /// <summary>Reads a single element from the specified address.</summary>
+    double ReadAnyValues(string startAddress);
     
     /// <summary>Performs a read-modify-write operation on multiple addresses.</summary>
     int ReadModifyWrite(string[] addresses, ushort[] andMasks, ushort[] orMasks);

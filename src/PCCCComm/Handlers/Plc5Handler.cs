@@ -428,6 +428,102 @@ public class Plc5Handler : IPlcHandler
         return ints;
     }
 
+    /// <summary>
+    /// Reads numeric data from the specified address and returns raw values as doubles.
+    /// This method is an exact replication of <see cref="ReadAny(string, int)"/> logic,
+    /// but it converts raw PLC data directly to double without intermediate string allocation.
+    /// It supports integer, float, long, timer/counter, and bit-level addresses.
+    /// </summary>
+    /// <param name="startAddress">PCCC address (e.g., "N7:0", "F8:0", "T4:0.ACC", "B3:0/5").</param>
+    /// <param name="numberOfElements">Number of elements to read.</param>
+    /// <returns>Array of double values.</returns>
+    /// <exception cref="PCCCException">Thrown on invalid address or communication error.</exception>
+    /// <exception cref="NotSupportedException">Thrown for String (ST) files.</exception>
+    public double[] ReadAnyValues(string startAddress, int numberOfElements)
+    {
+        DataAddress p = PCCCParser.Parse(startAddress);
+        if (p.FileType == 0) throw new PCCCException("Invalid Address");
+
+        // Override for PLC-5 String file (88 bytes/element)
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            throw new NotSupportedException("ReadAnyValues does not support String (ST) files. Use ReadAny instead.");
+
+        short arrayElements = (short)(numberOfElements - 1);
+        if (arrayElements < 0) arrayElements = 0;
+        if (p.BitNumber < 16)
+            arrayElements = (short)Math.Floor(numberOfElements / 16.0);
+
+        int bytesPerElem = p.BytesPerElements;
+        int numberOfBytes = (arrayElements + 1) * bytesPerElem;
+
+        // Adjust for timer/counter sub-element reads
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || 
+                                p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+        {
+            numberOfBytes = (numberOfBytes * 3) - 4;
+        }
+
+        byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytes, out int reply);
+        if (reply != 0)
+            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+
+        double[] result = new double[arrayElements + 1];
+
+        switch (p.FileType)
+        {
+            case (byte)PCCCConstants.SlcFileTypeCode.Float:
+                for (int i = 0; i <= arrayElements; i++)
+                    result[i] = BitConverter.ToSingle(returnedData, i * PCCCConstants.Df1Limits.BytesPerFloat);
+                break;
+
+            case (byte)PCCCConstants.SlcFileTypeCode.String:
+                throw new NotSupportedException("ReadAnyValues does not support String (ST) files. Use ReadAny instead.");
+
+            case (byte)PCCCConstants.SlcFileTypeCode.Timer:
+            case (byte)PCCCConstants.SlcFileTypeCode.Counter:
+                for (int i = 0; i <= arrayElements; i++)
+                {
+                    int offset = (p.SubElement > 0)
+                        ? i * PCCCConstants.Df1Limits.SlcTimerCounterElementBytes
+                        : i * PCCCConstants.Df1Limits.BytesPerWord;
+                    result[i] = BitConverter.ToInt16(returnedData, offset);
+                }
+                break;
+
+            case (byte)PCCCConstants.SlcFileTypeCode.Long:
+                for (int i = 0; i <= arrayElements; i++)
+                    result[i] = BitConverter.ToInt32(returnedData, i * PCCCConstants.Df1Limits.BytesPerLong);
+                break;
+
+            default: // Integer, Binary, etc.
+                for (int i = 0; i <= arrayElements; i++)
+                {
+                    int offset = i * PCCCConstants.Df1Limits.BytesPerWord;
+                    result[i] = BitConverter.ToInt16(returnedData, offset);
+                }
+                break;
+        }
+
+        // Bit-level extraction
+        if (p.BitNumber >= 0 && p.BitNumber < 16)
+        {
+            double[] bitResult = new double[numberOfElements];
+            int bitPos = p.BitNumber, wordPos = 0;
+            for (int i = 0; i < numberOfElements; i++)
+            {
+                int wordVal = (int)result[wordPos];
+                bitResult[i] = ((wordVal & (1 << bitPos)) != 0) ? 1.0 : 0.0;
+                if (++bitPos > 15) { bitPos = 0; wordPos++; }
+            }
+            return bitResult;
+        }
+
+        return result;
+    }
+
+    /// <summary>Reads a single numeric element from the specified address.</summary>
+    public double ReadAnyValues(string startAddress) => ReadAnyValues(startAddress, 1)[0];
+
     public int ReadModifyWrite(string[] addresses, ushort[] andMasks, ushort[] orMasks)
         => throw new NotSupportedException(
             "ReadModifyWrite for PLC-5 requires PLC-5 logical binary addressing. " +

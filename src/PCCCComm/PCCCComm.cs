@@ -386,6 +386,24 @@ public class PCCCComm : IDisposable, IHandlerContext
         return _handler!.ReadInt(startAddress, numberOfElements);
     }
 
+    /// <summary>
+    /// Reads numeric data from the specified address and returns raw values as doubles.
+    /// This method is more efficient than <see cref="ReadAny(string, int)"/> for SCADA polling
+    /// because it avoids string allocation and parsing.
+    /// </summary>
+    /// <param name="startAddress">PCCC address (e.g., "N7:0", "F8:0", "T4:0.ACC", "B3:0/5").</param>
+    /// <param name="numberOfElements">Number of elements to read.</param>
+    /// <returns>Array of double values.</returns>
+    /// <exception cref="NotSupportedException">Thrown for String (ST) files.</exception>
+    public double[] ReadAnyValues(string startAddress, int numberOfElements)
+    {
+        EnsureHandler();
+        return _handler!.ReadAnyValues(startAddress, numberOfElements);
+    }
+
+   /// <summary>Reads a single element from the specified address.</summary>
+    public double ReadAnyValues(string startAddress) => ReadAnyValues(startAddress, 1)[0];
+
     /// <summary>Performs a read-modify-write operation on multiple addresses.</summary>
     public int ReadModifyWrite(string[] addresses, ushort[] andMasks, ushort[] orMasks)
     {
