@@ -37,8 +37,9 @@ using System.Threading.Tasks;
 /// 
 /// Supported transports:
 ///   - DF1 (serial) via DF1BaseTransport (default, fully implemented)
-///   - DH485 via serial (planned for future release)
+///   - DH485 via serial (partial tested)
 ///   - EtherNet/IP (EIP/PCCC) via TCP (fully implemented)
+///   - CSP (Client Server Protocol) via TCP (implemented)
 /// 
 /// FRAME FORMAT (DF1 mode only - other transports use different framing):
 ///   DLE STX | DST SRC CMD STS TNS_LO TNS_HI [FUNC] [DATA...] | DLE ETX | CHK
@@ -95,7 +96,8 @@ public class PCCCEmulator : IDisposable
         DF1,      // Serial DF1 full-duplex (default, fully implemented)
         UIC,      // DH485 via 1747-UIC (implemented)
         EIP,      // EtherNet/IP (EIP/PCCC) via TCP (fully implemented)
-        DF1Slave  // DF1 half-duplex slave (RS-485 multi-drop)
+        DF1Slave, // DF1 half-duplex slave (RS-485 multi-drop)
+        CSP       // CSP (Client Server Protocol)
     }
 
     private readonly TransportMode _mode;
@@ -262,10 +264,11 @@ public class PCCCEmulator : IDisposable
     /// <param name="parity">Parity mode (None, Odd, Even)</param>
     /// <param name="mode">Transport mode (DF1, DH485, or EIP)</param>
     /// <param name="eipPort">EIP port number (default 44818, only used for EIP mode)</param>
+    /// <param name="cspPort">CSP port number (default 2222, only used for CSP mode)</param>
     /// <exception cref="NotImplementedException">Thrown for DH485 mode (planned for future)</exception>
     public PCCCEmulator(string portName, int baudRate, Parity parity, 
                         TransportMode mode = TransportMode.DF1, 
-                        int eipPort = 44818,
+                        int eipPort = 44818, int cspPort = 2222,
                         EmulationFamily family = EmulationFamily.SlcMicroLogix)
     {
         _family = family;   // set family before BuildGetStatusPayload is called
@@ -290,6 +293,7 @@ public class PCCCEmulator : IDisposable
             },
             TransportMode.EIP      => new EIPTransport(this, eipPort),
             TransportMode.DF1Slave => new DF1HalfDuplexTransport(this, portName, baudRate, parity),
+            TransportMode.CSP      => new CSPTransport(this, cspPort),
             _                   => throw new ArgumentException($"Unknown emulator mode: {mode}")
         };
 

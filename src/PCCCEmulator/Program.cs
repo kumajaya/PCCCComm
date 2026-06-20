@@ -31,7 +31,7 @@ using System.IO.Ports;
 ///   --parity <none|odd|even> : parity mode (default none)
 ///   --node <n>               : emulator node id (default 1)
 ///   --checksum <crc|bcc>     : checksum mode (default crc)
-///   --mode <df1|df1slave|uic|eip> : transport mode (default df1)
+///   --mode <df1|df1slave|uic|eip|csp> : transport mode (default df1)
 ///   --family <slc|plc5>      : emulation family (default slc). plc5 enables PLC-5 mode
 ///   --quiet, -q              : disable logging for maximum performance
 ///   --help, -h               : show usage
@@ -39,6 +39,7 @@ using System.IO.Ports;
 /// Example:
 ///   dotnet run -- COM2 --baud 19200 --checksum crc
 ///   dotnet run -- --mode eip --port 44818
+///   dotnet run -- --mode csp --csp-port 2222
 ///   dotnet run -- COM2 --quiet                          # High performance mode
 ///   dotnet run -- COM2 --family plc5                    # PLC-5 emulation mode
 /// </summary>
@@ -57,6 +58,7 @@ class Program
         int rtsAssertDelay = 1;
         int rtsDeassertDelay = 5;
         int eipPort = 44818;
+        int cspPort = 2222;
         bool quietMode = false;
         string family = "slc";
 
@@ -113,6 +115,11 @@ class Program
                 if (int.TryParse(args[++i], out var p))
                     eipPort = p;
             }
+            else if (a == "--csp-port" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[++i], out var p))
+                    cspPort = p;
+            }
             else if (a == "--quiet" || a == "-q")
             {
                 quietMode = true;
@@ -135,7 +142,8 @@ class Program
             "df1slave" => PCCCEmulator.TransportMode.DF1Slave,
             "uic"      => PCCCEmulator.TransportMode.UIC,
             "eip"      => PCCCEmulator.TransportMode.EIP,
-            _          => throw new ArgumentException($"Unknown mode: '{mode}'. Valid: df1, df1slave, uic, eip")
+            "csp"      => PCCCEmulator.TransportMode.CSP,
+            _          => throw new ArgumentException($"Unknown mode: '{mode}'. Valid: df1, df1slave, uic, eip, csp")
         };
 
         // Warning for serial parameters when using EIP mode
@@ -144,11 +152,17 @@ class Program
             Logger.Always(null, $"EIP mode ignores serial port '{portName}'. Using Ethernet only.");
         }
 
+        // Warning for serial parameters when using CSP mode
+        if (emulatorMode == PCCCEmulator.TransportMode.CSP && portName != "COM2")
+        {
+            Logger.Always(null, $"CSP mode ignores serial port '{portName}'. Using Ethernet only.");
+        }
+
         PCCCEmulator.EmulationFamily emuFamily = family == "plc5" ? 
             PCCCEmulator.EmulationFamily.Plc5 : PCCCEmulator.EmulationFamily.SlcMicroLogix;
 
         // Create and start emulator
-        using var emulator = new PCCCEmulator(portName, baud, parity, emulatorMode, eipPort, emuFamily)
+        using var emulator = new PCCCEmulator(portName, baud, parity, emulatorMode, eipPort, cspPort, emuFamily)
         {
             MyNode = node,
             CheckSum = checksum == "crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc
@@ -197,6 +211,11 @@ class Program
                 Console.WriteLine($"      EIP Port  : {eipPort}");
                 Console.WriteLine($"      Node ID   : {node}");
             }
+            else if (emulatorMode == PCCCEmulator.TransportMode.CSP)
+            {
+                Console.WriteLine($"      CSP Port  : {cspPort}");
+                Console.WriteLine($"      Node ID   : {node}");
+            }
             
             Console.WriteLine($"      Family    : {(family == "plc5" ? "PLC-5" : "SLC/MicroLogix")}");
             Console.WriteLine($"      Logging   : {(quietMode ? "Disabled (High Performance)" : "Enabled")}");
@@ -222,12 +241,13 @@ class Program
         Console.WriteLine("  --parity <none|odd|even>  Parity mode (default none)");
         Console.WriteLine("  --node <n>                Emulator node ID (default 1)");
         Console.WriteLine("  --checksum <crc|bcc>      Checksum mode (default crc)");
-        Console.WriteLine("  --mode <df1|df1slave|uic|eip> Transport mode (default df1)");
+        Console.WriteLine("  --mode <df1|df1slave|uic|eip|csp> Transport mode (default df1)");
         Console.WriteLine("  --family <slc|plc5>       Emulation family (default slc). plc5 enables PLC-5 mode");
         Console.WriteLine("  --rs485-mode <auto|rts|dtr>      RS-485 direction control (default auto)");
         Console.WriteLine("  --rts-assert-delay <ms>          Delay after enabling driver (default 1)");
         Console.WriteLine("  --rts-deassert-delay <ms>        Delay after last byte before disabling (default 5)");
         Console.WriteLine("  --port <n>                EIP port number (default 44818)");
+        Console.WriteLine("  --csp-port <n>            CSP port number (default 2222)");
         Console.WriteLine("  --quiet, -q               Disable logging for maximum performance");
         Console.WriteLine("  --help, -h                Show this help");
         Console.WriteLine();
@@ -247,5 +267,6 @@ class Program
         Console.WriteLine("  df1slave - Serial DF1 half-duplex slave (implemented)");
         Console.WriteLine("  uic      - DH485 via 1747-UIC (implemented)");
         Console.WriteLine("  eip      - EtherNet/IP (EIP/PCCC) via TCP (implemented)");
+        Console.WriteLine("  csp      - CSP (Client Server Protocol) via TCP (implemented)");
     }
 }

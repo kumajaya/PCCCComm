@@ -67,6 +67,8 @@ public static class Logger
             if (t == typeof(DF1HalfDuplexTransport)) return "DFS";
             if (t == typeof(EIPTransport)) return "EIP";
             if (t.Name == "EIPClient") return "EIP";
+            if (t == typeof(CSPTransport)) return "CSP";
+            if (t.Name == "CSPClient") return "CSP";
             if (t == typeof(PlcMemory)) return "MEM";
             return t.Name;
         });
