@@ -122,6 +122,11 @@ public sealed class CSPTransport : ILinkTransport
 
     private static uint s_nextConnId = 1;
 
+    // ── Health monitoring (mirrors EIPTransport) ──────────────────────────────
+    private Timer? _healthTimer;
+    private long   _framesProcessed = 0;
+    private long   _lastFrameCount  = 0;
+
     public string Name => "CSPv4";
 
     public event EventHandler<(byte[] pdu, object ClientContext)>? PduReceived;
@@ -166,7 +171,11 @@ public sealed class CSPTransport : ILinkTransport
         _listener = new TcpListener(IPAddress.Any, _port);
         _listener.Start();
 
-        Logger.Always(this, $"CSPv4 server listening on port {_port} (RSLinx CSPv4 driver target)");
+        Logger.Always(this, $"CSPv4 server listening on port {_port}");
+
+        // The health monitor is activated when verbose logging is disabled
+        // (e.g. --quiet), so throughput/clients are still visible somewhere.
+        SetHealthStatsEnabled(!Logger.Enabled);
 
         _ = Task.Run(() => AcceptLoopAsync(_cts.Token));
     }
@@ -174,6 +183,7 @@ public sealed class CSPTransport : ILinkTransport
     public void Stop()
     {
         _disposing = true;
+        SetHealthStatsEnabled(false);
         try { _cts?.Cancel(); } catch { }
         try { _listener?.Stop(); } catch { }
 
@@ -186,6 +196,55 @@ public sealed class CSPTransport : ILinkTransport
         _cts?.Dispose();
         _cts = null;
         _listener = null;
+    }
+
+    // ── Health monitoring (mirrors EIPTransport) ──────────────────────────────
+
+    /// <summary>
+    /// Enables or disables the periodic health-stats heartbeat for this
+    /// transport instance. When enabled, a line is logged every 15 seconds
+    /// with throughput, client count, and memory usage — useful when
+    /// <c>Logger.Enabled</c> is false (e.g. --quiet mode) and there would
+    /// otherwise be no ongoing visibility into the running server.
+    /// </summary>
+    public void SetHealthStatsEnabled(bool enabled)
+    {
+        if (enabled)
+        {
+            _healthTimer ??= new Timer(_ => LogHealthStats(), null, 15_000, 15_000);
+            Logger.Always(this, "Logging disabled — health monitor active");
+        }
+        else
+        {
+            _healthTimer?.Dispose();
+            _healthTimer = null;
+        }
+    }
+
+    /// <summary>
+    /// Transport-local frame counter used only for the health-monitor rate
+    /// calculation. Separate from <see cref="PCCCEmulator"/>'s global
+    /// frame counter, which is already incremented centrally by
+    /// <c>OnPduReceived</c> whenever <see cref="PduReceived"/> fires —
+    /// calling the emulator's counter here too would double-count.
+    /// </summary>
+    internal void IncrementFramesProcessed() =>
+        Interlocked.Increment(ref _framesProcessed);
+
+    private void LogHealthStats()
+    {
+        if (IsDisposing) return;
+        long cur   = Interlocked.Read(ref _framesProcessed);
+        long delta = cur - _lastFrameCount;
+        _lastFrameCount = cur;
+
+        int clientCount;
+        lock (_clientsLock) clientCount = _clients.Count;
+
+        Logger.Always(this,
+            $"CSP Rate: {delta / 15,6}/s | Total: {cur,10:N0} | " +
+            $"Clients: {clientCount,2} | " +
+            $"Memory: {GC.GetTotalMemory(false) / 1024,6:N0} KB");
     }
 
     /// <summary>
@@ -474,7 +533,10 @@ public sealed class CSPTransport : ILinkTransport
 
             Logger.Info(this, $"CSPv4 PCCC dispatch: CMD=0x{pcccCmd:X2} TNS=0x{pcccTns:X4} FNC=0x{pcccFunc:X2} data={remaining}B");
 
-            _transport.Emulator.IncrementFramesProcessed();
+            // Transport-local counter (health monitor only) — NOT the
+            // emulator's global counter, which OnPduReceived already
+            // increments centrally once PduReceived fires below.
+            _transport.IncrementFramesProcessed();
             _transport.Emulator.IncrementTotalPacketsReceived();
 
             _transport.PduReceived?.Invoke(this, (pdu, context));

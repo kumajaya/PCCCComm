@@ -144,7 +144,7 @@ dotnet run --project PCCCEmulator.csproj -- --mode csp --csp-port 2222 --family 
 
 Output:
 ```
-[CSP] CSPv4 server listening on port 2222 (RSLinx CSPv4 driver target)
+[CSP] CSPv4 server listening on port 2222
 PCCC emulator running
   Mode      : CSP
   CSP Port  : 2222
