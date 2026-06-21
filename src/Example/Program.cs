@@ -42,6 +42,7 @@
 //   df1       DF1 full-duplex serial (default)
 //   df1master DF1 half-duplex master over RS-485
 //   eip       EtherNet/IP (PCCC-over-CIP) over TCP
+//   csp       CSPv4 (Client Server Protocol) over TCP
 //
 // Caution — real PLC hazard
 // -------------------------
@@ -87,7 +88,9 @@ class Program
             pccc.OpenComms();
 
             if (cfg.Transport == "eip")
-                Console.WriteLine($"EIP session established with {cfg.EipHost}:{cfg.EipPort}");
+                Console.WriteLine($"EIP session established with {cfg.RemoteHost}:{cfg.EipPort}");
+            else if (cfg.Transport == "csp")
+                Console.WriteLine($"CSPv4 session established with {cfg.RemoteHost}:{cfg.CspPort}");
             else
                 Console.WriteLine("DF1 port opened successfully");
             Console.WriteLine();
@@ -161,8 +164,10 @@ class Program
         public bool   EchoSuppression    { get; init; } = false;
         public int    Rs485AssertDelay   { get; init; } = 1;
         public int    Rs485DeassertDelay { get; init; } = 5;
-        public string EipHost            { get; init; } = "";
+        public string RemoteHost         { get; init; } = "";
         public int    EipPort            { get; init; } = 44818;
+        public int    CspPort            { get; init; } = 2222;
+        public byte   LsapControlByte    { get; init; } = 0x00;
         public int    TimeoutMs          { get; init; } = 5000;
         public int    TargetNode         { get; init; } = 1;
         public int    MyNode             { get; init; } = 0;
@@ -195,9 +200,11 @@ class Program
         bool   echoSuppression    = false;
         int    rs485AssertDelay   = 1;
         int    rs485DeassertDelay = 5;
-        string eipHost            = "";
+        string remoteHost         = "";
         int    eipPort            = 44818;
+        int    cspPort            = 2222;
         int    timeoutMs          = 5000;
+        byte   lsapControl        = 0x00;
         int    targetNode         = 1;
         int    myNode             = 0;
         string checksum           = "crc";
@@ -228,9 +235,14 @@ class Program
                 case "--baud"    when i + 1 < args.Length: if (int.TryParse(args[++i], out var b))  baud       = b; break;
                 case "--target"  when i + 1 < args.Length: if (int.TryParse(args[++i], out var n))  targetNode = n; break;
                 case "--mynode"  when i + 1 < args.Length: if (int.TryParse(args[++i], out var mn)) myNode     = mn; break;
-                case "--host"    when i + 1 < args.Length: eipHost    = args[++i]; break;
+                case "--host"    when i + 1 < args.Length: remoteHost = args[++i]; break;
                 case "--eip-port" when i + 1 < args.Length: if (int.TryParse(args[++i], out var p)) eipPort   = p; break;
+                case "--csp-port" when i + 1 < args.Length: if (int.TryParse(args[++i], out var c)) cspPort   = c; break;
                 case "--timeout"  when i + 1 < args.Length: if (int.TryParse(args[++i], out var t)) timeoutMs = t; break;
+                case "--lsap-control" when i + 1 < args.Length:
+                    if (byte.TryParse(args[++i], System.Globalization.NumberStyles.HexNumber, null, out byte lsap))
+                        lsapControl = lsap;
+                    break;
                 case "--checksum" when i + 1 < args.Length: checksum  = args[++i].ToLowerInvariant(); break;
                 case "--rs485-mode"           when i + 1 < args.Length: rs485Mode          = args[++i].ToLowerInvariant(); break;
                 case "--rs485-assert-delay"   when i + 1 < args.Length: if (int.TryParse(args[++i], out var ad)) rs485AssertDelay   = ad; break;
@@ -264,8 +276,8 @@ class Program
             }
         }
 
-        // Resolve and validate the serial port name for DF1 modes.
-        if (transport != "eip")
+        // Resolve and validate the serial port name only for DF1 modes.
+        if (transport == "df1" || transport == "df1master")
         {
             try   { portName = NormalizePortName(portName); }
             catch (Exception ex) { Console.WriteLine(ex.Message); return false; }
@@ -281,9 +293,11 @@ class Program
             EchoSuppression    = echoSuppression,
             Rs485AssertDelay   = rs485AssertDelay,
             Rs485DeassertDelay = rs485DeassertDelay,
-            EipHost            = eipHost,
+            RemoteHost         = remoteHost,
             EipPort            = eipPort,
+            CspPort            = cspPort,
             TimeoutMs          = timeoutMs,
+            LsapControlByte    = lsapControl,
             TargetNode         = targetNode,
             MyNode             = myNode,
             Checksum           = checksum,
@@ -320,17 +334,27 @@ class Program
             // No CheckSum property is needed: CIP encapsulation provides its own
             // integrity checking at the transport layer.
             case "eip":
-                if (string.IsNullOrEmpty(cfg.EipHost))
+                if (string.IsNullOrEmpty(cfg.RemoteHost))
                     throw new Exception("EIP mode requires --host <IP>");
 
-                pccc = new Comm.PCCCComm(cfg.EipHost, cfg.EipPort, cfg.TimeoutMs)
+                pccc = new Comm.PCCCComm(cfg.RemoteHost, cfg.EipPort, cfg.TimeoutMs)
                 {
                     TargetNode = cfg.TargetNode,
                     MyNode     = cfg.MyNode,
                 };
-                Console.WriteLine($"EIP: Connecting to {cfg.EipHost}:{cfg.EipPort} (timeout {cfg.TimeoutMs} ms)");
+                Console.WriteLine($"EIP: Connecting to {cfg.RemoteHost}:{cfg.EipPort} (timeout {cfg.TimeoutMs} ms)");
                 break;
+            case "csp":
+                if (string.IsNullOrEmpty(cfg.RemoteHost))
+                    throw new Exception("CSPv4 mode requires --host <IP>");
 
+                pccc = new Comm.PCCCComm(cfg.RemoteHost, cfg.CspPort, cfg.TimeoutMs, cfg.LsapControlByte)
+                {
+                    TargetNode = cfg.TargetNode,
+                    MyNode     = cfg.MyNode,
+                };
+                Console.WriteLine($"CSPv4: Connecting to {cfg.RemoteHost}:{cfg.CspPort} (timeout {cfg.TimeoutMs} ms)");
+                break;
             // ── DF1 half-duplex master (RS-485 multi-drop) ────────────────────
             // Used when this machine is the master on an RS-485 bus and the
             // PCCCEmulator (or a real PLC) is configured as a DF1 slave.
@@ -437,12 +461,22 @@ class Program
 
             if (cfg.Transport == "eip")
             {
-                Console.WriteLine($"  Target   : {cfg.EipHost}:{cfg.EipPort}");
+                Console.WriteLine($"  Target   : {cfg.RemoteHost}:{cfg.EipPort}");
                 Console.WriteLine();
                 Console.WriteLine("  Suggestions:");
                 Console.WriteLine("    - Verify the PLC or emulator is running in EIP mode.");
                 Console.WriteLine("    - Check that firewall allows TCP port 44818.");
-                Console.WriteLine($"    - Confirm --host {cfg.EipHost} and --eip-port {cfg.EipPort} are correct.");
+                Console.WriteLine($"    - Confirm --host {cfg.RemoteHost} and --eip-port {cfg.EipPort} are correct.");
+            }
+            else if (cfg.Transport == "csp")
+            {
+                Console.WriteLine($"  Target   : {cfg.RemoteHost}:{cfg.CspPort}");
+                Console.WriteLine();
+                Console.WriteLine("  Suggestions:");
+                Console.WriteLine("    - Verify the PLC or emulator is running in CSPv4 mode.");
+                Console.WriteLine("    - Check that firewall allows TCP port 2222 (default).");
+                Console.WriteLine($"    - Confirm --host {cfg.RemoteHost} and --csp-port {cfg.CspPort} are correct.");
+                Console.WriteLine("    - If using RSLinx, try adding --lsap-control 05.");
             }
             else
             {
@@ -2493,10 +2527,12 @@ class Program
         Console.WriteLine("  [port]                       Serial port (default: COM1 / ttyUSB0)");
         Console.WriteLine();
         Console.WriteLine("Transport:");
-        Console.WriteLine("  --mode <df1|df1master|eip>   Transport mode (default: df1)");
-        Console.WriteLine("  --host <IP>                  PLC IP address (required for EIP)");
+        Console.WriteLine("  --mode <df1|df1master|eip|csp>   Transport mode (default: df1)");
+        Console.WriteLine("  --host <IP>                  PLC IP address (required for EIP and CSP)");
         Console.WriteLine("  --eip-port <n>               EIP TCP port (default: 44818)");
-        Console.WriteLine("  --timeout <ms>               EIP timeout in ms (default: 5000)");
+        Console.WriteLine("  --csp-port <n>               CSPv4 TCP port (default: 2222)");
+        Console.WriteLine("  --lsap-control <hex>         LSAP control byte for CSPv4 (default: 00)");
+        Console.WriteLine("  --timeout <ms>               Network timeout in ms (default: 5000)");
         Console.WriteLine();
         Console.WriteLine("DF1 Serial:");
         Console.WriteLine("  --baud <n>                   Baud rate (default: 19200)");
@@ -2526,6 +2562,8 @@ class Program
         Console.WriteLine("  dotnet run -- COM1 --mode df1master --scan-nodes 1 8");
         Console.WriteLine("  dotnet run -- --mode eip --host 127.0.0.1");
         Console.WriteLine("  dotnet run -- --mode eip --host 127.0.0.1 --stress-test");
+        Console.WriteLine("  dotnet run -- --mode csp --host 127.0.0.1");
+        Console.WriteLine("  dotnet run -- --mode csp --host 127.0.0.1 --lsap-control 05");
     }
 
     /// <summary>Prints the interactive CLI command reference.</summary>

@@ -28,7 +28,7 @@ using PCCCComm.Pccc;
 namespace PCCCComm;
 
 /// <summary>
-/// PCCC application layer for Allen‑Bradley PLCs (DF1, EIP).
+/// PCCC application layer for Allen‑Bradley PLCs (DF1, EIP, CSPv4).
 /// Facade for PcccProtocol, handling chunking, data conversion, upload/download.
 /// </summary>
 public class PCCCComm : IDisposable, IHandlerContext
@@ -40,8 +40,17 @@ public class PCCCComm : IDisposable, IHandlerContext
     private volatile bool _disableEvent;            // suppress DataReceived during bulk transfers
 
     private ITransport? _currentTransport;
-    private readonly string? _eipHost;
-    private readonly int _eipPort;
+    private readonly string? _remoteHost;
+    private readonly int _remotePort;
+    private readonly NetworkTransportType _networkType = NetworkTransportType.None;
+    private readonly byte _lsapControlByte = 0x00;   // for CSP only
+
+    private enum NetworkTransportType
+    {
+        None,   // for serial (DF1/DF1Master)
+        EIP,
+        CSP
+    }
 
     // DF1Master configuration
     private int _slaveAddress = 1;
@@ -226,9 +235,29 @@ public class PCCCComm : IDisposable, IHandlerContext
     public PCCCComm(string host, int port, int timeoutMs = 5000)
     {
         _responseTimeoutMs = timeoutMs;
-        _eipHost = host;
-        _eipPort = port;
+        _remoteHost = host;
+        _remotePort = port;
+        _networkType = NetworkTransportType.EIP;
         // DO NOT create transport here – it will be created in OpenComms()
+    }
+
+    /// <summary>
+    /// Creates a PCCCComm instance for CSPv4 (Client Server Protocol) communication.
+    /// </summary>
+    /// <param name="host">IP address or hostname of the CSPv4 device (PLC-5E/SLC 5/05).</param>
+    /// <param name="cspPort">CSPv4 TCP port (default 2222).</param>
+    /// <param name="timeoutMs">Response timeout in milliseconds.</param>
+    /// <param name="lsapControlByte">LSAP control byte (default 0x00; use 0x05 for RSLinx).</param>
+    /// <example>
+    /// var comm = new PCCCComm("192.168.1.80", 2222, 5000, 0x05);
+    /// </example>
+    public PCCCComm(string host, int cspPort = 2222, int timeoutMs = 5000, byte lsapControlByte = 0x00)
+    {
+        _responseTimeoutMs = timeoutMs;
+        _remoteHost = host;
+        _remotePort = cspPort;
+        _networkType = NetworkTransportType.CSP;
+        _lsapControlByte = lsapControlByte;
     }
 
     public PCCCComm(ITransport transport)
@@ -527,20 +556,26 @@ public class PCCCComm : IDisposable, IHandlerContext
             return 0;
         }
 
-        if (_eipHost != null)
+        if (_remoteHost != null)
         {
             try
             {
-                var eip = new EIPTransport(_eipHost, _eipPort, _responseTimeoutMs);
-                _currentTransport = eip;
+                ITransport transport = _networkType switch
+                {
+                    NetworkTransportType.EIP => new EIPTransport(_remoteHost, _remotePort, _responseTimeoutMs),
+                    NetworkTransportType.CSP => new CSPTransport(_remoteHost, _remotePort, _responseTimeoutMs, _lsapControlByte),
+                    _ => throw new InvalidOperationException($"Unsupported network transport type: {_networkType}")
+                };
+
+                _currentTransport = transport;
                 AttachTransportEvents();
-                eip.Open();
+                transport.Open();
                 EnsureProtocol();
                 return 0;
             }
             catch (Exception ex)
             {
-                throw new PCCCException($"Failed to connect to {_eipHost}:{_eipPort}. {ex.Message}");
+                throw new PCCCException($"Failed to connect to {_remoteHost}:{_remotePort}. {ex.Message}");
             }
         }
 
