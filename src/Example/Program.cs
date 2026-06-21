@@ -337,22 +337,18 @@ class Program
                 if (string.IsNullOrEmpty(cfg.RemoteHost))
                     throw new Exception("EIP mode requires --host <IP>");
 
-                pccc = new Comm.PCCCComm(cfg.RemoteHost, cfg.EipPort, cfg.TimeoutMs)
-                {
-                    TargetNode = cfg.TargetNode,
-                    MyNode     = cfg.MyNode,
-                };
+                pccc = Comm.PCCCComm.ForEip(cfg.RemoteHost, cfg.EipPort, cfg.TimeoutMs);
+                pccc.TargetNode = cfg.TargetNode;
+                pccc.MyNode     = cfg.MyNode;
                 Console.WriteLine($"EIP: Connecting to {cfg.RemoteHost}:{cfg.EipPort} (timeout {cfg.TimeoutMs} ms)");
                 break;
             case "csp":
                 if (string.IsNullOrEmpty(cfg.RemoteHost))
                     throw new Exception("CSPv4 mode requires --host <IP>");
 
-                pccc = new Comm.PCCCComm(cfg.RemoteHost, cfg.CspPort, cfg.TimeoutMs, cfg.LsapControlByte)
-                {
-                    TargetNode = cfg.TargetNode,
-                    MyNode     = cfg.MyNode,
-                };
+                pccc = Comm.PCCCComm.ForCsp(cfg.RemoteHost, cfg.CspPort, cfg.TimeoutMs, cfg.LsapControlByte);
+                pccc.TargetNode = cfg.TargetNode;
+                pccc.MyNode     = cfg.MyNode;
                 Console.WriteLine($"CSPv4: Connecting to {cfg.RemoteHost}:{cfg.CspPort} (timeout {cfg.TimeoutMs} ms)");
                 break;
             // ── DF1 half-duplex master (RS-485 multi-drop) ────────────────────

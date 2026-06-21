@@ -199,7 +199,7 @@ comm.CloseComms();
 ```csharp
 using PCCCComm;
 
-var comm = new PCCCComm("192.168.1.10", 44818); // EIP transport
+var comm = PCCCComm.ForEip("192.168.1.10", 44818); // EIP transport
 comm.OpenComms();
 
 string value = comm.ReadAny("N7:0");
@@ -213,7 +213,7 @@ comm.CloseComms();
 ```csharp
 using PCCCComm;
 
-var comm = new PCCCComm("192.168.1.10", 2222, 5000, 0x05); // lsapControlByte = 0x05 for RSLinx
+var comm = PCCCComm.ForCsp("192.168.1.10", 2222, 5000, 0x05); // lsapControlByte = 0x05 for RSLinx
 comm.OpenComms();
 
 string value = comm.ReadAny("N7:0");

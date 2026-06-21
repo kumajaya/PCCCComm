@@ -218,6 +218,11 @@ public class PCCCComm : IDisposable, IHandlerContext
     bool IHandlerContext.AsyncMode => AsyncMode;
 
     // ─── Constructors ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// PCCC application layer for Allen‑Bradley PLCs (DF1, DF1Master, EIP, CSPv4).
+    /// Use <see cref="ForEip"/> or <see cref="ForCsp"/> for network transports.
+    /// </summary>
     public PCCCComm(string? portName = null, int baud = 19200,
                     System.IO.Ports.Parity parity = System.IO.Ports.Parity.None)
     {
@@ -229,47 +234,33 @@ public class PCCCComm : IDisposable, IHandlerContext
         }
     }
 
-    /// <summary>Creates a PCCCComm instance for EtherNet/IP communication.
-    /// The connection is not opened automatically; call <see cref="OpenComms"/> to establish the session.
-    /// </summary>
-    public PCCCComm(string host, int port, int timeoutMs = 5000)
+    private PCCCComm(NetworkTransportType networkType, string host, int port, int timeoutMs, byte lsapControlByte)
     {
         _responseTimeoutMs = timeoutMs;
         _remoteHost = host;
         _remotePort = port;
-        _networkType = NetworkTransportType.EIP;
-        // DO NOT create transport here – it will be created in OpenComms()
+        _networkType = networkType;
+        _lsapControlByte = lsapControlByte; // diabaikan kalau networkType == EIP
     }
+
+    /// <summary>Creates a PCCCComm instance for EtherNet/IP communication.
+    /// The connection is not opened automatically; call <see cref="OpenComms"/> to establish the session.
+    /// </summary>
+    public static PCCCComm ForEip(string host, int port = 44818, int timeoutMs = 5000)
+        => new(NetworkTransportType.EIP, host, port, timeoutMs, lsapControlByte: 0x00);
 
     /// <summary>
     /// Creates a PCCCComm instance for CSPv4 (Client Server Protocol) communication.
     /// </summary>
     /// <param name="host">IP address or hostname of the CSPv4 device (PLC-5E/SLC 5/05).</param>
-    /// <param name="cspPort">CSPv4 TCP port (default 2222).</param>
+    /// <param name="port">CSPv4 TCP port (default 2222).</param>
     /// <param name="timeoutMs">Response timeout in milliseconds.</param>
     /// <param name="lsapControlByte">LSAP control byte (default 0x00; use 0x05 for RSLinx).</param>
     /// <example>
-    /// var comm = new PCCCComm("192.168.1.80", 2222, 5000, 0x05);
+    /// var comm = PCCCComm.ForCsp("192.168.1.80", 2222, 5000, 0x05);
     /// </example>
-    public PCCCComm(string host, int cspPort = 2222, int timeoutMs = 5000, byte lsapControlByte = 0x00)
-    {
-        _responseTimeoutMs = timeoutMs;
-        _remoteHost = host;
-        _remotePort = cspPort;
-        _networkType = NetworkTransportType.CSP;
-        _lsapControlByte = lsapControlByte;
-    }
-
-    public PCCCComm(ITransport transport)
-    {
-        _currentTransport = transport ?? throw new ArgumentNullException(nameof(transport));
-        AttachTransportEvents();
-        if (_currentTransport is DF1BaseTransport df1)
-        {
-            df1.ChecksumType = _checkSum;
-            df1.MaxTicks = _responseTimeoutMs / 20;
-        }
-    }
+    public static PCCCComm ForCsp(string host, int port = 2222, int timeoutMs = 5000, byte lsapControlByte = 0x00)
+        => new(NetworkTransportType.CSP, host, port, timeoutMs, lsapControlByte);
 
     private void AttachTransportEvents()
     {

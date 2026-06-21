@@ -475,11 +475,9 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
             }
             else // EIP
             {
-                _df1 = new global::PCCCComm.PCCCComm(EipHost, EipPort, EipTimeout)
-                {
-                    TargetNode = (int)TargetNode,
-                    MyNode = (int)MyNode
-                };
+                _df1 = global::PCCCComm.PCCCComm.ForEip(EipHost, EipPort, EipTimeout);
+                _df1.TargetNode = (int)TargetNode;
+                _df1.MyNode = (int)MyNode;
             }
 
             await Task.Run(() => _df1.OpenComms());
