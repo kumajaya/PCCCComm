@@ -144,9 +144,12 @@ public sealed class CSPTransport : ILinkTransport
     /// Optional path to a plain-text hex-dump capture log. Every raw RX/TX byte
     /// sequence on every CSPv4 connection is appended here, independent of the
     /// normal <c>Logger</c> verbosity setting. Pass <c>null</c> to disable
-    /// (default: "csp_capture.log" in the working directory).
+    /// (default: <c>null</c> / disabled — every captured frame costs a
+    /// synchronous <c>File.AppendAllText</c> call on both RX and TX, which
+    /// measurably throttles throughput; pass an explicit path only while
+    /// actively debugging a capture session, not for normal/benchmark runs).
     /// </param>
-    public CSPTransport(PCCCEmulator emulator, int port = 2222, string? captureLogPath = "csp_capture.log")
+    public CSPTransport(PCCCEmulator emulator, int port = 2222, string? captureLogPath = null)
     {
         _emulator       = emulator ?? throw new ArgumentNullException(nameof(emulator));
         _port           = port;
