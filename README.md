@@ -3,12 +3,12 @@
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![.NET](https://img.shields.io/badge/.NET-8.0-purple)](https://dotnet.microsoft.com/)
 
-**PCCC Communication Suite** is a complete, self‑contained .NET implementation for communicating with Allen‑Bradley PLCs using the **PCCC** (Programmable Controller Communications Command) protocol over **DF1 serial** and **EtherNet/IP**.
+**PCCC Communication Suite** is a complete, self‑contained .NET implementation for communicating with Allen‑Bradley PLCs using the **PCCC** (Programmable Controller Communications Command) protocol over **DF1 serial**, **EtherNet/IP** and **CSPv4**.
 
 The suite includes:
 
-- **PCCCComm** – A reusable communication library (supports DF1 and EtherNet/IP)
-- **PCCCEmulator** – Standalone PLC emulator (SLC 5/03 with DF1 and EtherNet/IP)
+- **PCCCComm** – A reusable communication library (supports DF1, EtherNet/IP, and CSPv4)
+- **PCCCEmulator** – Standalone PLC emulator (SLC 5/03 with DF1, EtherNet/IP, and CSPv4)
 - **Example** – Client example with interactive CLI
 - **PCCCImageTool** – Desktop GUI for upload/download/compare PLC images
 
@@ -26,6 +26,7 @@ PCCCComm/
 └── src/
     ├── PCCCComm/                   # Core library
     │   ├── Core/                   # Transport abstractions
+    │   │   ├── CSPTransport.cs
     │   │   ├── DF1BaseTransport.cs
     │   │   ├── DF1FullDuplexTransport.cs
     │   │   ├── DF1HalfDuplexTransport.cs
@@ -62,7 +63,8 @@ PCCCComm/
 ### PCCCComm Library
 - **DF1 full‑duplex** serial framing (DLE stuffing, CRC-16/BCC, ACK/NAK, ENQ)
 - **DF1 half‑duplex master** over RS‑485 multi‑drop (polling, selective addressing)
-- **EtherNet/IP (EIP)** transport over TCP (CIP Unconnected Send, Execute PCCC)
+- **EtherNet/IP (EIP)** transport over TCP (CIP Unconnected Send, Execute PCCC, port 44818)
+- **CSPv4 (Client Server Protocol)** transport over TCP (legacy AB Ethernet, port 2222)
 - Read/write any data type: integers, floats, bits, strings, timers, counters
 - Switch processor between RUN and PROGRAM modes
 - Auto‑detect DF1 communication settings (`DetectCommSettings()`)
@@ -71,11 +73,13 @@ PCCCComm/
 - Support for SLC 5/03, MicroLogix 1500, and many other PCCC‑compatible PLCs
 
 ### PCCCEmulator (Standalone Tool)
-- Emulates an SLC 5/03 (processor type `0x49`) with DF1 and EIP interfaces
+- Emulates an SLC 5/03 (processor type `0x49`) with DF1, EIP, and CSPv4 interfaces
+- **Validated against RSLinx with OPC access support** (detects PLC-5/40E or SLC-5/05) — consistent across all transports
 - **DF1 half‑duplex slave** emulation for RS‑485 multi‑drop networks
 - Loads real PLC program from embedded .bin resource (converted from APS .ACH archive)
 - Full DF1 link layer: ACK/NAK, ENQ, checksum, and half‑duplex polling support
 - Full EtherNet/IP server: TCP port 44818, UDP broadcast ListIdentity, Forward Open/Close, Connected/Unconnected Send
+- Full CSPv4 server: TCP port 2222, connection registration, PCCC submode
 - In‑memory file system with pre‑defined data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, and additional files up to file 31)
 - Responds to Get Status (CMD 0x06 FNC 0x03) with realistic 24‑byte payload
 - Handles Protected Typed Logical Read/Write (0xA1, 0xA2, 0xAA, 0xAB)
@@ -140,7 +144,9 @@ dotnet build -c Release src/PCCCImageTool/PCCCImageTool.csproj
 
 ## Usage
 
-### 1. Using the PCCCComm Library (DF1 serial full‑duplex)
+### 1. Using the PCCCComm Library
+
+#### 1a. Using the PCCCComm Library via DF1 serial full‑duplex transport
 
 ```csharp
 using PCCCComm;
@@ -171,7 +177,7 @@ comm.SetRunMode();
 comm.CloseComms();
 ```
 
-### 2. Using the PCCCComm Library (DF1 half‑duplex master for RS‑485)
+#### 1b. Using the PCCCComm Library via DF1 half‑duplex master for RS‑485 transport
 
 ```csharp
 using PCCCComm;
@@ -188,7 +194,7 @@ comm.WriteData("N7:1", 12345);
 comm.CloseComms();
 ```
 
-### 3. Using the PCCCComm Library (EtherNet/IP)
+#### 1c. Using the PCCCComm Library via EtherNet/IP transport
 
 ```csharp
 using PCCCComm;
@@ -202,41 +208,63 @@ Console.WriteLine(value);
 comm.CloseComms();
 ```
 
-### 4. Running the Emulator (DF1 full‑duplex)
+#### 1d. Using the PCCCComm Library via CSPv4 transport
+
+```csharp
+using PCCCComm;
+
+var comm = new PCCCComm("192.168.1.10", 2222, 5000, 0x05); // lsapControlByte = 0x05 for RSLinx
+comm.OpenComms();
+
+string value = comm.ReadAny("N7:0");
+Console.WriteLine(value);
+
+comm.CloseComms();
+```
+
+### 2. Running the Emulator
+
+#### 2a. Running the Emulator via DF1 full‑duplex transport
 
 ```bash
 dotnet run --project src/PCCCEmulator -- COM2 --baud 19200 --checksum crc
 ```
 
-### 5. Running the Emulator (DF1 half‑duplex slave)
+#### 2b. Running the Emulator via DF1 half‑duplex slave transport
 
 ```bash
 dotnet run --project src/PCCCEmulator -- COM2 --mode df1slave --node 1 --rs485-mode auto
 ```
 
-### 6. Running the Emulator (EtherNet/IP)
+#### 2c. Running the Emulator via EtherNet/IP transport
 
 ```bash
 dotnet run --project src/PCCCEmulator -- --mode eip --port 44818
 ```
 
-### 7. Running the Example Client
+#### 2d. Running the Emulator via CSPv4 transport
+
+```bash
+dotnet run --project src/PCCCEmulator -- --mode csp --csp-port 2222
+```
+
+### 3. Running the Example Client
 
 ```bash
 dotnet run --project src/Example -- COM1 --target 1 --checksum crc
 ```
 
-### 8. Testing Emulator + Client Together (DF1)
+### 4. Testing Emulator + Client Together (DF1)
 
 - Create a virtual serial pair (e.g. `COM1` ↔ `COM2`).
 - Start emulator on `COM2` and client on `COM1`.
 
-### 9. Testing Emulator + Client Together (EIP)
+### 5. Testing Emulator + Client Together (EIP)
 
 - Start emulator: `dotnet run --project src/PCCCEmulator -- --mode eip`
 - Start example client (if extended to EIP) or use any EIP client (RSLinx, libplctag, pycomm3).
 
-### 10. Running the GUI Tool (PCCCImageTool)
+### 6. Running the GUI Tool (PCCCImageTool)
 
 ```bash
 dotnet run --project src/PCCCImageTool
@@ -255,6 +283,7 @@ Supported transport modes:
 - DF1 full‑duplex (point‑to‑point)
 - DF1 half‑duplex master (RS‑485 multi‑drop)
 - EtherNet/IP (PCCC‑over‑CIP)
+- CSPv4 (Client Server Protocol) over TCP
 
 DF1 checksum modes as per AB specification:
 - **BCC**: two's complement of sum.
@@ -275,7 +304,7 @@ EtherNet/IP encapsulation:
 | `Illegal Command or Format` | The target may not support the addressed file/element. Check file numbers and element bounds. |
 | `Processor is in Program mode` | Normal – writes may be restricted. Use `SetRunMode()` to change. |
 | `Port busy` | Only one application can open a COM port at a time. Close other programs (RSLinx, etc.). |
-| `EIP connection timeout` | Check firewall (TCP 44818), verify emulator or PLC is reachable, and that `--mode eip` is used. |
+| `EIP or CSPv4 connection timeout` | Check firewall (TCP/UDP 44818 for EIP or TCP 2222 for CSPv4), verify emulator or PLC is reachable, and that `--mode eip` or `--mode csp` is used. |
 | `No communication in half‑duplex mode` | For testing with full‑duplex serial cables or virtual pairs, enable `--echo-suppression`. For real RS‑485, disable it unless your adapter echoes. Ensure both sides use same baud rate, parity, and checksum. |
 
 ---

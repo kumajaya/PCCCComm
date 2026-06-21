@@ -1,12 +1,13 @@
-# PCCC Emulator with DF1 / EtherNet/IP transport
+# PCCC Emulator with DF1, EtherNet/IP, CSPv4 transport
 
 **Purpose**  
-Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an SLC-5/04 **or PLC‑5** for testing DF1/EIP clients and RSLinx. This emulator does **not** depend on any external DF1 library – all DF1 framing, checksum (BCC/CRC), DLE stuffing, EIP/CIP encapsulation, and memory simulation are self‑contained.
+Lightweight, standalone DF1 RS-232, EtherNet/IP (EIP), and CSPv4 (Client Server Protocol) emulator that mimics an SLC-5/04 **or PLC‑5** for testing DF1/EIP clients and RSLinx. This emulator does **not** depend on any external DF1 library – all DF1 framing, checksum (BCC/CRC), DLE stuffing, EIP/CIP encapsulation, and memory simulation are self‑contained.
 
 ## Features
 - **DF1 full‑duplex framing** with DLE STX / DLE ETX and DLE stuffing
 - **DF1 half‑duplex slave** for RS‑485 multi‑drop networks (polling, address filtering)
 - **EtherNet/IP (EIP/PCCC)** support – TCP port 44818, UDP broadcast ListIdentity
+- **CSPv4** support – TCP port 2222, connection registration, PCCC submode
 - **PLC‑5 emulation mode** (`--family plc5`) – mimics PLC‑5 GetStatus response and supports **Typed Read (0x68) / Typed Write (0x67)** with logical binary addressing
 - CRC‑16 (calculation as per AB specification) **default** – BCC (two's complement of byte sum) also supported
 - Get Status response crafted for SLC-5/04 (processor code `0x5B`) or PLC‑5 (`type extender 0xBE`, catalog "PLC-5")
@@ -24,7 +25,7 @@ Lightweight, standalone DF1 RS-232 and EtherNet/IP (EIP) emulator that mimics an
 - .NET 8 SDK or later
 - Virtual serial pair tool for testing (e.g., com0com on Windows)
 - RSLinx Classic (optional, for integration testing)
-- For EIP mode: network connectivity (TCP/UDP port 44818)
+- For EIP and CSPv4 mode: network connectivity (TCP/UDP port 44818 or 2222)
 
 ## Build
 ```bash
@@ -128,6 +129,30 @@ PCCC emulator running
 Press Enter to stop.
 ```
 
+### CSPv4 (Client Server Protocol) Mode
+
+```bash
+# Start emulator in CSP mode on default port 2222 (SLC mode)
+dotnet run --project PCCCEmulator.csproj -- --mode csp
+
+# PLC‑5 emulation over CSP
+dotnet run --project PCCCEmulator.csproj -- --mode csp --family plc5
+
+# Custom CSP port
+dotnet run --project PCCCEmulator.csproj -- --mode csp --csp-port 2222 --family plc5
+```
+
+Output:
+```
+[CSP] CSPv4 server listening on port 2222 (RSLinx CSPv4 driver target)
+PCCC emulator running
+  Mode      : CSP
+  CSP Port  : 2222
+  Node ID   : 1
+  Family    : PLC-5
+Press Enter to stop.
+```
+
 ### UIC Mode (DH485 via 1747-UIC)
 To communicate with a DH485 network using an Allen-Bradley 1747-UIC converter:
 ```bash
@@ -162,12 +187,13 @@ Output:
 | `--parity <none/odd/even>` | Parity mode (DF1/UIC mode only) | `none` |
 | `--node <n>` | Emulator node ID | `1` |
 | `--checksum <crc/bcc>` | Checksum mode (DF1 mode only) | `crc` |
-| `--mode <df1\|df1slave\|uic\|eip>` | Transport mode | `df1` |
+| `--mode <df1\|df1slave\|uic\|eip\|csp>` | Transport mode | `df1` |
 | `--family <slc\|plc5>` | Emulation family (SLC/MicroLogix or PLC‑5) | `slc` |
 | `--rs485-mode <auto\|rts\|dtr>` | RS‑485 direction control (df1slave mode) | `auto` |
 | `--rts-assert-delay <ms>` | Delay after enabling driver (df1slave mode) | `1` |
 | `--rts-deassert-delay <ms>` | Delay after last byte before disabling (df1slave mode) | `5` |
 | `--port <n>` | EIP port number (EIP mode only) | `44818` |
+| `--csp-port <n>` | CSPv4 port number (CSP mode only) | `2222` |
 | `--quiet, -q` | Disable logging for maximum performance | `false` |
 | `--help, -h` | Show usage | – |
 
@@ -250,8 +276,14 @@ dotnet run --project ../Example/Example.csproj -- COM1 --mode df1master --target
 - Add the emulator's IP address (e.g., `127.0.0.1` or `192.168.x.x`).
 - The emulator will appear as **"1747-L551 C SLC 5/05"** in SLC mode, or as **"PLC‑5"** (with catalog "PLC-5") in PLC‑5 mode.
 - **Auto-browse:** The emulator answers UDP broadcast ListIdentity on port 44818, so it appears automatically when browsing the network.
+- UDP port 44818 must be open for RSLinx auto-browse (broadcast ListIdentity).
+- TCP port 44818 must be open for EIP connected sessions.
 
-**Firewall note:** UDP port 44818 must be open for RSLinx auto-browse (broadcast ListIdentity). TCP port 44818 is required for connected sessions.
+### CSPv4 (Client Server Protocol) Mode
+- Create an "AB Ethernet" driver in RSLinx Classic (not EtherNet/IP).
+- Add the emulator's IP address (e.g., `192.168.1.100`) – the port is fixed at `2222` (default).
+- **Auto-browse:** The emulator will appear as "PLC‑5/40E" in PLC‑5 mode, or as "SLC 5/05" in SLC mode.
+- TCP port 2222 must be open in the firewall.
 
 ![RSLinx](Images/Screenshots/RSLinx.png)
 
@@ -515,6 +547,7 @@ classDiagram
 | **Half‑duplex communication fails** | Ensure client uses `--mode df1master` and emulator uses `--mode df1slave` with same node ID. For virtual serial loops, enable `--echo-suppression`. |
 | **PLC‑5 mode not detected** | Verify emulator is started with `--family plc5`. Check client's `GetProcessorFamily()` returns `Plc5`. Look for `type extender 0xBE` in GetStatus response (hex dump). |
 | **Typed Read/Write fails in PLC‑5 mode** | Ensure client uses `Plc5Handler` (auto-selected by `GetProcessorFamily`). The emulator handles `FNC 0x68` and `0x67` with logical binary address decoding. Check logs for `func=0x68` or `func=0x67`. |
+| **RSLinx cannot find device via CSPv4** | Ensure the emulator is started with `--mode csp`. Check TCP port 2222 is not blocked by firewall. Use the "AB Ethernet" driver in RSLinx (not EtherNet/IP). |
 
 ## License
 Same as the DF1Comm library.

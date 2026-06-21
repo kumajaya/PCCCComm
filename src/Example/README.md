@@ -3,7 +3,7 @@
 **Purpose**  
 Reference implementation and test client for the `PCCCComm` library. Demonstrates every major
 library feature and verifies correct operation against a real PLC or the PCCCEmulator across all
-three supported transports: DF1 full‑duplex, DF1 half‑duplex master (RS‑485), and EtherNet/IP (EIP).
+four supported transports: DF1 full‑duplex, DF1 half‑duplex master (RS‑485), EtherNet/IP (EIP), and CSPv4.
 
 > **⚠️ CAUTION – REAL PLC HAZARD**  
 > The demo and self‑test suite **write data** to the connected PLC
@@ -18,7 +18,7 @@ three supported transports: DF1 full‑duplex, DF1 half‑duplex master (RS‑48
 
 | Category | Feature |
 |----------|---------|
-| **Transport** | DF1 full‑duplex (RS‑232/USB), DF1 half‑duplex master (RS‑485), EtherNet/IP over TCP |
+| **Transport** | DF1 full‑duplex (RS‑232/USB), DF1 half‑duplex master (RS‑485), EtherNet/IP, and CSPv4 over TCP |
 | **Data types** | Integer (N), Float (F), Binary/bit (B), Output (O), Input (I), Status (S), String (ST) |
 | **Operations** | Single and multi‑element read/write, bit‑level write (FNC=0xAB), string read/write |
 | **Diagnostics** | Processor type, run mode, data file directory |
@@ -38,6 +38,7 @@ three supported transports: DF1 full‑duplex, DF1 half‑duplex master (RS‑48
   - **DF1 full‑duplex**: SLC 5/03–5/05 or MicroLogix with DF1 port, or PCCCEmulator via virtual serial pair
   - **DF1 half‑duplex master**: PCCCEmulator in `df1slave` mode, or a real PLC configured as DF1 slave on RS‑485
   - **EIP**: SLC 5/05, CompactLogix, MicroLogix 1100/1400, or PCCCEmulator in EIP mode
+  - **CSPv4**: PLC-5E, SLC 5/05, SoftLogix 5, or a gateway such as the 1761-NET-ENI, or PCCCEmulator in CSP mode
 
 ---
 
@@ -86,12 +87,21 @@ dotnet run --project Example.csproj -- --mode eip --host 192.168.1.10
 dotnet run --project Example.csproj -- --mode eip --host 192.168.1.10 --eip-port 44818 --timeout 3000
 ```
 
+### CSPv4
+
+```bash
+dotnet run --project Example.csproj -- --mode csp --host 192.168.1.10
+
+# With custom port and timeout
+dotnet run --project Example.csproj -- --mode csp --host 192.168.1.10 --csp-port 2222 --timeout 3000
+```
+
 ### Command‑line options
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `[port]` | Serial port name (DF1 modes) | `COM1` |
-| `--mode <df1\|df1master\|eip>` | Transport mode | `df1` |
+| `--mode <df1\|df1master\|eip\|csp>` | Transport mode | `df1` |
 | `--baud <n>` | Baud rate (DF1) | `19200` |
 | `--parity <none\|odd\|even>` | Parity (DF1) | `none` |
 | `--target <n>` | Target PLC node address | `1` |
@@ -103,7 +113,9 @@ dotnet run --project Example.csproj -- --mode eip --host 192.168.1.10 --eip-port
 | `--rs485-deassert-delay <ms>` | Delay before RTS deassert (df1master) | `5` |
 | `--host <IP>` | PLC IP address (EIP, required) | — |
 | `--eip-port <n>` | EIP TCP port | `44818` |
+| `--csp-port <n>` | CSPv4 TCP port | `2222` |
 | `--timeout <ms>` | EIP connection timeout | `5000` |
+| `--lsap-control <hex>` | LSAP control byte for CSPv4 | `00` |
 | `--interactive-only` | Skip demo, go straight to CLI | — |
 | `--no-interactive` | Run demo only, then exit | — |
 | `--stress-test [n]` | Stress test; `n` = iterations (0 = infinite) | — |
@@ -204,6 +216,19 @@ dotnet run --project ../PCCCEmulator/PCCCEmulator.csproj -- --mode eip --port 44
 
 # Run client
 dotnet run --project Example.csproj -- --mode eip --host 127.0.0.1
+```
+
+### CSPv4 loopback
+
+```bash
+# Start emulator in CSP mode
+dotnet run --project ../PCCCEmulator/PCCCEmulator.csproj -- --mode csp --csp-port 2222
+
+# Run client
+dotnet run --project Example.csproj -- --mode csp --host 127.0.0.1 --csp-port 2222
+
+# With RSLinx-compatible LSAP control byte
+dotnet run --project Example.csproj -- --mode csp --host 127.0.0.1 --lsap-control 05
 ```
 
 ### Linux serial port permissions
@@ -490,6 +515,7 @@ PCCC>
 | EIP connection refused / timeout | Confirm the emulator or PLC is in EIP mode, TCP 44818 is not blocked, and `--host` / `--eip-port` are correct. |
 | RS‑485 half‑duplex no response | Confirm emulator is in `--mode df1slave` with matching node ID. Add `--echo-suppression` for virtual pairs. Check `--rs485-mode` and cable polarity. |
 | False positives in `scannodes` | Should not occur with current validation (length + type extender + processor type checks). If seen, increase `probeTimeoutMs` or check for bus noise. |
+| CSP connection refused / timeout | Confirm the emulator or PLC is in CSP mode, TCP 2222 is not blocked, and `--host` / `--csp-port` are correct. For RSLinx, add `--lsap-control 05`. |
 
 ---
 
