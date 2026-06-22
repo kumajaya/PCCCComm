@@ -54,6 +54,12 @@ public interface IPlcHandler
     void ClearForces();
 
     // ─── Read / Write ─────────────────────────────────────────────────────
+
+    /// <summary>Reads raw 16-bit words from the specified PCCC address.</summary>
+    ushort[] ReadWords(string startAddress, int numberOfWords);
+
+    /// <summary>Writes raw 16-bit words to the specified PCCC address.</summary>
+    void WriteWords(string startAddress, ushort[] data);
     
     /// <summary>Reads data from the specified address and returns it as strings.</summary>
     string[] ReadAny(string startAddress, int numberOfElements);

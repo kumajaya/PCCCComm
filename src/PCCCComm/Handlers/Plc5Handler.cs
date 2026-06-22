@@ -323,6 +323,118 @@ public class Plc5Handler : IPlcHandler
         => throw new NotSupportedException("ClearForces (FNC 0x43) is not supported by PLC-5.");
 
     // ---------------------------------------------------------------------
+    // Raw Word API (Modbus-style) for PLC-5
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// Reads raw 16-bit words from the specified PCCC address using PLC-5 Typed Read.
+    /// This is the primary read API. No interpretation is performed.
+    /// For String (ST) files, throws NotSupportedException.
+    /// </summary>
+    public ushort[] ReadWords(string startAddress, int numberOfWords)
+    {
+        DataAddress p = PCCCParser.Parse(startAddress);
+        if (p.FileType == 0) throw new PCCCException("Invalid Address");
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            throw new NotSupportedException("ReadWords does not support String (ST) files. Use ReadAny instead.");
+
+        // PLC-5 String file override
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            p.BytesPerElements = PCCCConstants.Df1Limits.Plc5StringElementBytes;
+
+        int bytesPerElem = p.BytesPerElements;
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+            bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
+
+        int totalBytesNeeded = numberOfWords * 2;
+        int numberOfElements = (totalBytesNeeded + bytesPerElem - 1) / bytesPerElem;
+        int numberOfBytesToRead = numberOfElements * bytesPerElem;
+
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+            numberOfBytesToRead = (numberOfBytesToRead * 3) - 4;
+
+        byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytesToRead, out int reply);
+        if (reply != 0)
+            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+
+        int wordCount = Math.Min(numberOfWords, returnedData.Length / 2);
+        ushort[] result = new ushort[wordCount];
+        for (int i = 0; i < wordCount; i++)
+            result[i] = BitConverter.ToUInt16(returnedData, i * 2);
+        return result;
+    }
+
+    /// <summary>
+    /// Writes raw 16-bit words to the specified PCCC address using PLC-5 Typed Write.
+    /// </summary>
+    public void WriteWords(string startAddress, ushort[] data)
+    {
+        if (data == null || data.Length == 0) return;
+        DataAddress p = PCCCParser.Parse(startAddress);
+        if (p.FileType == 0) throw new PCCCException("Invalid Address");
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            throw new PCCCException("Use WriteData(string, string) for ST files.");
+
+        // PLC-5 String override
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            p.BytesPerElements = PCCCConstants.Df1Limits.Plc5StringElementBytes;
+
+        byte[] byteData = new byte[data.Length * 2];
+        for (int i = 0; i < data.Length; i++)
+        {
+            byteData[i * 2] = (byte)(data[i] & 0xFF);
+            byteData[i * 2 + 1] = (byte)((data[i] >> 8) & 0xFF);
+        }
+        int status = WriteRawDataWithChunking(p, byteData);
+        if (status != 0)
+            throw new PCCCException(PCCCErrors.DecodeStatus(status));
+    }
+
+    /// <summary>
+    /// Reads String (ST) files for PLC-5 and returns the decoded strings.
+    /// PLC-5 ST element: 88 bytes (44 words)
+    /// word 0 (byte 0-1): max length = 82 (constant)
+    /// word 1 (byte 2-3): current length
+    /// word 2+ (byte 4+): chars packed 2/word, low byte = even index char, high byte = odd index char
+    /// </summary>
+    private string[] ReadAnyString(string startAddress, int numberOfElements)
+    {
+        DataAddress p = PCCCParser.Parse(startAddress);
+        if (p.FileType == 0) throw new PCCCException("Invalid Address");
+
+        short arrayElements = (short)(numberOfElements - 1);
+        if (arrayElements < 0) arrayElements = 0;
+
+        int bytesPerElem = PCCCConstants.Df1Limits.Plc5StringElementBytes; // 88 bytes
+        int numberOfBytes = (arrayElements + 1) * bytesPerElem;
+
+        byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytes, out int reply);
+        if (reply != 0)
+            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+
+        string[] result = new string[arrayElements + 1];
+        for (int i = 0; i <= arrayElements; i++)
+        {
+            int baseOffset = i * bytesPerElem;
+            int strLen = BitConverter.ToInt16(returnedData, baseOffset + PCCCConstants.Df1Limits.BytesPerWord);
+            if (strLen > PCCCConstants.Df1Limits.MaxStringLength)
+                strLen = PCCCConstants.Df1Limits.MaxStringLength;
+            var sb = new StringBuilder();
+            for (int j = 0; j < strLen; j++)
+            {
+                int wordOffset = baseOffset + 4 + (j / 2) * PCCCConstants.Df1Limits.BytesPerWord;
+                char c = (j % 2 == 0)
+                    ? (char)returnedData[wordOffset]        // low byte = even index char
+                    : (char)returnedData[wordOffset + 1];   // high byte = odd index char
+                if (c == 0) break;
+                sb.Append(c);
+            }
+            result[i] = sb.ToString();
+        }
+        return result;
+    }
+
+    // ---------------------------------------------------------------------
     // Read/Write operations using Typed Read/Write
     // ---------------------------------------------------------------------
 
@@ -331,85 +443,56 @@ public class Plc5Handler : IPlcHandler
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
-        // Override for PLC-5 String file (88 bytes/element)
+        // For String files, use original decoding logic (unchanged)
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+            return ReadAnyString(startAddress, numberOfElements);
+
+        // PLC-5 Float and Long file handling
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             p.BytesPerElements = PCCCConstants.Df1Limits.Plc5StringElementBytes;
 
-        short arrayElements = (short)(numberOfElements - 1);
-        if (arrayElements < 0) arrayElements = 0;
-        if (p.BitNumber < 16)
-            arrayElements = (short)Math.Floor(numberOfElements / 16.0);
-
         int bytesPerElem = p.BytesPerElements;
-        int numberOfBytes = (arrayElements + 1) * bytesPerElem;
-        
-        // Adjust for timer/counter sub-element reads
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || 
-                                 p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
-        {
-            numberOfBytes = (numberOfBytes * 3) - 4;
-        }
-        
-        byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytes, out int reply);
-        if (reply != 0)
-            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+            bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
 
-        string[] result = new string[arrayElements + 1];
-        switch (p.FileType)
+        int wordsPerElem = bytesPerElem / 2;
+        int totalWords = numberOfElements * wordsPerElem;
+        ushort[] rawWords = ReadWords(startAddress, totalWords);
+
+        string[] result = new string[numberOfElements];
+        for (int i = 0; i < numberOfElements; i++)
         {
-            case (byte)PCCCConstants.SlcFileTypeCode.Float:
-                for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToSingle(returnedData, i * PCCCConstants.Df1Limits.BytesPerFloat).ToString(CultureInfo.InvariantCulture);
-                break;
-            case (byte)PCCCConstants.SlcFileTypeCode.String:
-                // PLC-5 ST element: 88 bytes (44 words)
-                // word 0 (byte 0-1): max length = 82 (constant)
-                // word 1 (byte 2-3): current length
-                // word 2+ (byte 4+): chars packed 2/word, low byte = even index char, high byte = odd index char
-                for (int i = 0; i <= arrayElements; i++)
-                {
-                    int baseOffset = i * PCCCConstants.Df1Limits.Plc5StringElementBytes;
-                    int strLen = BitConverter.ToInt16(returnedData, baseOffset + PCCCConstants.Df1Limits.BytesPerWord);
-                    if (strLen > PCCCConstants.Df1Limits.MaxStringLength) 
-                        strLen = PCCCConstants.Df1Limits.MaxStringLength;
-                    var sb = new StringBuilder();
-                    for (int j = 0; j < strLen; j++)
-                    {
-                        int wordOffset = baseOffset + 4 + (j / 2) * PCCCConstants.Df1Limits.BytesPerWord;
-                        char c = (j % 2 == 0)
-                            ? (char)returnedData[wordOffset]        // low byte = even index char
-                            : (char)returnedData[wordOffset + 1];   // high byte = odd index char
-                        if (c == 0) break;
-                        sb.Append(c);
-                    }
-                    result[i] = sb.ToString();
-                }
-                break;
-            case (byte)PCCCConstants.SlcFileTypeCode.Timer:
-            case (byte)PCCCConstants.SlcFileTypeCode.Counter:
-                for (int i = 0; i <= arrayElements; i++)
-                {
-                    int offset = (p.SubElement > 0) ? i * PCCCConstants.Df1Limits.SlcTimerCounterElementBytes : i * PCCCConstants.Df1Limits.BytesPerWord;
-                    result[i] = BitConverter.ToInt16(returnedData, offset).ToString(CultureInfo.InvariantCulture);
-                }
-                break;
-            case (byte)PCCCConstants.SlcFileTypeCode.Long:
-                for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt32(returnedData, i * PCCCConstants.Df1Limits.BytesPerLong).ToString(CultureInfo.InvariantCulture);
-                break;
-            default:
-                for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt16(returnedData, i * PCCCConstants.Df1Limits.BytesPerWord).ToString(CultureInfo.InvariantCulture);
-                break;
+            int offset = i * wordsPerElem;
+            switch (p.FileType)
+            {
+                case (byte)PCCCConstants.SlcFileTypeCode.Float:
+                    byte[] floatBytes = new byte[4];
+                    Buffer.BlockCopy(rawWords, offset * 2, floatBytes, 0, 4);
+                    result[i] = BitConverter.ToSingle(floatBytes, 0).ToString(CultureInfo.InvariantCulture);
+                    break;
+                case (byte)PCCCConstants.SlcFileTypeCode.Long:
+                    byte[] longBytes = new byte[4];
+                    Buffer.BlockCopy(rawWords, offset * 2, longBytes, 0, 4);
+                    result[i] = BitConverter.ToInt32(longBytes, 0).ToString(CultureInfo.InvariantCulture);
+                    break;
+                case (byte)PCCCConstants.SlcFileTypeCode.Timer:
+                case (byte)PCCCConstants.SlcFileTypeCode.Counter:
+                    result[i] = ((short)rawWords[offset]).ToString(CultureInfo.InvariantCulture);
+                    break;
+                default:
+                    result[i] = ((short)rawWords[offset]).ToString(CultureInfo.InvariantCulture);
+                    break;
+            }
         }
 
         if (p.BitNumber >= 0 && p.BitNumber < 16)
         {
+            // Bit extraction logic (unchanged)
             string[] bitResult = new string[numberOfElements];
             int bitPos = p.BitNumber, wordPos = 0;
             for (int i = 0; i < numberOfElements; i++)
             {
-                int wordVal = Convert.ToInt32(result[wordPos]);
+                int wordVal = int.Parse(result[wordPos], CultureInfo.InvariantCulture);
                 bitResult[i] = ((wordVal & (1 << bitPos)) != 0).ToString(CultureInfo.InvariantCulture);
                 if (++bitPos > 15) { bitPos = 0; wordPos++; }
             }
@@ -443,68 +526,50 @@ public class Plc5Handler : IPlcHandler
     {
         DataAddress p = PCCCParser.Parse(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
-
-        // Override for PLC-5 String file (88 bytes/element)
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new NotSupportedException("ReadAnyValues does not support String (ST) files. Use ReadAny instead.");
 
-        short arrayElements = (short)(numberOfElements - 1);
-        if (arrayElements < 0) arrayElements = 0;
-        if (p.BitNumber < 16)
-            arrayElements = (short)Math.Floor(numberOfElements / 16.0);
-
+        // Determine words per element based on file type (PLC-5-specific overrides are not needed here
+        // because ReadWords already handles the PLC-5 string size, and for non-string files the default bytes per element is fine)
         int bytesPerElem = p.BytesPerElements;
-        int numberOfBytes = (arrayElements + 1) * bytesPerElem;
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+            bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord; // 2 bytes per sub-element
 
-        // Adjust for timer/counter sub-element reads
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || 
-                                p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+        int wordsPerElem = bytesPerElem / 2;
+        int totalWords = numberOfElements * wordsPerElem;
+        ushort[] rawWords = ReadWords(startAddress, totalWords);
+
+        double[] result = new double[numberOfElements];
+        for (int i = 0; i < numberOfElements; i++)
         {
-            numberOfBytes = (numberOfBytes * 3) - 4;
+            int offset = i * wordsPerElem;
+            switch (p.FileType)
+            {
+                case (byte)PCCCConstants.SlcFileTypeCode.Float:
+                    // Two words -> float (little-endian)
+                    byte[] floatBytes = new byte[4];
+                    Buffer.BlockCopy(rawWords, offset * 2, floatBytes, 0, 4);
+                    result[i] = BitConverter.ToSingle(floatBytes, 0);
+                    break;
+                case (byte)PCCCConstants.SlcFileTypeCode.Long:
+                    // Two words -> int (little-endian)
+                    byte[] longBytes = new byte[4];
+                    Buffer.BlockCopy(rawWords, offset * 2, longBytes, 0, 4);
+                    result[i] = BitConverter.ToInt32(longBytes, 0);
+                    break;
+                case (byte)PCCCConstants.SlcFileTypeCode.Timer:
+                case (byte)PCCCConstants.SlcFileTypeCode.Counter:
+                    // One word -> short (signed 16-bit)
+                    result[i] = (short)rawWords[offset];
+                    break;
+                default:
+                    // Default: one word -> short (signed 16-bit)
+                    result[i] = (short)rawWords[offset];
+                    break;
+            }
         }
 
-        byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytes, out int reply);
-        if (reply != 0)
-            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
-
-        double[] result = new double[arrayElements + 1];
-
-        switch (p.FileType)
-        {
-            case (byte)PCCCConstants.SlcFileTypeCode.Float:
-                for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToSingle(returnedData, i * PCCCConstants.Df1Limits.BytesPerFloat);
-                break;
-
-            case (byte)PCCCConstants.SlcFileTypeCode.String:
-                throw new NotSupportedException("ReadAnyValues does not support String (ST) files. Use ReadAny instead.");
-
-            case (byte)PCCCConstants.SlcFileTypeCode.Timer:
-            case (byte)PCCCConstants.SlcFileTypeCode.Counter:
-                for (int i = 0; i <= arrayElements; i++)
-                {
-                    int offset = (p.SubElement > 0)
-                        ? i * PCCCConstants.Df1Limits.SlcTimerCounterElementBytes
-                        : i * PCCCConstants.Df1Limits.BytesPerWord;
-                    result[i] = BitConverter.ToInt16(returnedData, offset);
-                }
-                break;
-
-            case (byte)PCCCConstants.SlcFileTypeCode.Long:
-                for (int i = 0; i <= arrayElements; i++)
-                    result[i] = BitConverter.ToInt32(returnedData, i * PCCCConstants.Df1Limits.BytesPerLong);
-                break;
-
-            default: // Integer, Binary, etc.
-                for (int i = 0; i <= arrayElements; i++)
-                {
-                    int offset = i * PCCCConstants.Df1Limits.BytesPerWord;
-                    result[i] = BitConverter.ToInt16(returnedData, offset);
-                }
-                break;
-        }
-
-        // Bit-level extraction
+        // Bit-level extraction (for addresses like "B3:0/5")
         if (p.BitNumber >= 0 && p.BitNumber < 16)
         {
             double[] bitResult = new double[numberOfElements];
@@ -517,7 +582,6 @@ public class Plc5Handler : IPlcHandler
             }
             return bitResult;
         }
-
         return result;
     }
 
@@ -562,23 +626,30 @@ public class Plc5Handler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new PCCCException("Use WriteData(string, string) for ST files.");
 
-        byte[] converted = new byte[numberOfElements * p.BytesPerElements];
+        ushort[] words;
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
+            words = new ushort[numberOfElements * 2];
+            byte[] temp = new byte[4];
             for (int i = 0; i < numberOfElements; i++)
-                BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * PCCCConstants.Df1Limits.BytesPerLong);
+            {
+                BitConverter.GetBytes(dataToWrite[i]).CopyTo(temp, 0);
+                words[i * 2] = BitConverter.ToUInt16(temp, 0);
+                words[i * 2 + 1] = BitConverter.ToUInt16(temp, 2);
+            }
         }
         else
         {
+            words = new ushort[numberOfElements];
             for (int i = 0; i < numberOfElements; i++)
             {
                 if (dataToWrite[i] > 32767 || dataToWrite[i] < -32768)
                     throw new PCCCException("Integer data out of range, must be between -32768 and 32767");
-                converted[i * PCCCConstants.Df1Limits.BytesPerWord] = (byte)(dataToWrite[i] & 0xFF);
-                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 1] = (byte)((dataToWrite[i] >> 8) & 0xFF);
+                words[i] = (ushort)dataToWrite[i];
             }
         }
-        return WriteRawDataWithChunking(p, converted);
+        WriteWords(startAddress, words);
+        return 0;
     }
 
     public int WriteData(string startAddress, float dataToWrite)
@@ -591,7 +662,6 @@ public class Plc5Handler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new PCCCException("Use WriteData(string, string) for ST files.");
 
-        // Bit-level write (single element only)
         if (p.BitNumber >= 0 && p.BitNumber < 16 && numberOfElements == 1)
         {
             string wordAddress = startAddress.Split('/')[0];
@@ -604,28 +674,41 @@ public class Plc5Handler : IPlcHandler
             return WriteData(wordAddress, 1, new int[] { word });
         }
 
-        byte[] converted = new byte[numberOfElements * p.BytesPerElements];
+        ushort[] words;
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Float)
         {
+            words = new ushort[numberOfElements * 2];
+            byte[] temp = new byte[4];
             for (int i = 0; i < numberOfElements; i++)
-                BitConverter.GetBytes(dataToWrite[i]).CopyTo(converted, i * PCCCConstants.Df1Limits.BytesPerFloat);
+            {
+                BitConverter.GetBytes(dataToWrite[i]).CopyTo(temp, 0);
+                words[i * 2] = BitConverter.ToUInt16(temp, 0);
+                words[i * 2 + 1] = BitConverter.ToUInt16(temp, 2);
+            }
         }
         else if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
+            words = new ushort[numberOfElements * 2];
+            byte[] temp = new byte[4];
             for (int i = 0; i < numberOfElements; i++)
-                BitConverter.GetBytes((int)dataToWrite[i]).CopyTo(converted, i * PCCCConstants.Df1Limits.BytesPerLong);
+            {
+                BitConverter.GetBytes((int)dataToWrite[i]).CopyTo(temp, 0);
+                words[i * 2] = BitConverter.ToUInt16(temp, 0);
+                words[i * 2 + 1] = BitConverter.ToUInt16(temp, 2);
+            }
         }
         else
         {
+            words = new ushort[numberOfElements];
             for (int i = 0; i < numberOfElements; i++)
             {
                 if (dataToWrite[i] > 32767 || dataToWrite[i] < -32768)
                     throw new PCCCException("Integer data out of range, must be between -32768 and 32767");
-                converted[i * PCCCConstants.Df1Limits.BytesPerWord] = (byte)((int)dataToWrite[i] & 0xFF);
-                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 1] = (byte)(((int)dataToWrite[i] >> 8) & 0xFF);
+                words[i] = (ushort)dataToWrite[i];
             }
         }
-        return WriteRawDataWithChunking(p, converted);
+        WriteWords(startAddress, words);
+        return 0;
     }
 
     public int WriteData(string startAddress, string dataToWrite)
@@ -635,6 +718,9 @@ public class Plc5Handler : IPlcHandler
             dataToWrite = dataToWrite.Substring(0, PCCCConstants.Df1Limits.MaxStringLength);
 
         DataAddress p = PCCCParser.Parse(startAddress);
+        if (p.FileType == 0) throw new PCCCException("Invalid Address");
+
+        // --- ST file (PLC-5 specific, 88 bytes per element) ---
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
         {
             // PLC-5 ST element: 88 bytes (44 words)
@@ -659,16 +745,14 @@ public class Plc5Handler : IPlcHandler
         }
         else
         {
+            // --- Non-ST file: use WriteWords for consistency ---
             int[]? words = StringConverter.StringToWords(dataToWrite);
             if (words == null) return -1;
-            byte[] converted = new byte[words.Length * PCCCConstants.Df1Limits.BytesPerWord + 2];
-            converted[0] = (byte)dataToWrite.Length;
+            ushort[] ushortWords = new ushort[words.Length];
             for (int i = 0; i < words.Length; i++)
-            {
-                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 2] = (byte)((words[i] >> 8) & 0xFF);
-                converted[i * PCCCConstants.Df1Limits.BytesPerWord + 3] = (byte)(words[i] & 0xFF);
-            }
-            return WriteRawDataWithChunking(p, converted);
+                ushortWords[i] = (ushort)words[i];
+            WriteWords(startAddress, ushortWords);
+            return 0;
         }
     }
 

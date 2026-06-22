@@ -389,6 +389,20 @@ public class PCCCComm : IDisposable, IHandlerContext
         return _handler!.GetDiagnosticStatusRaw();
     }
 
+    /// <summary>Reads raw 16-bit words from the specified PCCC address.</summary>
+    public ushort[] ReadWords(string startAddress, int numberOfWords)
+    {
+        EnsureHandler();
+        return _handler!.ReadWords(startAddress, numberOfWords);
+    }
+
+    /// <summary>Writes raw 16-bit words to the specified PCCC address.</summary>
+    public void WriteWords(string startAddress, ushort[] data)
+    {
+        EnsureHandler();
+        _handler!.WriteWords(startAddress, data);
+    }
+
     /// <summary>Reads data from the specified address and returns it as strings.</summary>
     public string[] ReadAny(string startAddress, int numberOfElements)
     {
