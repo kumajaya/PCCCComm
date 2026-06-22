@@ -156,7 +156,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
 
     // --- Receive buffers and flags ---
     private readonly object _rxLock = new object();
-    private readonly List<byte> _rxBuffer = new List<byte>();
+    private readonly RingBuffer _rxBuffer;
     private DateTime _frameStartTime = DateTime.MinValue;
     private const int FrameTimeoutMs = 500;
     private const int MaxBufferBytes = 4096;
@@ -177,6 +177,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
     /// </summary>
     public DF1HalfDuplexTransport(ISerialPort port) : base(port)
     {
+        _rxBuffer = new RingBuffer(MaxBufferBytes);
         _port.BytesReceived += OnBytesReceived;
     }
 
@@ -186,6 +187,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
     public DF1HalfDuplexTransport(string portName, int baudRate, Parity parity)
         : base(portName, baudRate, parity)
     {
+        _rxBuffer = new RingBuffer(MaxBufferBytes);
         _port.BytesReceived += OnBytesReceived;
     }
 
@@ -425,7 +427,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
 
         lock (_rxLock)
         {
-            _rxBuffer.AddRange(filtered);
+            _rxBuffer.AddRange(filtered, 0, filtered.Length);
             if (_rxBuffer.Count > MaxBufferBytes)
             {
                 _rxBuffer.Clear();
@@ -441,7 +443,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
                 // Synchronisation: find DLE
                 if (_rxBuffer[0] != DLE)
                 {
-                    _rxBuffer.RemoveAt(0);
+                    _rxBuffer.Advance(1);
                     consumed = true;
                     continue;
                 }
@@ -451,7 +453,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
                 // --- ACK / NAK processing (with explicit state) ---
                 if (ctrl == ACK || ctrl == NAK)
                 {
-                    _rxBuffer.RemoveRange(0, 2);
+                    _rxBuffer.Advance(2);
                     _frameStartTime = DateTime.MinValue;
 
                     lock (_stateLock)
@@ -481,7 +483,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
 
                     if ((DateTime.UtcNow - _frameStartTime).TotalMilliseconds > FrameTimeoutMs)
                     {
-                        _rxBuffer.RemoveRange(0, 2);
+                        _rxBuffer.Advance(2);
                         _frameStartTime = DateTime.MinValue;
                         consumed = true;
                         continue;
@@ -513,52 +515,63 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
                     if (_rxBuffer.Count < totalLen)
                         break; // checksum bytes not yet received
 
-                    byte[] rawFrame = new byte[totalLen];
-                    _rxBuffer.CopyTo(0, rawFrame, 0, totalLen);
-                    OnRawFrameReceived(rawFrame);
-                    _rxBuffer.RemoveRange(0, totalLen);
-                    _frameStartTime = DateTime.MinValue;
-
-                    // Extract inner frame (unstuffed)
-                    int payloadLen = etxIndex - 2;
-                    byte[] stuffed = new byte[payloadLen];
-                    Array.Copy(rawFrame, 2, stuffed, 0, payloadLen);
-                    byte[] innerFrame = RemoveDleStuffing(stuffed);
-
-                    // Validate checksum
-                    bool valid;
-                    if (ChecksumType == CheckSumOptions.Crc)
+                    // Extract the complete frame using ArrayPool
+                    byte[] rawFrame = System.Buffers.ArrayPool<byte>.Shared.Rent(totalLen);
+                    try
                     {
-                        ushort calc = CalculateChecksum(innerFrame, CheckSumOptions.Crc);
-                        ushort recv = (ushort)(rawFrame[etxIndex + 2] | (rawFrame[etxIndex + 3] << 8));
-                        valid = calc == recv;
-                    }
-                    else
-                    {
-                        byte calc = (byte)CalculateChecksum(innerFrame, CheckSumOptions.Bcc);
-                        byte recv = rawFrame[etxIndex + 2];
-                        valid = calc == recv;
-                    }
+                        Array.Clear(rawFrame, 0, totalLen);
+                        _rxBuffer.Peek(rawFrame, 0, totalLen);
+                        // Copy for event (cannot pass rented buffer out)
+                        byte[] rawFrameCopy = new byte[totalLen];
+                        Array.Copy(rawFrame, 0, rawFrameCopy, 0, totalLen);
+                        OnRawFrameReceived(rawFrameCopy);
+                        _rxBuffer.Advance(totalLen);
+                        _frameStartTime = DateTime.MinValue;
 
-                    if (valid)
-                    {
-                        lock (_stateLock)
+                        // Extract inner frame (unstuffed)
+                        int payloadLen = etxIndex - 2;
+                        byte[] stuffed = new byte[payloadLen];
+                        Array.Copy(rawFrame, 2, stuffed, 0, payloadLen);
+                        byte[] innerFrame = RemoveDleStuffing(stuffed);
+
+                        // Validate checksum
+                        bool valid;
+                        if (ChecksumType == CheckSumOptions.Crc)
                         {
-                            if (_currentState == MasterState.WaitingForPollResponse)
-                            {
-                                _responseDataReceived = true;
-                                _responseDataFrame = innerFrame;
-                            }
-                            // Unsolicited data frames (not during polling) are ignored.
+                            ushort calc = CalculateChecksum(innerFrame, CheckSumOptions.Crc);
+                            ushort recv = (ushort)(rawFrame[etxIndex + 2] | (rawFrame[etxIndex + 3] << 8));
+                            valid = calc == recv;
                         }
+                        else
+                        {
+                            byte calc = (byte)CalculateChecksum(innerFrame, CheckSumOptions.Bcc);
+                            byte recv = rawFrame[etxIndex + 2];
+                            valid = calc == recv;
+                        }
+
+                        if (valid)
+                        {
+                            lock (_stateLock)
+                            {
+                                if (_currentState == MasterState.WaitingForPollResponse)
+                                {
+                                    _responseDataReceived = true;
+                                    _responseDataFrame = innerFrame;
+                                }
+                            }
+                        }
+                        // Invalid frame – ignore (master will timeout)
                     }
-                    // Invalid frame – ignore (master will timeout)
+                    finally
+                    {
+                        System.Buffers.ArrayPool<byte>.Shared.Return(rawFrame);
+                    }
                     consumed = true;
                     continue;
                 }
 
                 // Unexpected byte after DLE – discard DLE
-                _rxBuffer.RemoveAt(0);
+                _rxBuffer.Advance(1);
                 consumed = true;
             }
         }

@@ -251,47 +251,66 @@ namespace PCCCComm.Pccc
 
         public static PCCCMessage CreateReadModifyWriteRequest(DataAddress[] addrs, ushort[] andMasks, ushort[] orMasks, ushort tns, byte myNode, byte targetNode)
         {
-            var body = new List<byte>();
+            // Pre-calculate total body size to avoid dynamic list reallocation
+            int totalBodySize = 0;
             for (int i = 0; i < addrs.Length; i++)
             {
                 var addr = addrs[i];
-                body.Add((byte)addr.FileNumber);
-                body.Add((byte)addr.FileType);
+                // fileNumber + fileType = 2 bytes
+                int entrySize = 2;
+                // Element field: 1 byte if < 255, else 3 bytes (0xFF + 2 bytes value)
+                entrySize += (addr.Element < 255) ? 1 : 3;
+                // Sub-element field: 1 byte if < 255, else 3 bytes (0xFF + 2 bytes value)
+                int sub = addr.SubElement >= 0 ? addr.SubElement : 0;
+                entrySize += (sub < 255) ? 1 : 3;
+                // AND mask (2 bytes) + OR mask (2 bytes)
+                entrySize += 4;
+                totalBodySize += entrySize;
+            }
+
+            // AB spec limits Read-Modify-Write to 243 bytes (1770-6.5.16)
+            if (totalBodySize > PCCCConstants.Df1Limits.MaxReadModifyWriteBodyBytes)
+                throw new PCCCException($"ReadModifyWrite: total size {totalBodySize} exceeds maximum {PCCCConstants.Df1Limits.MaxReadModifyWriteBodyBytes} bytes.");
+
+            byte[] body = new byte[totalBodySize];
+            int pos = 0;
+
+            for (int i = 0; i < addrs.Length; i++)
+            {
+                var addr = addrs[i];
+                body[pos++] = (byte)addr.FileNumber;
+                body[pos++] = (byte)addr.FileType;
 
                 // Element
                 if (addr.Element < 255)
-                    body.Add((byte)addr.Element);
+                    body[pos++] = (byte)addr.Element;
                 else
                 {
-                    body.Add(0xFF);
-                    body.Add((byte)(addr.Element & 0xFF));
-                    body.Add((byte)((addr.Element >> 8) & 0xFF));
+                    body[pos++] = 0xFF;
+                    body[pos++] = (byte)(addr.Element & 0xFF);
+                    body[pos++] = (byte)((addr.Element >> 8) & 0xFF);
                 }
 
                 // Sub-element
                 int sub = addr.SubElement >= 0 ? addr.SubElement : 0;
                 if (sub < 255)
-                    body.Add((byte)sub);
+                    body[pos++] = (byte)sub;
                 else
                 {
-                    body.Add(0xFF);
-                    body.Add((byte)(sub & 0xFF));
-                    body.Add((byte)((sub >> 8) & 0xFF));
+                    body[pos++] = 0xFF;
+                    body[pos++] = (byte)(sub & 0xFF);
+                    body[pos++] = (byte)((sub >> 8) & 0xFF);
                 }
 
                 // AND mask (little-endian)
-                body.Add((byte)(andMasks[i] & 0xFF));
-                body.Add((byte)((andMasks[i] >> 8) & 0xFF));
+                body[pos++] = (byte)(andMasks[i] & 0xFF);
+                body[pos++] = (byte)((andMasks[i] >> 8) & 0xFF);
                 // OR mask (little-endian)
-                body.Add((byte)(orMasks[i] & 0xFF));
-                body.Add((byte)((orMasks[i] >> 8) & 0xFF));
-
-                // --- VALIDATION (moved from original PacketBuilder) ---
-                // Maximum total data size for Read-Modify-Write is 243 bytes (AB spec, 1770-6.5.16)
-                if (body.Count > PCCCConstants.Df1Limits.MaxReadModifyWriteBodyBytes)
-                    throw new PCCCException($"ReadModifyWrite: set {i + 1} exceeded maximum command size of {PCCCConstants.Df1Limits.MaxReadModifyWriteBodyBytes} bytes.");
+                body[pos++] = (byte)(orMasks[i] & 0xFF);
+                body[pos++] = (byte)((orMasks[i] >> 8) & 0xFF);
             }
-            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns, PCCCConstants.Fnc.ReadModifyWrite, body.ToArray());
+
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns, PCCCConstants.Fnc.ReadModifyWrite, body);
         }
 
         public static PCCCMessage CreateDiagnosticStatusRequest(ushort tns, byte myNode, byte targetNode)

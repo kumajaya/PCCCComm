@@ -21,6 +21,7 @@
 
 using System.IO;
 using System.Net.Sockets;
+using System.Buffers;
 
 namespace PCCCComm.Core;
 
@@ -257,54 +258,76 @@ public class CSPTransport : ITransport
         if (innerFrame == null || innerFrame.Length < 2)
             throw new ArgumentException("Inner frame must include at least DST and SRC bytes.", nameof(innerFrame));
 
-        byte[] packet = BuildPcccRequestPacket(innerFrame);
-
-        RawFrameSent?.Invoke(this, packet);
-
-        lock (_sendLock)
-        {
-            _stream!.Write(packet, 0, packet.Length);
-        }
+        // Build the packet into a pooled buffer and write directly to the
+        // stream — no intermediate persistent array needed.
+        BuildAndSendPcccRequestPacket(innerFrame);
     }
 
     // ── Packet builder ────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Builds a complete CSPv4 PCCC-submode request packet.
+    /// Builds a complete CSPv4 PCCC-submode request packet into a pooled
+    /// buffer, fires <see cref="RawFrameSent"/>, then writes the bytes
+    /// directly to the stream under <c>_sendLock</c>. The pooled buffer is
+    /// returned before this method exits, so no persistent array is allocated.
     /// </summary>
     /// <param name="innerFrame">
     /// Inner PCCC frame produced by <see cref="PacketBuilder"/>:
     /// [DST, SRC, CMD, STS, TNS_LO, TNS_HI, FNC?, DATA...].
     /// </param>
-    private byte[] BuildPcccRequestPacket(byte[] innerFrame)
+    private void BuildAndSendPcccRequestPacket(byte[] innerFrame)
     {
         byte dst = innerFrame[0];
         byte src = innerFrame[1];
 
         int pcccLen = innerFrame.Length - 2;
         int totalAfterHeader = LsapLocalLen + pcccLen;
+        int totalLen = CSPHeaderLen + totalAfterHeader;
 
-        byte[] pkt = new byte[CSPHeaderLen + totalAfterHeader];
+        byte[] pkt = ArrayPool<byte>.Shared.Rent(totalLen);
+        try
+        {
+            // Clear only the bytes we will actually use.
+            Array.Clear(pkt, 0, totalLen);
 
-        // ── CSPv4 header ───────────────────────────────────────────────────
-        pkt[0] = MODE_REQUEST;
-        pkt[1] = SUBMODE_PCCC;
-        WriteUInt16BE(pkt, 2, (ushort)totalAfterHeader);
-        WriteUInt32BE(pkt, 4, _connId);
-        WriteUInt32BE(pkt, 8, 0); // status = 0 on requests
-        // bytes 12..27 (context) left zero
+            // ── CSPv4 header ───────────────────────────────────────────────────
+            pkt[0] = MODE_REQUEST;
+            pkt[1] = SUBMODE_PCCC;
+            WriteUInt16BE(pkt, 2, (ushort)totalAfterHeader);
+            WriteUInt32BE(pkt, 4, _connId);
+            // status (8-11) = 0 (already zero)
+            // context (12-27) = 0 (already zero)
 
-        // ── LSAP, local form ───────────────────────────────────────────────
-        int lsapOffset = CSPHeaderLen;
-        pkt[lsapOffset + 0] = dst;
-        pkt[lsapOffset + 1] = LsapControlByte; // control byte — see VERIFY note below
-        pkt[lsapOffset + 2] = src;
-        pkt[lsapOffset + 3] = 0x00; // lsap = local form
+            // ── LSAP, local form ───────────────────────────────────────────────
+            int lsapOffset = CSPHeaderLen;
+            pkt[lsapOffset + 0] = dst;
+            pkt[lsapOffset + 1] = LsapControlByte;
+            pkt[lsapOffset + 2] = src;
+            pkt[lsapOffset + 3] = 0x00;
 
-        // ── PCCC payload (CMD, STS, TNS, FNC?, DATA…) ────────────────────────
-        Array.Copy(innerFrame, 2, pkt, lsapOffset + LsapLocalLen, pcccLen);
+            // ── PCCC payload (CMD, STS, TNS, FNC?, DATA…) ─────────────────────
+            Array.Copy(innerFrame, 2, pkt, lsapOffset + LsapLocalLen, pcccLen);
 
-        return pkt;
+            // Fire diagnostic event only when subscribed — avoids allocating a
+            // trimmed copy of the rented buffer when nobody is listening.
+            if (RawFrameSent != null)
+            {
+                byte[] copy = new byte[totalLen];
+                Array.Copy(pkt, 0, copy, 0, totalLen);
+                RawFrameSent.Invoke(this, copy);
+            }
+
+            // Write directly into the stream while holding _sendLock.
+            // The pooled buffer must not outlive this lock scope.
+            lock (_sendLock)
+            {
+                _stream!.Write(pkt, 0, totalLen);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(pkt, clearArray: false);
+        }
     }
 
     // ── Inner frame extractor ─────────────────────────────────────────────────
@@ -424,13 +447,21 @@ public class CSPTransport : ITransport
 
                 if (submode == SUBMODE_PCCC && dataLen >= LsapLocalLen)
                 {
+                    // Copy LSAP+PCCC payload out of the shared receive buffer
+                    // before any event is fired (events may run on other threads).
                     byte[] framePayload = new byte[dataLen];
                     Array.Copy(payload, 0, framePayload, 0, dataLen);
 
-                    byte[] fullPacket = new byte[CSPHeaderLen + dataLen];
-                    Array.Copy(header,       0, fullPacket, 0,            CSPHeaderLen);
-                    Array.Copy(framePayload, 0, fullPacket, CSPHeaderLen, dataLen);
-                    RawFrameReceived?.Invoke(this, fullPacket);
+                    // Allocate the combined diagnostic packet only when someone
+                    // is actually subscribed — avoids a CSPHeaderLen+dataLen
+                    // allocation on every received frame in normal operation.
+                    if (RawFrameReceived != null)
+                    {
+                        byte[] fullPacket = new byte[CSPHeaderLen + dataLen];
+                        Array.Copy(header,       0, fullPacket, 0,            CSPHeaderLen);
+                        Array.Copy(framePayload, 0, fullPacket, CSPHeaderLen, dataLen);
+                        RawFrameReceived.Invoke(this, fullPacket);
+                    }
 
                     try
                     {

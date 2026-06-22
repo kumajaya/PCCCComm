@@ -19,9 +19,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Text;
 using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Buffers;
 using PCCCComm.Core;
 using PCCCComm.Pccc;
 
@@ -40,6 +43,8 @@ public class SlcHandler : IPlcHandler
     private readonly IHandlerContext _context;
     private readonly PCCCProtocol _protocol;
     private int _processorType;
+    private readonly ConcurrentDictionary<string, DataAddress> _addressCache = new ConcurrentDictionary<string, DataAddress>();
+    private int _lastFileProgressPercent = -1;
 
     // ─── Constructor ───────────────────────────────────────────────────────
     public SlcHandler(IHandlerContext context, PCCCProtocol protocol, int initialProcessorType)
@@ -60,7 +65,18 @@ public class SlcHandler : IPlcHandler
         set => _context.DisableEvent = value;
     }
     
-    private void OnFileProgress(PCCCComm.FileProgressEventArgs e) => _context.RaiseFileProgress(e);
+    private void OnFileProgress(PCCCComm.FileProgressEventArgs e)
+    {
+        // Raise event only if progress changed by at least 5% or file completed
+        int percent = (int)((double)e.TotalBytesTransferred / e.GrandTotalBytes * 100);
+        if (percent != _lastFileProgressPercent && (percent % 5 == 0 || percent == 100))
+        {
+            _lastFileProgressPercent = percent;
+            _context.RaiseFileProgress(e);
+        }
+    }
+
+    private DataAddress ParseAddress(string address) => _addressCache.GetOrAdd(address, PCCCParser.Parse);
 
     // ─── Private Helper Methods ────────────────────────────────────────────
 
@@ -87,81 +103,91 @@ public class SlcHandler : IPlcHandler
     {
         finalStatus = 0;
         int filePosition = 0;
-        byte[] result = new byte[numberOfBytes];
-
-        // Determine processor-specific maximum read chunk size (no magic numbers)
-        int maxReadChunk;
-        switch (_processorType)
+        byte[] result = ArrayPool<byte>.Shared.Rent(numberOfBytes);
+        try
         {
-            case (byte)PCCCConstants.ProcessorTypeCode.SLC502:
-            case (byte)PCCCConstants.ProcessorTypeCode.SLC501:
-            case (byte)PCCCConstants.ProcessorTypeCode.FixedSLC500:
-                maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadSlc501_502; // 95 bytes
-                break;
-
-            case (byte)PCCCConstants.ProcessorTypeCode.SLC503:
-            case (byte)PCCCConstants.ProcessorTypeCode.SLC504:
-            case (byte)PCCCConstants.ProcessorTypeCode.SLC505:
-                maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadSlc503_504; // 236 bytes
-                break;
-
-            case (byte)PCCCConstants.ProcessorTypeCode.ML1000:
-                maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadMl1000; // 95 bytes
-                break;
-
-            default:
-                // For other processors (ML1100, ML1200, ML1500, etc.) use default 236
-                maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadBytes;
-                break;
-        }
-
-        while (filePosition < numberOfBytes && finalStatus == 0)
-        {
-            int toRead = Math.Min(numberOfBytes - filePosition, maxReadChunk);
-            
-            // String file (ST) restriction: max 168 bytes (two elements) per read
-            if (toRead > PCCCConstants.Df1Limits.MaxStringReadBytes && addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
-                toRead = PCCCConstants.Df1Limits.MaxStringReadBytes;
-            
-            // Timer/Counter file restriction: read in multiples of 6 bytes, max 234 bytes
-            if (toRead > PCCCConstants.Df1Limits.MaxTimerCounterReadBytes && (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
-                toRead = PCCCConstants.Df1Limits.MaxTimerCounterReadBytes;
-            
-            // SLC 5/02 additional limitation: max 0x50 (80) bytes per read
-            if (toRead > PCCCConstants.Df1Limits.MaxSlc502ReadBytes && _processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502)
-                toRead = PCCCConstants.Df1Limits.MaxSlc502ReadBytes;
-            
-            // Data Monitor File (type 0xA4) limitation: max 0x78 (120) bytes per read
-            if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.DataMonitor && toRead > PCCCConstants.Df1Limits.MaxDataMonitorReadBytes)
-                toRead = PCCCConstants.Df1Limits.MaxDataMonitorReadBytes;
-            
-            if (toRead <= 0) break;
-
-            var req = PCCCMessage.CreateReadRequest(addr, toRead, 0, (byte)MyNode, (byte)TargetNode);
-            var reply = _protocol.SendRequest(req, out int sts);
-            if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
+            // Determine processor-specific maximum read chunk size (no magic numbers)
+            int maxReadChunk;
+            switch (_processorType)
             {
-                finalStatus = sts;
-                break;
+                case (byte)PCCCConstants.ProcessorTypeCode.SLC502:
+                case (byte)PCCCConstants.ProcessorTypeCode.SLC501:
+                case (byte)PCCCConstants.ProcessorTypeCode.FixedSLC500:
+                    maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadSlc501_502; // 95 bytes
+                    break;
+
+                case (byte)PCCCConstants.ProcessorTypeCode.SLC503:
+                case (byte)PCCCConstants.ProcessorTypeCode.SLC504:
+                case (byte)PCCCConstants.ProcessorTypeCode.SLC505:
+                    maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadSlc503_504; // 236 bytes
+                    break;
+
+                case (byte)PCCCConstants.ProcessorTypeCode.ML1000:
+                    maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadMl1000; // 95 bytes
+                    break;
+
+                default:
+                    // For other processors (ML1100, ML1200, ML1500, etc.) use default 236
+                    maxReadChunk = PCCCConstants.Df1Limits.MaxReadPayloadBytes;
+                    break;
             }
 
-            int bytesRead = Math.Min(toRead, reply.Data.Length);
-            Array.Copy(reply.Data, 0, result, filePosition, bytesRead);
-            filePosition += bytesRead;
+            while (filePosition < numberOfBytes && finalStatus == 0)
+            {
+                int toRead = Math.Min(numberOfBytes - filePosition, maxReadChunk);
+                
+                // String file (ST) restriction: max 168 bytes (two elements) per read
+                if (toRead > PCCCConstants.Df1Limits.MaxStringReadBytes && addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
+                    toRead = PCCCConstants.Df1Limits.MaxStringReadBytes;
+                
+                // Timer/Counter file restriction: read in multiples of 6 bytes, max 234 bytes
+                if (toRead > PCCCConstants.Df1Limits.MaxTimerCounterReadBytes && (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+                    toRead = PCCCConstants.Df1Limits.MaxTimerCounterReadBytes;
+                
+                // SLC 5/02 additional limitation: max 0x50 (80) bytes per read
+                if (toRead > PCCCConstants.Df1Limits.MaxSlc502ReadBytes && _processorType == (byte)PCCCConstants.ProcessorTypeCode.SLC502)
+                    toRead = PCCCConstants.Df1Limits.MaxSlc502ReadBytes;
+                
+                // Data Monitor File (type 0xA4) limitation: max 0x78 (120) bytes per read
+                if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.DataMonitor && toRead > PCCCConstants.Df1Limits.MaxDataMonitorReadBytes)
+                    toRead = PCCCConstants.Df1Limits.MaxDataMonitorReadBytes;
+                
+                if (toRead <= 0) break;
 
-            // Advance address pointer for next chunk
-            const byte stringFileType = (byte)PCCCConstants.SlcFileTypeCode.String;
-            const int stringElementBytes = PCCCConstants.Df1Limits.SlcStringElementBytes;
+                var req = PCCCMessage.CreateReadRequest(addr, toRead, 0, (byte)MyNode, (byte)TargetNode);
+                var reply = _protocol.SendRequest(req, out int sts);
+                if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
+                {
+                    finalStatus = sts;
+                    break;
+                }
 
-            if (addr.FileType == stringFileType)
-                addr.Element += toRead / stringElementBytes;
-            else if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.DataMonitor)
-                addr.Element += toRead / PCCCConstants.Df1Limits.DataMonitorElementBytes;
-            else
-                // For word-based files, each word is 2 bytes
-                addr.SubElement += toRead / PCCCConstants.Df1Limits.BytesPerWord;
+                int bytesRead = Math.Min(toRead, reply.Data.Length);
+                Array.Copy(reply.Data, 0, result, filePosition, bytesRead);
+                filePosition += bytesRead;
+
+                // Advance address pointer for next chunk
+                const byte stringFileType = (byte)PCCCConstants.SlcFileTypeCode.String;
+                const int stringElementBytes = PCCCConstants.Df1Limits.SlcStringElementBytes;
+
+                if (addr.FileType == stringFileType)
+                    addr.Element += toRead / stringElementBytes;
+                else if (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.DataMonitor)
+                    addr.Element += toRead / PCCCConstants.Df1Limits.DataMonitorElementBytes;
+                else
+                    // For word-based files, each word is 2 bytes
+                    addr.SubElement += toRead / PCCCConstants.Df1Limits.BytesPerWord;
+            }
+
+            // Return a properly sized copy
+            byte[] finalResult = new byte[filePosition];
+            Array.Copy(result, 0, finalResult, 0, filePosition);
+            return finalResult;
         }
-        return result;
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(result);
+        }
     }
 
     /// <summary>
@@ -488,7 +514,7 @@ public class SlcHandler : IPlcHandler
     /// </summary>
     public ushort[] ReadWords(string startAddress, int numberOfWords)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new NotSupportedException("ReadWords does not support String (ST) files. Use ReadAny instead.");
@@ -510,8 +536,10 @@ public class SlcHandler : IPlcHandler
 
         int wordCount = Math.Min(numberOfWords, returnedData.Length / 2);
         ushort[] result = new ushort[wordCount];
-        for (int i = 0; i < wordCount; i++)
-            result[i] = BitConverter.ToUInt16(returnedData, i * 2);
+        // Use MemoryMarshal for fast conversion without extra allocation
+        Span<byte> byteSpan = returnedData.AsSpan(0, wordCount * 2);
+        Span<ushort> wordSpan = MemoryMarshal.Cast<byte, ushort>(byteSpan);
+        wordSpan.CopyTo(result);
         return result;
     }
 
@@ -522,7 +550,7 @@ public class SlcHandler : IPlcHandler
     public void WriteWords(string startAddress, ushort[] data)
     {
         if (data == null || data.Length == 0) return;
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new PCCCException("Use WriteData(string, string) for ST files.");
@@ -543,7 +571,7 @@ public class SlcHandler : IPlcHandler
     /// </summary>
     private string[] ReadAnyString(string startAddress, int numberOfElements)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
         short arrayElements = (short)(numberOfElements - 1);
@@ -595,7 +623,7 @@ public class SlcHandler : IPlcHandler
     /// </summary>
     public string[] ReadAny(string startAddress, int numberOfElements)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
@@ -674,7 +702,7 @@ public class SlcHandler : IPlcHandler
     /// <exception cref="PCCCException">Thrown on invalid address or communication error.</exception>
     public double[] ReadAnyValues(string startAddress, int numberOfElements)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new NotSupportedException("ReadAnyValues does not support String (ST) files. Use ReadAny instead.");
@@ -752,7 +780,7 @@ public class SlcHandler : IPlcHandler
         DataAddress[] parsed = new DataAddress[addresses.Length];
         for (int i = 0; i < addresses.Length; i++)
         {
-            parsed[i] = PCCCParser.Parse(addresses[i]);
+            parsed[i] = ParseAddress(addresses[i]);
             if (parsed[i].FileType == 0)
                 throw new PCCCException($"ReadModifyWrite: invalid address '{addresses[i]}'.");
         }
@@ -778,7 +806,7 @@ public class SlcHandler : IPlcHandler
     /// </summary>
     public int WriteData(string startAddress, int numberOfElements, int[] dataToWrite)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new PCCCException("Use WriteData(string, string) for ST files.");
 
@@ -815,7 +843,7 @@ public class SlcHandler : IPlcHandler
     /// <summary>Writes multiple float values to the specified address.</summary>
     public int WriteData(string startAddress, int numberOfElements, float[] dataToWrite)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new PCCCException("Use WriteData(string, string) for ST files.");
@@ -882,7 +910,7 @@ public class SlcHandler : IPlcHandler
         if (dataToWrite.Length > PCCCConstants.Df1Limits.MaxStringLength) 
             dataToWrite = dataToWrite.Substring(0, PCCCConstants.Df1Limits.MaxStringLength);
 
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
         {
             byte[] stElement = new byte[PCCCConstants.Df1Limits.SlcStringElementBytes];
@@ -1337,6 +1365,7 @@ public class SlcHandler : IPlcHandler
         int i = 0;
         long totalBytesTransferred = fzd.Length;
         int filesCompleted = 1;
+        _lastFileProgressPercent = -1; // reset
 
         while (filePosition < fzd.Length && i < totalEntries)
         {
@@ -1390,6 +1419,7 @@ public class SlcHandler : IPlcHandler
         long totalBytesTransferred = 0;
         int filesCompleted = 0;
         int totalFiles = plcFiles.Count;
+        _lastFileProgressPercent = -1;
 
         // Step 1: Initialize download
         int dataLength = (_processorType == 0x5B || _processorType == 0x78) ? 13 : 15;
@@ -1587,6 +1617,7 @@ public class SlcHandler : IPlcHandler
         int i = 0;
         long totalBytesTransferred = dirSize;
         int filesCompleted = 1;
+        _lastFileProgressPercent = -1;
 
         while (filePosition < directory.Length && i < totalEntries)
         {
@@ -1666,6 +1697,7 @@ public class SlcHandler : IPlcHandler
         long totalBytesTransferred = plcFiles[0].Data?.Length ?? 0;
         int filesCompleted = 1;
         int totalFiles = plcFiles.Count;
+        _lastFileProgressPercent = -1;
 
         // Trigger initial progress event for directory
         OnFileProgress(new PCCCComm.FileProgressEventArgs

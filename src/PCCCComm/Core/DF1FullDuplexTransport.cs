@@ -37,7 +37,7 @@ public class DF1FullDuplexTransport : DF1BaseTransport
 {
     // --- State for receive frame assembly ---
     private readonly object _rxLock = new object();
-    private readonly List<byte> _rxBuffer = new List<byte>();
+    private readonly RingBuffer _rxBuffer;
     private DateTime _frameStartTime = DateTime.MinValue;
     private const int FrameTimeoutMs = 500;      // Max time between DLE STX and DLE ETX
     private const int MaxBufferBytes = 4096;     // Safety limit
@@ -58,6 +58,7 @@ public class DF1FullDuplexTransport : DF1BaseTransport
     /// </summary>
     public DF1FullDuplexTransport(ISerialPort port) : base(port)
     {
+        _rxBuffer = new RingBuffer(MaxBufferBytes);
         _port.BytesReceived += OnBytesReceived;
     }
 
@@ -67,6 +68,7 @@ public class DF1FullDuplexTransport : DF1BaseTransport
     public DF1FullDuplexTransport(string portName, int baudRate, Parity parity)
         : base(portName, baudRate, parity)
     {
+        _rxBuffer = new RingBuffer(MaxBufferBytes);
         _port.BytesReceived += OnBytesReceived;
     }
 
@@ -167,10 +169,9 @@ public class DF1FullDuplexTransport : DF1BaseTransport
 
         lock (_rxLock)
         {
-            _rxBuffer.AddRange(chunk);
+            _rxBuffer.AddRange(chunk, 0, chunk.Length);
             if (_rxBuffer.Count > MaxBufferBytes)
             {
-                // Buffer overflow – reset everything
                 _rxBuffer.Clear();
                 _frameStartTime = DateTime.MinValue;
                 return;
@@ -185,7 +186,7 @@ public class DF1FullDuplexTransport : DF1BaseTransport
                 // Synchronisation: find a DLE byte
                 if (_rxBuffer[0] != DLE)
                 {
-                    _rxBuffer.RemoveAt(0);
+                    _rxBuffer.Advance(1);
                     consumed = true;
                     continue;
                 }
@@ -195,7 +196,7 @@ public class DF1FullDuplexTransport : DF1BaseTransport
                 // --- 2‑byte link control: ACK, NAK, ENQ ---
                 if (ctrl == ACK || ctrl == NAK || ctrl == ENQ)
                 {
-                    _rxBuffer.RemoveRange(0, 2);
+                    _rxBuffer.Advance(2);
                     _frameStartTime = DateTime.MinValue;
 
                     if (ctrl == ACK)
@@ -227,7 +228,7 @@ public class DF1FullDuplexTransport : DF1BaseTransport
                     // Frame timeout check (prevents hanging on partial frames)
                     if ((DateTime.UtcNow - _frameStartTime).TotalMilliseconds > FrameTimeoutMs)
                     {
-                        _rxBuffer.RemoveRange(0, 2);
+                        _rxBuffer.Advance(2);
                         _frameStartTime = DateTime.MinValue;
                         consumed = true;
                         continue;
@@ -259,53 +260,64 @@ public class DF1FullDuplexTransport : DF1BaseTransport
                     if (_rxBuffer.Count < totalFrameLen)
                         break; // checksum bytes not yet fully received
 
-                    // Extract the complete frame
-                    byte[] frame = new byte[totalFrameLen];
-                    _rxBuffer.CopyTo(0, frame, 0, totalFrameLen);
-                    OnRawFrameReceived(frame);
-                    _rxBuffer.RemoveRange(0, totalFrameLen);
-                    _frameStartTime = DateTime.MinValue;
+                    // Extract the complete frame using ArrayPool to reduce allocations
+                    byte[] frame = System.Buffers.ArrayPool<byte>.Shared.Rent(totalFrameLen);
+                    try
+                    {
+                        Array.Clear(frame, 0, totalFrameLen);
+                        _rxBuffer.Peek(frame, 0, totalFrameLen);
+                        // Create a copy for the RawFrameReceived event (since we must not pass the rented buffer out)
+                        byte[] rawFrameCopy = new byte[totalFrameLen];
+                        Array.Copy(frame, 0, rawFrameCopy, 0, totalFrameLen);
+                        OnRawFrameReceived(rawFrameCopy);
+                        _rxBuffer.Advance(totalFrameLen);
+                        _frameStartTime = DateTime.MinValue;
 
-                    // Unstuff the payload between DLE STX and DLE ETX
-                    int payloadLen = etxIndex - 2;
-                    byte[] stuffedPayload = new byte[payloadLen];
-                    Array.Copy(frame, 2, stuffedPayload, 0, payloadLen);
-                    byte[] innerFrame = RemoveDleStuffing(stuffedPayload);
+                        // Unstuff the payload between DLE STX and DLE ETX
+                        int payloadLen = etxIndex - 2;
+                        byte[] stuffedPayload = new byte[payloadLen];
+                        Array.Copy(frame, 2, stuffedPayload, 0, payloadLen);
+                        byte[] innerFrame = RemoveDleStuffing(stuffedPayload);
 
-                    // Validate checksum
-                    bool valid;
-                    if (ChecksumType == CheckSumOptions.Crc)
-                    {
-                        ushort calc = CalculateChecksum(innerFrame, CheckSumOptions.Crc);
-                        ushort recv = (ushort)(frame[etxIndex + 2] | (frame[etxIndex + 3] << 8));
-                        valid = calc == recv;
-                    }
-                    else // BCC
-                    {
-                        byte calc = (byte)CalculateChecksum(innerFrame, CheckSumOptions.Bcc);
-                        byte recv = frame[etxIndex + 2];
-                        valid = calc == recv;
-                    }
+                        // Validate checksum
+                        bool valid;
+                        if (ChecksumType == CheckSumOptions.Crc)
+                        {
+                            ushort calc = CalculateChecksum(innerFrame, CheckSumOptions.Crc);
+                            ushort recv = (ushort)(frame[etxIndex + 2] | (frame[etxIndex + 3] << 8));
+                            valid = calc == recv;
+                        }
+                        else // BCC
+                        {
+                            byte calc = (byte)CalculateChecksum(innerFrame, CheckSumOptions.Bcc);
+                            byte recv = frame[etxIndex + 2];
+                            valid = calc == recv;
+                        }
 
-                    // Send ACK or NAK immediately
-                    if (valid)
-                    {
-                        SendControl(ACK);
-                        _lastResponseWasNAK = false;
-                        pduToDeliver = innerFrame;
+                        // Send ACK or NAK immediately
+                        if (valid)
+                        {
+                            SendControl(ACK);
+                            _lastResponseWasNAK = false;
+                            pduToDeliver = innerFrame;
+                        }
+                        else
+                        {
+                            SendControl(NAK);
+                            _lastResponseWasNAK = true;
+                            if (SleepDelay < 400) SleepDelay += 50;
+                        }
                     }
-                    else
+                    finally
                     {
-                        SendControl(NAK);
-                        _lastResponseWasNAK = true;
-                        if (SleepDelay < 400) SleepDelay += 50;
+                        System.Buffers.ArrayPool<byte>.Shared.Return(frame);
                     }
                     consumed = true;
                     continue;
                 }
 
                 // DLE followed by an unexpected byte – discard the DLE and resync
-                _rxBuffer.RemoveAt(0);
+                _rxBuffer.Advance(1);
                 consumed = true;
             }
             respondWithNak = _lastResponseWasNAK;   // capture inside lock

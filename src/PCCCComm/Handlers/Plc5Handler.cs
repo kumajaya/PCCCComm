@@ -19,9 +19,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Text;
 using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Buffers;
 using PCCCComm.Core;
 using PCCCComm.Pccc;
 
@@ -45,6 +48,8 @@ public class Plc5Handler : IPlcHandler
     private readonly IHandlerContext _context;
     private readonly PCCCProtocol _protocol;
     private int _processorType;
+    private readonly ConcurrentDictionary<string, DataAddress> _addressCache = new ConcurrentDictionary<string, DataAddress>();
+    private int _lastFileProgressPercent = -1;
 
     public Plc5Handler(IHandlerContext context, PCCCProtocol protocol, int initialProcessorType)
     {
@@ -63,7 +68,17 @@ public class Plc5Handler : IPlcHandler
         set => _context.DisableEvent = value;
     }
 
-    private void OnFileProgress(PCCCComm.FileProgressEventArgs e) => _context.RaiseFileProgress(e);
+    private void OnFileProgress(PCCCComm.FileProgressEventArgs e)
+    {
+        int percent = (int)((double)e.TotalBytesTransferred / e.GrandTotalBytes * 100);
+        if (percent != _lastFileProgressPercent && (percent % 5 == 0 || percent == 100))
+        {
+            _lastFileProgressPercent = percent;
+            _context.RaiseFileProgress(e);
+        }
+    }
+
+    private DataAddress ParseAddress(string address) => _addressCache.GetOrAdd(address, PCCCParser.Parse);
 
     // ---------------------------------------------------------------------
     // Helper: Encode logical binary address for PLC-5 Typed Read/Write
@@ -90,32 +105,28 @@ public class Plc5Handler : IPlcHandler
         // Number of levels depends on whether the address points to a structured type
         int levelCount = isStructured ? 4 : 3;
         
-        byte[] levels = new byte[4];
-        levels[0] = (byte)fileNumber;
-        levels[1] = (byte)fileType;
-        levels[2] = (byte)element;
-        levels[3] = isStructured ? (byte)subElement : (byte)0;
-        
-        List<byte> result = new List<byte>();
+        Span<byte> buffer = stackalloc byte[14]; // max 4 levels + mask (1 + 4*3 + 1)
+        int idx = 0;
+
         int maskHigh = (levelCount << 4);
         int maskLow = isStructured ? 0x08 : 0x00;
-        result.Add((byte)(maskHigh | maskLow));
-        
+        buffer[idx++] = (byte)(maskHigh | maskLow);
+
+        int[] values = { fileNumber, fileType, element, subElement };
         for (int i = 0; i < levelCount; i++)
         {
-            int val = (i == 3) ? subElement : (i == 2) ? element : (i == 1) ? fileType : fileNumber;
+            int val = values[i];
             if (val < 255)
-            {
-                result.Add((byte)val);
-            }
+                buffer[idx++] = (byte)val;
             else
             {
-                result.Add(0xFF);
-                result.Add((byte)(val & 0xFF));
-                result.Add((byte)((val >> 8) & 0xFF));
+                buffer[idx++] = 0xFF;
+                buffer[idx++] = (byte)(val & 0xFF);
+                buffer[idx++] = (byte)((val >> 8) & 0xFF);
             }
         }
-        return result.ToArray();
+
+        return buffer.Slice(0, idx).ToArray();
     }
 
     // ---------------------------------------------------------------------
@@ -129,49 +140,59 @@ public class Plc5Handler : IPlcHandler
     {
         finalStatus = 0;
         int filePosition = 0;
-        byte[] result = new byte[numberOfBytes];
-        int bytesPerElem = addr.BytesPerElements;
-
-        bool isStructured = addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control ||
-                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String;
-
-        while (filePosition < numberOfBytes && finalStatus == 0)
+        byte[] result = ArrayPool<byte>.Shared.Rent(numberOfBytes);
+        try
         {
-            int maxChunkBytes = PCCCConstants.Df1Limits.MaxReadPayloadPlc5;
-            int remainingBytes = numberOfBytes - filePosition;
-            int chunkBytes = Math.Min(remainingBytes, maxChunkBytes);
-            
-            if (isStructured)
+            int bytesPerElem = addr.BytesPerElements;
+
+            bool isStructured = addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                                addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                                addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control ||
+                                addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String;
+
+            while (filePosition < numberOfBytes && finalStatus == 0)
             {
-                int elemAlign = (chunkBytes + bytesPerElem - 1) / bytesPerElem * bytesPerElem;
-                if (elemAlign > maxChunkBytes) elemAlign -= bytesPerElem;
-                chunkBytes = Math.Max(bytesPerElem, elemAlign);
+                int maxChunkBytes = PCCCConstants.Df1Limits.MaxReadPayloadPlc5;
+                int remainingBytes = numberOfBytes - filePosition;
+                int chunkBytes = Math.Min(remainingBytes, maxChunkBytes);
+                
+                if (isStructured)
+                {
+                    int elemAlign = (chunkBytes + bytesPerElem - 1) / bytesPerElem * bytesPerElem;
+                    if (elemAlign > maxChunkBytes) elemAlign -= bytesPerElem;
+                    chunkBytes = Math.Max(bytesPerElem, elemAlign);
+                }
+                
+                int chunkElements = chunkBytes / bytesPerElem;
+                int currentElement = addr.Element + (filePosition / bytesPerElem);
+                int subElementOffset = addr.SubElement + ((filePosition % bytesPerElem) / PCCCConstants.Df1Limits.BytesPerWord);
+                
+                byte[] logicalAddress = EncodePlc5LogicalAddress(
+                    addr.FileNumber, addr.FileType, currentElement, subElementOffset, isStructured);
+                
+                var req = PCCCMessage.CreateTypedReadRequest(
+                    logicalAddress, chunkElements, 0, (byte)MyNode, (byte)TargetNode);
+                var reply = _protocol.SendRequest(req, out int sts);
+                
+                if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
+                {
+                    finalStatus = sts;
+                    break;
+                }
+                
+                int bytesRead = Math.Min(chunkBytes, reply.Data.Length);
+                Array.Copy(reply.Data, 0, result, filePosition, bytesRead);
+                filePosition += bytesRead;
             }
-            
-            int chunkElements = chunkBytes / bytesPerElem;
-            int currentElement = addr.Element + (filePosition / bytesPerElem);
-            int subElementOffset = addr.SubElement + ((filePosition % bytesPerElem) / PCCCConstants.Df1Limits.BytesPerWord);
-            
-            byte[] logicalAddress = EncodePlc5LogicalAddress(
-                addr.FileNumber, addr.FileType, currentElement, subElementOffset, isStructured);
-            
-            var req = PCCCMessage.CreateTypedReadRequest(
-                logicalAddress, chunkElements, 0, (byte)MyNode, (byte)TargetNode);
-            var reply = _protocol.SendRequest(req, out int sts);
-            
-            if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
-            {
-                finalStatus = sts;
-                break;
-            }
-            
-            int bytesRead = Math.Min(chunkBytes, reply.Data.Length);
-            Array.Copy(reply.Data, 0, result, filePosition, bytesRead);
-            filePosition += bytesRead;
+
+            byte[] finalResult = new byte[filePosition];
+            Array.Copy(result, 0, finalResult, 0, filePosition);
+            return finalResult;
         }
-        return result;
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(result);
+        }
     }
 
     /// <summary>
@@ -333,7 +354,7 @@ public class Plc5Handler : IPlcHandler
     /// </summary>
     public ushort[] ReadWords(string startAddress, int numberOfWords)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new NotSupportedException("ReadWords does not support String (ST) files. Use ReadAny instead.");
@@ -359,8 +380,10 @@ public class Plc5Handler : IPlcHandler
 
         int wordCount = Math.Min(numberOfWords, returnedData.Length / 2);
         ushort[] result = new ushort[wordCount];
-        for (int i = 0; i < wordCount; i++)
-            result[i] = BitConverter.ToUInt16(returnedData, i * 2);
+        // Use MemoryMarshal for fast conversion without extra allocation
+        Span<byte> byteSpan = returnedData.AsSpan(0, wordCount * 2);
+        Span<ushort> wordSpan = MemoryMarshal.Cast<byte, ushort>(byteSpan);
+        wordSpan.CopyTo(result);
         return result;
     }
 
@@ -370,7 +393,7 @@ public class Plc5Handler : IPlcHandler
     public void WriteWords(string startAddress, ushort[] data)
     {
         if (data == null || data.Length == 0) return;
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new PCCCException("Use WriteData(string, string) for ST files.");
@@ -399,7 +422,7 @@ public class Plc5Handler : IPlcHandler
     /// </summary>
     private string[] ReadAnyString(string startAddress, int numberOfElements)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
         short arrayElements = (short)(numberOfElements - 1);
@@ -440,7 +463,7 @@ public class Plc5Handler : IPlcHandler
 
     public string[] ReadAny(string startAddress, int numberOfElements)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
         // For String files, use original decoding logic (unchanged)
@@ -524,13 +547,12 @@ public class Plc5Handler : IPlcHandler
     /// <exception cref="NotSupportedException">Thrown for String (ST) files.</exception>
     public double[] ReadAnyValues(string startAddress, int numberOfElements)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new NotSupportedException("ReadAnyValues does not support String (ST) files. Use ReadAny instead.");
 
-        // Determine words per element based on file type (PLC-5-specific overrides are not needed here
-        // because ReadWords already handles the PLC-5 string size, and for non-string files the default bytes per element is fine)
+        // Determine words per element based on file type
         int bytesPerElem = p.BytesPerElements;
         if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
             bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord; // 2 bytes per sub-element
@@ -595,7 +617,7 @@ public class Plc5Handler : IPlcHandler
 
     public string WriteData(string startAddress, int dataToWrite)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
         // Bit-level write
@@ -622,7 +644,7 @@ public class Plc5Handler : IPlcHandler
 
     public int WriteData(string startAddress, int numberOfElements, int[] dataToWrite)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new PCCCException("Use WriteData(string, string) for ST files.");
 
@@ -657,7 +679,7 @@ public class Plc5Handler : IPlcHandler
 
     public int WriteData(string startAddress, int numberOfElements, float[] dataToWrite)
     {
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new PCCCException("Use WriteData(string, string) for ST files.");
@@ -717,7 +739,7 @@ public class Plc5Handler : IPlcHandler
         if (dataToWrite.Length > PCCCConstants.Df1Limits.MaxStringLength) 
             dataToWrite = dataToWrite.Substring(0, PCCCConstants.Df1Limits.MaxStringLength);
 
-        DataAddress p = PCCCParser.Parse(startAddress);
+        DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
         // --- ST file (PLC-5 specific, 88 bytes per element) ---
@@ -745,7 +767,7 @@ public class Plc5Handler : IPlcHandler
         }
         else
         {
-            // --- Non-ST file: use WriteWords for consistency ---
+            // --- Non-ST file: use WriteWords for consistency
             int[]? words = StringConverter.StringToWords(dataToWrite);
             if (words == null) return -1;
             ushort[] ushortWords = new ushort[words.Length];
@@ -827,6 +849,7 @@ public class Plc5Handler : IPlcHandler
             long totalBytesTransferred = 0;
             int filesCompleted = 0;
             int totalFiles = segments.Count;
+            _lastFileProgressPercent = -1;
 
             foreach (var (segStart, segEnd) in segments)
             {
@@ -835,7 +858,6 @@ public class Plc5Handler : IPlcHandler
 
                 using var ms = new MemoryStream(totalBytes);
                 int offset = 0;
-                int lastPercent = -1;
 
                 while (offset < totalBytes)
                 {
@@ -853,22 +875,17 @@ public class Plc5Handler : IPlcHandler
                     offset += chunkData.Length;
                     totalBytesTransferred += chunkData.Length;
 
-                    // Report progress every ~5% or at least once per segment
-                    int percent = (int)((double)totalBytesTransferred / grandTotalBytes * 100);
-                    if (percent != lastPercent && (percent % 5 == 0 || percent == 100))
+                    // Report progress
+                    OnFileProgress(new PCCCComm.FileProgressEventArgs
                     {
-                        lastPercent = percent;
-                        OnFileProgress(new PCCCComm.FileProgressEventArgs
-                        {
-                            FileNumber = filesCompleted,
-                            FileType = 0,
-                            FileSizeBytes = totalBytes,
-                            FilesCompleted = filesCompleted + 1,
-                            TotalFiles = totalFiles,
-                            TotalBytesTransferred = totalBytesTransferred,
-                            GrandTotalBytes = grandTotalBytes
-                        });
-                    }
+                        FileNumber = filesCompleted,
+                        FileType = 0,
+                        FileSizeBytes = totalBytes,
+                        FilesCompleted = filesCompleted + 1,
+                        TotalFiles = totalFiles,
+                        TotalBytesTransferred = totalBytesTransferred,
+                        GrandTotalBytes = grandTotalBytes
+                    });
                 }
 
                 files.Add(new PLCFileDetails
@@ -913,6 +930,7 @@ public class Plc5Handler : IPlcHandler
             long totalBytesTransferred = 0;
             int filesCompleted = 0;
             int totalFiles = files.Count;
+            _lastFileProgressPercent = -1;
 
             foreach (var file in files)
             {
@@ -925,7 +943,6 @@ public class Plc5Handler : IPlcHandler
                 int physBase = 0x0000; // default; could be stored in file.FileNumber
 
                 int offset = 0;
-                int lastPercent = -1;
 
                 while (offset < totalBytes)
                 {
@@ -946,24 +963,16 @@ public class Plc5Handler : IPlcHandler
                     offset += chunk;
                     totalBytesTransferred += chunk;
 
-                    if (grandTotalBytes > 0)
+                    OnFileProgress(new PCCCComm.FileProgressEventArgs
                     {
-                        int percent = (int)((double)totalBytesTransferred / grandTotalBytes * 100);
-                        if (percent != lastPercent && (percent % 5 == 0 || percent == 100))
-                        {
-                            lastPercent = percent;
-                            OnFileProgress(new PCCCComm.FileProgressEventArgs
-                            {
-                                FileNumber = filesCompleted,
-                                FileType = 0,
-                                FileSizeBytes = totalBytes,
-                                FilesCompleted = filesCompleted + 1,
-                                TotalFiles = totalFiles,
-                                TotalBytesTransferred = totalBytesTransferred,
-                                GrandTotalBytes = grandTotalBytes
-                            });
-                        }
-                    }
+                        FileNumber = filesCompleted,
+                        FileType = 0,
+                        FileSizeBytes = totalBytes,
+                        FilesCompleted = filesCompleted + 1,
+                        TotalFiles = totalFiles,
+                        TotalBytesTransferred = totalBytesTransferred,
+                        GrandTotalBytes = grandTotalBytes
+                    });
                 }
                 filesCompleted++;
             }

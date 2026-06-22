@@ -21,6 +21,7 @@
 
 using System.IO;
 using System.Net.Sockets;
+using System.Buffers;
 
 namespace PCCCComm.Core;
 
@@ -244,21 +245,19 @@ public class EIPTransport : ITransport
         if (innerFrame == null || innerFrame.Length == 0)
             throw new ArgumentException("Inner frame cannot be null or empty.", nameof(innerFrame));
 
-        byte[] eipPacket = BuildSendRRDataPacket(innerFrame);
-
-        RawFrameSent?.Invoke(this, eipPacket);
-
-        lock (_sendLock)
-        {
-            _stream!.Write(eipPacket, 0, eipPacket.Length);
-        }
+        // Build the packet into a pooled buffer and write directly to the
+        // stream — no intermediate persistent array needed.
+        BuildAndSendRRDataPacket(innerFrame);
     }
 
     // ── Packet builder ────────────────────────────────────────────────────────
 
     /// <summary>
     /// Builds a complete EIP SendRRData packet that carries one Execute PCCC
-    /// request.
+    /// request into a pooled buffer, fires <see cref="RawFrameSent"/>, then
+    /// writes the bytes directly to the stream under <c>_sendLock</c>.
+    /// The pooled buffer is returned before this method exits, so no
+    /// persistent array is allocated for the outbound packet.
     ///
     /// Packet layout (all multi-byte fields are little-endian):
     /// <code>
@@ -292,7 +291,7 @@ public class EIPTransport : ITransport
     /// leading DST and SRC bytes. DST and SRC are stripped here because the
     /// Execute PCCC service carries only CMD onward.
     /// </param>
-    private byte[] BuildSendRRDataPacket(byte[] innerFrame)
+    private void BuildAndSendRRDataPacket(byte[] innerFrame)
     {
         // The inner frame from PCCCComm always starts with DST (1 byte) and
         // SRC (1 byte). The CIP Execute PCCC payload begins at CMD, so we
@@ -307,51 +306,76 @@ public class EIPTransport : ITransport
         //   CPF prefix(8) + Null Address item(4) + UCD item header(4) + cipPayloadLen
         int encapsulationLen = CpfPrefixLen + NullAddrItemLen + UcdItemHeaderLen + cipPayloadLen;
 
-        byte[] pkt = new byte[EipHeaderLen + encapsulationLen];
+        int totalLen = EipHeaderLen + encapsulationLen;
 
-        // ── EIP Encapsulation Header ──────────────────────────────────────────
-        // Bytes 0-1: command
-        pkt[0] = (byte)(EIP_SEND_RR_DATA & 0xFF);
-        pkt[1] = (byte)(EIP_SEND_RR_DATA >> 8);
-        // Bytes 2-3: length (bytes after the 24-byte header)
-        pkt[2] = (byte)(encapsulationLen & 0xFF);
-        pkt[3] = (byte)(encapsulationLen >> 8);
-        // Bytes 4-7: session handle (little-endian)
-        byte[] temp = BitConverter.GetBytes(_sessionHandle);
-        Array.Copy(temp, 0, pkt, 4, 4);
-        // Bytes 8-11: status = 0x00000000 (already zero)
-        // Bytes 12-19: sender context = 0 (not used by client)
-        // Bytes 20-23: options = 0
+        byte[] pkt = ArrayPool<byte>.Shared.Rent(totalLen);
+        try
+        {
+            // Clear only the bytes we will actually use.
+            Array.Clear(pkt, 0, totalLen);
 
-        // ── CPF Prefix (offset 24) ────────────────────────────────────────────
-        // Interface Handle (4 bytes) = 0
-        // Timeout (2 bytes) = 0
-        // Item Count (2 bytes) = 2
-        pkt[30] = 0x02;   // item count low byte
-        pkt[31] = 0x00;   // item count high byte
+            // ── EIP Encapsulation Header ──────────────────────────────────────────
+            // Bytes 0-1: command
+            pkt[0] = (byte)(EIP_SEND_RR_DATA & 0xFF);
+            pkt[1] = (byte)(EIP_SEND_RR_DATA >> 8);
+            // Bytes 2-3: length (bytes after the 24-byte header)
+            pkt[2] = (byte)(encapsulationLen & 0xFF);
+            pkt[3] = (byte)(encapsulationLen >> 8);
+            // Bytes 4-7: session handle (little-endian)
+            byte[] temp = BitConverter.GetBytes(_sessionHandle);
+            Array.Copy(temp, 0, pkt, 4, 4);
+            // Bytes 8-11: status = 0x00000000 (already zero due to Clear)
+            // Bytes 12-19: sender context = 0 (already zero)
+            // Bytes 20-23: options = 0 (already zero)
 
-        // ── Null Address Item (offset 32) ─────────────────────────────────────
-        // type = 0x0000 (already zero), length = 0 (already zero)
+            // ── CPF Prefix (offset 24) ────────────────────────────────────────────
+            // Interface Handle (4 bytes) = 0 (already zero)
+            // Timeout (2 bytes) = 0 (already zero)
+            // Item Count (2 bytes) = 2
+            pkt[30] = 0x02;   // item count low byte
+            pkt[31] = 0x00;   // item count high byte
 
-        // ── Unconnected Data Item header (offset 36) ──────────────────────────
-        pkt[36] = (byte)(CPF_ITEM_UNCONNECTED_DATA & 0xFF);  // 0xB2
-        pkt[37] = (byte)(CPF_ITEM_UNCONNECTED_DATA >> 8);    // 0x00
-        pkt[38] = (byte)(cipPayloadLen & 0xFF);
-        pkt[39] = (byte)(cipPayloadLen >> 8);
+            // ── Null Address Item (offset 32) ─────────────────────────────────────
+            // type = 0x0000 (already zero), length = 0 (already zero)
 
-        // ── CIP Execute PCCC Request (offset 40 = CipPayloadOffset) ──────────
-        int pos = CipPayloadOffset;
-        pkt[pos++] = CIP_SERVICE_EXECUTE_PCCC;   // 0x4B
-        pkt[pos++] = 0x02;                        // path size = 2 words
-        Array.Copy(CipPcccPath, 0, pkt, pos, CipPcccPath.Length);
-        pos += CipPcccPath.Length;                // pos = 46
-        Array.Copy(CipRequestId, 0, pkt, pos, CipRequestId.Length);
-        pos += CipRequestId.Length;               // pos = 53
+            // ── Unconnected Data Item header (offset 36) ──────────────────────────
+            pkt[36] = (byte)(CPF_ITEM_UNCONNECTED_DATA & 0xFF);  // 0xB2
+            pkt[37] = (byte)(CPF_ITEM_UNCONNECTED_DATA >> 8);    // 0x00
+            pkt[38] = (byte)(cipPayloadLen & 0xFF);
+            pkt[39] = (byte)(cipPayloadLen >> 8);
 
-        // ── PCCC payload (CMD, STS, TNS, FUNC?, DATA…) ───────────────────────
-        Array.Copy(innerFrame, pcccDataOffset, pkt, pos, pcccDataLen);
+            // ── CIP Execute PCCC Request (offset 40 = CipPayloadOffset) ──────────
+            int pos = CipPayloadOffset;
+            pkt[pos++] = CIP_SERVICE_EXECUTE_PCCC;   // 0x4B
+            pkt[pos++] = 0x02;                        // path size = 2 words
+            Array.Copy(CipPcccPath, 0, pkt, pos, CipPcccPath.Length);
+            pos += CipPcccPath.Length;                // pos = 46
+            Array.Copy(CipRequestId, 0, pkt, pos, CipRequestId.Length);
+            pos += CipRequestId.Length;               // pos = 53
 
-        return pkt;
+            // ── PCCC payload (CMD, STS, TNS, FUNC?, DATA…) ───────────────────────
+            Array.Copy(innerFrame, pcccDataOffset, pkt, pos, pcccDataLen);
+
+            // Fire diagnostic event only when subscribed — avoids allocating a
+            // trimmed copy of the rented buffer when nobody is listening.
+            if (RawFrameSent != null)
+            {
+                byte[] copy = new byte[totalLen];
+                Array.Copy(pkt, 0, copy, 0, totalLen);
+                RawFrameSent.Invoke(this, copy);
+            }
+
+            // Write directly into the stream while holding _sendLock.
+            // The pooled buffer must not outlive this lock scope.
+            lock (_sendLock)
+            {
+                _stream!.Write(pkt, 0, totalLen);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(pkt, clearArray: false);
+        }
     }
 
     // ── Inner frame extractor ─────────────────────────────────────────────────
@@ -591,24 +615,35 @@ public class EIPTransport : ITransport
                 // ── Dispatch by command ───────────────────────────────────────
                 if (cmd == EIP_SEND_RR_DATA)
                 {
-                    // Assemble a single contiguous packet for ExtractInnerFrame.
-                    // Total length: EIP header(24) + payload(length).
                     int totalLen = EipHeaderLen + length;
-                    byte[] packet = new byte[totalLen];
-                    Array.Copy(header,  0, packet, 0,          EipHeaderLen);
-                    Array.Copy(payload, 0, packet, EipHeaderLen, length);
-
-                    RawFrameReceived?.Invoke(this, packet);
-
-                    // CIP service code is at offset 40.
                     if (totalLen <= CipPayloadOffset) continue;
 
-                    byte cipService = packet[CipPayloadOffset];
+                    // Peek the CIP service byte directly from the receive buffer
+                    // (payload offset = CipPayloadOffset - EipHeaderLen = 16)
+                    // before allocating the combined packet, so frames with an
+                    // irrelevant service code are discarded with zero allocation
+                    // when RawFrameReceived is not subscribed.
+                    const int cipServiceOffsetInPayload = CipPayloadOffset - EipHeaderLen; // 16
+                    if (length <= cipServiceOffsetInPayload) continue;
 
-                    // 0xCB = Execute PCCC response; 0x4B = unsolicited Execute PCCC request.
-                    if (cipService == CIP_SERVICE_EXECUTE_PCCC_REPLY ||
-                        cipService == CIP_SERVICE_EXECUTE_PCCC)
+                    byte cipService = payload[cipServiceOffsetInPayload];
+
+                    bool isRelevant = cipService == CIP_SERVICE_EXECUTE_PCCC_REPLY ||
+                                      cipService == CIP_SERVICE_EXECUTE_PCCC;
+
+                    // Allocate the combined packet only when it will actually be used.
+                    if (!isRelevant && RawFrameReceived == null) continue;
+
+                    byte[] packet = new byte[totalLen];
+                    Array.Copy(header,  0, packet, 0,           EipHeaderLen);
+                    Array.Copy(payload, 0, packet, EipHeaderLen, length);
+
+                    // Fire diagnostic event only when subscribed.
+                    RawFrameReceived?.Invoke(this, packet);
+
+                    if (isRelevant)
                     {
+                        // 0xCB = Execute PCCC response; 0x4B = unsolicited Execute PCCC request.
                         bool isResponse = cipService == CIP_SERVICE_EXECUTE_PCCC_REPLY;
                         try
                         {
