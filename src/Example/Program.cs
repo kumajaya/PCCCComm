@@ -1424,8 +1424,25 @@ class Program
                     case "getpass":
                         HandleGetPassword(pccc);
                         break;
+
                     case "setpass":
                         HandleSetPassword(pccc, parts);
+                        break;
+
+                    case "clearpass":
+                        HandleClearPassword(pccc);
+                        break;
+
+                    case "getmaster":
+                        HandleGetMaster(pccc);
+                        break;
+
+                    case "setmaster":
+                        HandleSetMaster(pccc, parts);
+                        break;
+
+                    case "clearmaster":
+                        HandleClearMaster(pccc);
                         break;
 
                     default:
@@ -2363,14 +2380,51 @@ class Program
 
     // ─── Hidden Password Commands ─────────────────────────────────────────────
 
-    /// <summary>
-    /// Reads the PLC protection password using raw PCCC (hidden feature).
-    /// Works on MicroLogix 1100/1200/1400.
-    /// Uses FNC=0xA2 (Protected Typed Logical Write) with address 0x0A:0:0x000B:0
-    /// and no byte count (PLC returns 10 bytes).
-    /// </summary>
     private static void HandleGetPassword(Comm.PCCCComm pccc)
     {
+        string pw = ReadPassword(pccc, 0x0B, "Password");
+        Console.WriteLine($"Password: {pw}");
+    }
+
+    private static void HandleGetMaster(Comm.PCCCComm pccc)
+    {
+        string pw = ReadPassword(pccc, 0x10, "Master");
+        Console.WriteLine($"Master: {pw}");
+    }
+
+    private static void HandleSetPassword(Comm.PCCCComm pccc, string[] parts)
+    {
+        if (parts.Length < 2) { Console.WriteLine("Usage: setpass <new_password>"); return; }
+
+        WritePassword(pccc, 0x0B, parts[1], "Password");
+    }
+
+    private static void HandleSetMaster(Comm.PCCCComm pccc, string[] parts)
+    {
+        if (parts.Length < 2) { Console.WriteLine("Usage: setmaster <new_password>"); return; }
+
+        WritePassword(pccc, 0x10, parts[1], "Master");
+    }
+
+    private static void HandleClearPassword(Comm.PCCCComm pccc)
+    {
+        WritePassword(pccc, 0x0B, "", "Password");
+    }
+
+    private static void HandleClearMaster(Comm.PCCCComm pccc)
+    {
+        WritePassword(pccc, 0x10, "", "Master");
+    }
+
+    // ─── Password Helpers ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reads 10-byte password from given element offset (0x0B or 0x10).
+    /// Returns the password stsring or "(empty)".
+    /// </summary>
+    private static string ReadPassword(Comm.PCCCComm pccc, int element, string label)
+    {
+        // Format: DST, SRC, CMD, STS, TNS(2), FNC, file, type, 0x00, element
         byte[] pdu = new byte[11];
         pdu[0] = (byte)pccc.TargetNode;
         pdu[1] = (byte)pccc.MyNode;
@@ -2378,118 +2432,101 @@ class Program
         pdu[3] = 0x00;
         pdu[4] = 0x00; pdu[5] = 0x00;
         pdu[6] = 0xA1;
-        pdu[7] = 0x0A; pdu[8] = 0x00; pdu[9] = 0x00; pdu[10] = 0x0B;
+        pdu[7] = 0x0A;          // file number
+        pdu[8] = 0x00;          // file type
+        pdu[9] = 0x00;          // first byte of element (must be 0x00)
+        pdu[10] = (byte)element; // second byte of element (0x0B or 0x10)
 
-        WriteHex("      TX:", pdu, pdu.Length);
-
+        WriteHex($"      TX:", pdu, pdu.Length);
         var (status, response, _) = pccc.SendRawPduAndGetResponse(pdu);
-
         if (response != null)
-            WriteHex("      RX:", response, response.Length);
+            WriteHex($"      RX:", response, response.Length);
 
         if (status != 0 || response == null || response.Length < 6)
-        {
-            Console.WriteLine($"Failed to read password (status=0x{status:X2})");
-            return;
-        }
+            return $"(error status=0x{status:X2})";
 
-        int offset = 0;
-        if (response.Length >= 6 && response[2] == 0x4F)
-        {
-            if (response[3] != 0)
-            {
-                Console.WriteLine($"STS error: 0x{response[3]:X2}");
-                return;
-            }
-            offset = 6;
-        }
-
+        int offset = (response.Length >= 6 && response[2] == 0x4F) ? 6 : 0;
+        if (response[3] != 0)
+            return $"(STS error: 0x{response[3]:X2})";
         if (response.Length < offset + 10)
-        {
-            Console.WriteLine($"Not enough data: {response.Length} bytes");
-            return;
-        }
+            return "(truncated)";
 
         byte[] pass = new byte[10];
         Array.Copy(response, offset, pass, 0, 10);
         int len = 0;
         while (len < pass.Length && pass[len] != 0) len++;
-        string password = System.Text.Encoding.ASCII.GetString(pass, 0, len);
-        Console.WriteLine($"Password: {password}");
+        string pw = System.Text.Encoding.ASCII.GetString(pass, 0, len);
+        return string.IsNullOrEmpty(pw) ? "(empty)" : pw;
     }
 
     /// <summary>
-    /// Writes a new PLC protection password using raw PCCC (hidden feature).
-    /// Works on MicroLogix 1100/1200/1400.
-    /// Uses FNC=0xAA (Protected Typed Logical Write) with address file=0x0A,
-    /// type=0, element=0x000B, sub-element determined by processor type.
-    /// Password is written as 10 bytes (null-padded).
+    /// Writes a password to the given element offset (0x0B or 0x10).
     /// </summary>
-    private static void HandleSetPassword(Comm.PCCCComm pccc, string[] parts)
+    private static bool WritePassword(Comm.PCCCComm pccc, int element, string pass, string label)
     {
-        if (parts.Length < 2)
+        // If pass null/empty -> write 10 byte null
+        byte[] data = new byte[10];
+        if (!string.IsNullOrEmpty(pass))
         {
-            Console.WriteLine("Usage: setpass <new_password>");
-            Console.WriteLine("  Password must be numeric and <= 10 characters.");
-            return;
-        }
-        string pass = parts[1];
-        if (pass.Length > 10 || !pass.All(char.IsDigit))
-        {
-            Console.WriteLine("Invalid password. Must be numeric and <= 10 characters.");
-            return;
-        }
-
-        int procType = pccc.GetProcessorType();
-        byte subElem;
-        if (procType == 0x9C)          // ML1100
-            subElem = 0x02;
-        else if (procType == 0x9F ||    // ML1400 Series B
-                procType == 0xA0 ||    // ML1200
-                procType == 0xA2)      // ML1400 Series A
-            subElem = 0x03;
-        else
-        {
-            Console.WriteLine($"Unsupported processor type 0x{procType:X2}");
-            return;
+            if (pass.Length > 10 || !pass.All(char.IsDigit))
+            {
+                Console.WriteLine("Invalid password. Must be numeric and <= 10 characters.");
+                return false;
+            }
+            byte[] passBytes = System.Text.Encoding.ASCII.GetBytes(pass);
+            Array.Copy(passBytes, 0, data, 0, passBytes.Length);
         }
 
-        // Build PDU: DST, SRC, CMD, STS, TNS(2), FNC, ADDR(5), DATA(10)
+        // Send 10 byte data
+        byte subElem = GetSubElement(pccc);
+        if (subElem == 0xFF) return false;
+
         byte[] pdu = new byte[22];
         pdu[0] = (byte)pccc.TargetNode;
         pdu[1] = (byte)pccc.MyNode;
         pdu[2] = 0x0F;
         pdu[3] = 0x00;
-        pdu[4] = 0x00; pdu[5] = 0x00; // TNS auto-filled
-        pdu[6] = 0xAA; // FNC
+        pdu[4] = 0x00; pdu[5] = 0x00;
+        pdu[6] = 0xAA;
+        pdu[7] = 0x0A;
+        pdu[8] = 0x00;
+        pdu[9] = subElem;
+        pdu[10] = (byte)(element & 0xFF);
+        pdu[11] = (byte)((element >> 8) & 0xFF);
+        Array.Copy(data, 0, pdu, 12, 10);
 
-        // Address: 0A 00 <sub> 0B 00
-        pdu[7]  = 0x0A;
-        pdu[8]  = 0x00;
-        pdu[9]  = subElem;
-        pdu[10] = 0x0B;
-        pdu[11] = 0x00;
-
-        // Password data (10 bytes, null-padded)
-        byte[] passBytes = System.Text.Encoding.ASCII.GetBytes(pass);
-        Array.Copy(passBytes, 0, pdu, 12, passBytes.Length);
-        // Bytes 12+passBytes.Length ... 21 are already zero
-
-        WriteHex("      TX:", pdu, pdu.Length);
-
+        WriteHex($"      TX:", pdu, pdu.Length);
         var (status, response, _) = pccc.SendRawPduAndGetResponse(pdu);
-
-        if (response != null)
-            WriteHex("      RX:", response, response.Length);
+        if (response != null) WriteHex($"      RX:", response, response.Length);
 
         if (status != 0)
         {
-            Console.WriteLine($"Failed to write password (STS=0x{status:X2})");
-            return;
+            Console.WriteLine($"Failed to write {label} (STS=0x{status:X2})");
+            return false;
         }
 
-        Console.WriteLine("Password written. Verifying...");
-        HandleGetPassword(pccc);
+        Console.WriteLine($"{label} written. Verifying...");
+        string readBack = ReadPassword(pccc, element, label);
+        Console.WriteLine($"{label}: {readBack}");
+        return true;
+    }
+
+    /// <summary>
+    /// Determines sub‑element based on processor type.
+    /// Returns 0xFF if unsupported.
+    /// </summary>
+    private static byte GetSubElement(Comm.PCCCComm pccc)
+    {
+        int procType = pccc.GetProcessorType();
+        if (procType == 0x9C)          // ML1100
+            return 0x02;
+        else if (procType == 0x9F || procType == 0xA0 || procType == 0xA2)
+            return 0x03;
+        else
+        {
+            Console.WriteLine($"Unsupported processor type 0x{procType:X2}");
+            return 0xFF;
+        }
     }
 
 // =============================================================================
