@@ -8,6 +8,7 @@
     <!-- Compiled bindings require x:DataType on every root element that uses them -->
     <AvaloniaUseCompiledBindings>true</AvaloniaUseCompiledBindings>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <RuntimeIdentifiers>win-x64;linux-x64;osx-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>

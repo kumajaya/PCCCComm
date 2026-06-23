@@ -1,0 +1,169 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create GitHub Release?'
+        required: true
+        default: false
+        type: boolean
+      tag_name:
+        description: 'Tag name for release (e.g. v1.0.0)'
+        required: false
+        type: string
+      release_name:
+        description: 'Release title (optional)'
+        required: false
+        type: string
+      prerelease:
+        description: 'Mark as pre-release?'
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        project:
+          - name: Example
+            csproj: src/Example/Example.csproj
+            base_output: PCCCExample
+          - name: Emulator
+            csproj: src/PCCCEmulator/PCCCEmulator.csproj
+            base_output: PCCCEmulator
+          - name: ImageTool
+            csproj: src/PCCCImageTool/PCCCImageTool.csproj
+            base_output: PCCCImageTool
+        runtime: [win-x64, linux-x64, osx-x64]
+        include:
+          - runtime: win-x64
+            ext: .exe
+          - runtime: linux-x64
+            ext: ''
+          - runtime: osx-x64
+            ext: ''
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore PCCCComm.sln
+
+      - name: Publish project (self-contained single-file)
+        run: |
+          dotnet publish ${{ matrix.project.csproj }} \
+            --configuration Release \
+            --runtime ${{ matrix.runtime }} \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:EnableCompressionInSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -o ./publish/${{ matrix.project.name }}/${{ matrix.runtime }}
+
+      - name: Debug - list published files
+        run: |
+          echo "Contents of ./publish/${{ matrix.project.name }}/${{ matrix.runtime }}:"
+          ls -la ./publish/${{ matrix.project.name }}/${{ matrix.runtime }}
+
+      - name: Rename and zip output
+        shell: bash
+        run: |
+          publish_dir="./publish/${{ matrix.project.name }}/${{ matrix.runtime }}"
+          target="${{ matrix.project.base_output }}${{ matrix.ext }}"
+          zip_name="${{ matrix.project.base_output }}-${{ matrix.runtime }}.zip"
+
+          cd "$publish_dir"
+
+          # Rename executable
+          if [ ! -f "$target" ]; then
+            possible_names=(
+              "${{ matrix.project.name }}${{ matrix.ext }}"
+              "Program${{ matrix.ext }}"
+            )
+            renamed=false
+            for name in "${possible_names[@]}"; do
+              if [ -f "$name" ]; then
+                echo "Renaming $name to $target"
+                mv "$name" "$target"
+                renamed=true
+                break
+              fi
+            done
+
+            if [ "$renamed" = false ]; then
+              first_file=$(ls -1 | grep -vE '\.(dll|pdb|json|xml|so|dylib)$' | head -n 1)
+              if [ -n "$first_file" ]; then
+                echo "Fallback: renaming $first_file to $target"
+                mv "$first_file" "$target"
+              else
+                echo "ERROR: No executable found in $(pwd)"
+                ls -la
+                exit 1
+              fi
+            fi
+          else
+            echo "File already named correctly: $target"
+          fi
+
+          # Zip dari dalam folder publish, simpan di workspace root
+          cd "$GITHUB_WORKSPACE"
+          zip -r "$zip_name" "./publish/${{ matrix.project.name }}/${{ matrix.runtime }}/"
+          echo "Created: $GITHUB_WORKSPACE/$zip_name"
+          ls -lh "$zip_name"
+
+      - name: Upload artifact (zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.project.base_output }}-${{ matrix.runtime }}
+          path: ${{ github.workspace }}/${{ matrix.project.base_output }}-${{ matrix.runtime }}.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: github.event.inputs.create_release == 'true'
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: List downloaded files (debug)
+        run: |
+          echo "Contents of ./artifacts:"
+          find ./artifacts -type f | sort
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            echo "tag=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=build-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ github.event.inputs.release_name || steps.tag.outputs.tag }}
+          draft: false
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          # Glob semua zip dari semua artifact subdirectories
+          files: ./artifacts/**/*.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
