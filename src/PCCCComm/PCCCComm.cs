@@ -631,8 +631,8 @@ public class PCCCComm : IDisposable, IHandlerContext
             _currentTransport = null;
         }
         _handler = null; // handler also depends on protocol and transport
-        _processorFamily = PCCCConstants.ProcessorFamily.Unknown;
-        _processorType = 0;
+        // _processorFamily and _processorType are NOT reset —
+        // The hardware is unchanged, so re-detection is not required upon reconnection.
     }
 
     public int DetectCommSettings()

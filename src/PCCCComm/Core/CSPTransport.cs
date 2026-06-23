@@ -187,6 +187,7 @@ public class CSPTransport : ITransport
         try
         {
             _tcp = new TcpClient();
+            _tcp.NoDelay = true;  // Disable Nagle algorithm
             var connectTask = _tcp.ConnectAsync(_host, _port);
             if (!connectTask.Wait(_connectTimeoutMs))
             {
