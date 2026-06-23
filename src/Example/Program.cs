@@ -1421,6 +1421,13 @@ class Program
                         HandleWordWrite(pccc, parts);
                         break;
 
+                    case "getpass":
+                        HandleGetPassword(pccc);
+                        break;
+                    case "setpass":
+                        HandleSetPassword(pccc, parts);
+                        break;
+
                     default:
                         Console.WriteLine($"Unknown command '{cmd}'. Type 'help' for list.");
                         break;
@@ -2352,6 +2359,137 @@ class Program
         val = pccc.ReadAny("B3:1");
         ok = int.TryParse(val, out intVal) && intVal == 4;
         TestResult("RMW clear bit 0 → value 4 (bit2 only)", ok, ok ? "" : $"got {val}");
+    }
+
+    // ─── Hidden Password Commands ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Reads the PLC protection password using raw PCCC (hidden feature).
+    /// Works on MicroLogix 1100/1200/1400.
+    /// Uses FNC=0xA2 (Protected Typed Logical Write) with address 0x0A:0:0x000B:0
+    /// and no byte count (PLC returns 10 bytes).
+    /// </summary>
+    private static void HandleGetPassword(Comm.PCCCComm pccc)
+    {
+        byte[] pdu = new byte[11];
+        pdu[0] = (byte)pccc.TargetNode;
+        pdu[1] = (byte)pccc.MyNode;
+        pdu[2] = 0x0F;
+        pdu[3] = 0x00;
+        pdu[4] = 0x00; pdu[5] = 0x00;
+        pdu[6] = 0xA1;
+        pdu[7] = 0x0A; pdu[8] = 0x00; pdu[9] = 0x00; pdu[10] = 0x0B;
+
+        WriteHex("      TX:", pdu, pdu.Length);
+
+        var (status, response, _) = pccc.SendRawPduAndGetResponse(pdu);
+
+        if (response != null)
+            WriteHex("      RX:", response, response.Length);
+
+        if (status != 0 || response == null || response.Length < 6)
+        {
+            Console.WriteLine($"Failed to read password (status=0x{status:X2})");
+            return;
+        }
+
+        int offset = 0;
+        if (response.Length >= 6 && response[2] == 0x4F)
+        {
+            if (response[3] != 0)
+            {
+                Console.WriteLine($"STS error: 0x{response[3]:X2}");
+                return;
+            }
+            offset = 6;
+        }
+
+        if (response.Length < offset + 10)
+        {
+            Console.WriteLine($"Not enough data: {response.Length} bytes");
+            return;
+        }
+
+        byte[] pass = new byte[10];
+        Array.Copy(response, offset, pass, 0, 10);
+        int len = 0;
+        while (len < pass.Length && pass[len] != 0) len++;
+        string password = System.Text.Encoding.ASCII.GetString(pass, 0, len);
+        Console.WriteLine($"Password: {password}");
+    }
+
+    /// <summary>
+    /// Writes a new PLC protection password using raw PCCC (hidden feature).
+    /// Works on MicroLogix 1100/1200/1400.
+    /// Uses FNC=0xAA (Protected Typed Logical Write) with address file=0x0A,
+    /// type=0, element=0x000B, sub-element determined by processor type.
+    /// Password is written as 10 bytes (null-padded).
+    /// </summary>
+    private static void HandleSetPassword(Comm.PCCCComm pccc, string[] parts)
+    {
+        if (parts.Length < 2)
+        {
+            Console.WriteLine("Usage: setpass <new_password>");
+            Console.WriteLine("  Password must be numeric and <= 10 characters.");
+            return;
+        }
+        string pass = parts[1];
+        if (pass.Length > 10 || !pass.All(char.IsDigit))
+        {
+            Console.WriteLine("Invalid password. Must be numeric and <= 10 characters.");
+            return;
+        }
+
+        int procType = pccc.GetProcessorType();
+        byte subElem;
+        if (procType == 0x9C)          // ML1100
+            subElem = 0x02;
+        else if (procType == 0x9F ||    // ML1400 Series B
+                procType == 0xA0 ||    // ML1200
+                procType == 0xA2)      // ML1400 Series A
+            subElem = 0x03;
+        else
+        {
+            Console.WriteLine($"Unsupported processor type 0x{procType:X2}");
+            return;
+        }
+
+        // Build PDU: DST, SRC, CMD, STS, TNS(2), FNC, ADDR(5), DATA(10)
+        byte[] pdu = new byte[22];
+        pdu[0] = (byte)pccc.TargetNode;
+        pdu[1] = (byte)pccc.MyNode;
+        pdu[2] = 0x0F;
+        pdu[3] = 0x00;
+        pdu[4] = 0x00; pdu[5] = 0x00; // TNS auto-filled
+        pdu[6] = 0xAA; // FNC
+
+        // Address: 0A 00 <sub> 0B 00
+        pdu[7]  = 0x0A;
+        pdu[8]  = 0x00;
+        pdu[9]  = subElem;
+        pdu[10] = 0x0B;
+        pdu[11] = 0x00;
+
+        // Password data (10 bytes, null-padded)
+        byte[] passBytes = System.Text.Encoding.ASCII.GetBytes(pass);
+        Array.Copy(passBytes, 0, pdu, 12, passBytes.Length);
+        // Bytes 12+passBytes.Length ... 21 are already zero
+
+        WriteHex("      TX:", pdu, pdu.Length);
+
+        var (status, response, _) = pccc.SendRawPduAndGetResponse(pdu);
+
+        if (response != null)
+            WriteHex("      RX:", response, response.Length);
+
+        if (status != 0)
+        {
+            Console.WriteLine($"Failed to write password (STS=0x{status:X2})");
+            return;
+        }
+
+        Console.WriteLine("Password written. Verifying...");
+        HandleGetPassword(pccc);
     }
 
 // =============================================================================
