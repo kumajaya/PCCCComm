@@ -109,9 +109,10 @@ class Program
             // before any read or write operations are attempted.
             bool nodeOk = VerifyTargetNode(pccc, cfg);
 
-            // Run the quick demo unless the user asked to skip it, or the node
-            // verification failed (no point running a demo against a silent bus).
-            if (nodeOk && !cfg.InteractiveOnly)
+            // Run the quick demo only when explicitly requested via --demo,
+            // and only when the target node is confirmed reachable.
+            // Demo is opt-in because it performs writes to N7, F8, B3, and ST18.
+            if (nodeOk && cfg.RunDemo)
                 RunDemo(pccc);
 
             // Scan DF1/RS-485 nodes if requested via --scan-nodes.
@@ -174,6 +175,7 @@ class Program
         public string Checksum           { get; init; } = "crc";
         public bool   InteractiveOnly    { get; init; } = false;
         public bool   NoInteractive      { get; init; } = false;
+        public bool   RunDemo            { get; init; } = false;
         public bool   StressTest         { get; init; } = false;
         public int    StressLoopCount    { get; init; } = 0; // 0 = infinite
         public bool   ScanNodes         { get; init; } = false;
@@ -210,6 +212,7 @@ class Program
         string checksum           = "crc";
         bool   interactiveOnly    = false;
         bool   noInteractive      = false;
+        bool   runDemo            = false;
         bool   stressTest         = false;
         int    stressLoopCount    = 0;
         bool   scanNodes          = false;
@@ -248,6 +251,7 @@ class Program
                 case "--rs485-assert-delay"   when i + 1 < args.Length: if (int.TryParse(args[++i], out var ad)) rs485AssertDelay   = ad; break;
                 case "--rs485-deassert-delay" when i + 1 < args.Length: if (int.TryParse(args[++i], out var dd)) rs485DeassertDelay = dd; break;
                 case "--echo-suppression":  echoSuppression = true; break;
+                case "--demo":              runDemo         = true; break;
                 case "--interactive-only":  interactiveOnly = true; break;
                 case "--no-interactive":    noInteractive   = true; break;
                 case "--stress-test":
@@ -303,6 +307,7 @@ class Program
             Checksum           = checksum,
             InteractiveOnly    = interactiveOnly,
             NoInteractive      = noInteractive,
+            RunDemo            = runDemo,
             StressTest         = stressTest,
             StressLoopCount    = stressLoopCount,
             ScanNodes          = scanNodes,
@@ -496,11 +501,9 @@ class Program
             // Offer interactive mode so the user can run scannodes without
             // restarting the process. Return false so the demo is skipped.
             if (!cfg.NoInteractive)
-            {
                 Console.WriteLine("  Entering interactive CLI so you can run 'scannodes' or 'exit'.");
-                Console.WriteLine();
-            }
 
+            Console.WriteLine();
             return false;
         }
         catch (Exception ex)
@@ -946,6 +949,7 @@ class Program
         0x88 => "MicroLogix 1000",
         0x89 => "MicroLogix 1000 (series C)",
         0x9C => "MicroLogix 1100",
+        0x9F => "MicroLogix 1400 (series B)",
         0xA0 => "MicroLogix 1200",
         0xA2 => "MicroLogix 1400",
         0x31 => "SLC 5/02",
@@ -1134,7 +1138,7 @@ class Program
     /// </summary>
     private static void HandleWordRead(Comm.PCCCComm pccc, string[] parts)
     {
-        if (parts.Length < 5)
+        if (parts.Length < 6)
         {
             Console.WriteLine("Usage: wordread <fileType> <fileNumber> <element> <wordOffset> <sizeWords>");
             Console.WriteLine("  fileType : N, F, B, T, C, ST, etc. (case-insensitive)");
@@ -1159,7 +1163,7 @@ class Program
         // Map file type letter to PLC-5 file type code (per 1770-6.5.16 Table 13-1)
         int fileTypeCode = Plc5FileTypeCode(fileTypeStr);
 
-        if (fileTypeCode == 0 && fileTypeStr != "0")
+        if (fileTypeCode == -1)
         {
             Console.WriteLine($"Unknown file type: {fileTypeStr}");
             return;
@@ -1235,7 +1239,7 @@ class Program
         // Map file type
         int fileTypeCode = Plc5FileTypeCode(fileTypeStr);
 
-        if (fileTypeCode == 0 && fileTypeStr != "0")
+        if (fileTypeCode == -1)
         {
             Console.WriteLine($"Unknown file type: {fileTypeStr}");
             return;
@@ -1262,7 +1266,7 @@ class Program
         "T"  => 0x04, "C"  => 0x05, "R"  => 0x06, "N"  => 0x07,
         "F"  => 0x08, "D"  => 0x09, "ST" => 0x0A, "A"  => 0x0B,
         "L"  => 0x0C, "MG" => 0x0D, "PD" => 0x0E, "PLS"=> 0x0F,
-        _    => 0x00
+        _    => -1   // sentinel: unknown file type
     };
 
 // =============================================================================
@@ -1421,6 +1425,9 @@ class Program
                         HandleWordWrite(pccc, parts);
                         break;
 
+                    // ── Hidden commands (intentionally omitted from help output) ─────
+                    // Password manipulation via raw PCCC PDU — dangerous on a live PLC.
+                    // Only supported on MicroLogix 1100 / 1200 / 1400 (series B and later).
                     case "getpass":
                         HandleGetPassword(pccc);
                         break;
@@ -2222,7 +2229,18 @@ class Program
         }
     }
 
-     // ── Test group 12: Initialize Memory ────────────────────────────────────
+    // ── Test group 12: Initialize Memory ─────────────────────────────────────
+
+    /// <summary>
+    /// Verifies that the Initialize Memory command (CMD=0x0F FNC=0x57) resets
+    /// all data file contents to their power-up defaults.
+    ///
+    /// The test writes known values to N7:3 and ST18:2, sends the raw FNC=0x57
+    /// PDU, then reads back both addresses and confirms they have been zeroed.
+    ///
+    /// Only meaningful against the PCCCEmulator; on a real PLC this command
+    /// clears the entire data table — do not run on a live system.
+    /// </summary>
     private static void SelfTest_InitializeMemory(Comm.PCCCComm pccc)
     {
         Console.WriteLine("── Initialize Memory Test ─────────────────────────");
@@ -2258,15 +2276,26 @@ class Program
         }
 
         // Read back using public ReadAny
-        string n7val = pccc.ReadAny("N7:3");
-        string st18val = pccc.ReadAny("ST18:2");
-        bool n7ok = n7val == "0";
+        string? n7val   = TryTest(() => pccc.ReadAny("N7:3"),   out string e3);
+        string? st18val = TryTest(() => pccc.ReadAny("ST18:2"), out string e4);
+        bool n7ok   = n7val   == "0";
         bool st18ok = st18val == "";
-        TestResult("N7:3 reset to 0 after InitializeMemory", n7ok, n7ok ? "" : $"got {n7val}");
-        TestResult("ST18:2 reset to empty after InitializeMemory", st18ok, st18ok ? "" : $"got {st18val}");
+        TestResult("N7:3 reset to 0 after InitializeMemory",        n7ok,   n7ok   ? "" : $"got '{n7val   ?? e3}'");
+        TestResult("ST18:2 reset to empty after InitializeMemory",  st18ok, st18ok ? "" : $"got '{st18val ?? e4}'");
     }
 
-    // ── Test group 13: Link Parameters (DH485) ──────────────────────────────
+    // ── Test group 13: Link Parameters (DH485) ───────────────────────────────
+
+    /// <summary>
+    /// Verifies that Read Link Parameters (CMD=0x06 FNC=0x09) and
+    /// Set Link Parameters (CMD=0x06 FNC=0x0A) work correctly.
+    ///
+    /// The test reads the default max-node value (expected: 31), sets it to 15,
+    /// then reads back to confirm the change was accepted.
+    ///
+    /// Response layout: [DST SRC CMD STS TNS_LO TNS_HI | data...]
+    /// The max-node byte is at data offset 0 (response[6]).
+    /// </summary>
     private static void SelfTest_LinkParameters(Comm.PCCCComm pccc)
     {
         Console.WriteLine("── Link Parameters Test ───────────────────────────");
@@ -2276,7 +2305,7 @@ class Program
         
         byte defaultMax = 0;
         bool readOk = status == 0 && response != null && response.Length >= 7;
-        if (readOk&& response != null)
+        if (readOk && response != null)
         {
             // Response inner frame: DST,SRC,CMD,STS,TNS,FUNC?,DATA
             // For CMD 0x06 reply without FUNC byte? Actually GetStatus responses have no FUNC, but Read Link Params may have.
@@ -2316,7 +2345,21 @@ class Program
         return pdu;
     }
 
-    // ── Test group 14: Read-Modify-Write (FNC 0x26) ─────────────────────────
+    // ── Test group 14: Read-Modify-Write (FNC 0x26) ──────────────────────────
+
+    /// <summary>
+    /// Verifies the Read-Modify-Write command (CMD=0x0F FNC=0x26) which
+    /// atomically applies an AND mask followed by an OR mask to a word in
+    /// the binary (B3) file without disturbing adjacent words.
+    ///
+    /// Payload layout: fileNumber(1) fileType(1) element(1) subElement(1)
+    ///                 andMask_lo(1) andMask_hi(1) orMask_lo(1) orMask_hi(1)
+    ///
+    /// Test sequence:
+    ///   1. Clear B3:1 to 0x0000.
+    ///   2. RMW: AND=0xFFFF OR=0x0005 → set bits 0 and 2 → expect 5.
+    ///   3. RMW: AND=0xFFFE OR=0x0000 → clear bit 0 → expect 4 (bit 2 only).
+    /// </summary>
     private static void SelfTest_ReadModifyWrite(Comm.PCCCComm pccc)
     {
         Console.WriteLine("── Read-Modify-Write Test ─────────────────────────");
@@ -2335,9 +2378,7 @@ class Program
         // Build RMW request: set bits 0 and 2 (OR mask 0x0005, AND mask 0xFFFF)
         // Payload: fileNumber(1), fileType(1), element(1), subElement(1), andMask(2), orMask(2)
         byte[] payload = new byte[8];
-        payload[0] = 1;     // fileNumber = 1 (B3:1 element 1? Wait B3:1 is file 3, element 1. File number is 3? Let's correct: B3:1 = fileType 0x85, fileNumber 3, element 1)
-        // Actually B3 file number is 3. So fileNumber = 3
-        payload[0] = 3;
+        payload[0] = 3;     // fileNumber = 3 (B3 = binary file 3)
         payload[1] = 0x85;  // fileType Binary
         payload[2] = 1;     // element = 1
         payload[3] = 0;     // subElement = 0
@@ -2360,9 +2401,9 @@ class Program
         TestResult("RMW returns status 0", status == 0, status != 0 ? $"status {status}" : "");
 
         // Read back using public ReadAny
-        string val = pccc.ReadAny("B3:1");
+        string? val = TryTest(() => pccc.ReadAny("B3:1"), out string re1);
         bool ok = int.TryParse(val, out int intVal) && intVal == 5;
-        TestResult("RMW set bits 0 and 2 → value 5", ok, ok ? "" : $"got {val}");
+        TestResult("RMW set bits 0 and 2 → value 5", ok, ok ? "" : $"got '{val ?? re1}'");
 
         // Now clear bit 0: AND mask 0xFFFE, OR mask 0
         payload[4] = 0xFE; // andMask low
@@ -2373,9 +2414,9 @@ class Program
         var (status2, _, _) = pccc.SendRawPduAndGetResponse(pdu);
         TestResult("RMW clear returns status 0", status2 == 0, status2 != 0 ? $"status {status2}" : "");
 
-        val = pccc.ReadAny("B3:1");
+        val = TryTest(() => pccc.ReadAny("B3:1"), out string re2);
         ok = int.TryParse(val, out intVal) && intVal == 4;
-        TestResult("RMW clear bit 0 → value 4 (bit2 only)", ok, ok ? "" : $"got {val}");
+        TestResult("RMW clear bit 0 → value 4 (bit2 only)", ok, ok ? "" : $"got '{val ?? re2}'");
     }
 
     // ─── Hidden Password Commands ─────────────────────────────────────────────
@@ -2719,15 +2760,18 @@ class Program
         Console.WriteLine("  --rs485-deassert-delay <ms>  Delay before RTS deassert (default: 5)");
         Console.WriteLine();
         Console.WriteLine("Behaviour:");
-        Console.WriteLine("  --interactive-only           Skip demo, go straight to CLI");
-        Console.WriteLine("  --no-interactive             Run demo only, then exit");
+        Console.WriteLine("  --demo                       Run read/write demo before interactive CLI");
+        Console.WriteLine("                               (opt-in: demo writes to N7, F8, B3, ST18)");
+        Console.WriteLine("  --interactive-only           (deprecated — interactive mode is now default)");
+        Console.WriteLine("  --no-interactive             Skip interactive CLI (use with --demo, --stress-test, etc.)");
         Console.WriteLine("  --stress-test [n]            Stress test; n = iterations (0=infinite)");
         Console.WriteLine("  --scan-nodes [from] [to]     Scan DF1 node range (default 1–31)");
         Console.WriteLine("  --help, -h                   Show this help");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run -- COM1");
-        Console.WriteLine("  dotnet run -- COM1 --interactive-only");
+        Console.WriteLine("  dotnet run -- COM1 --demo");
+        Console.WriteLine("  dotnet run -- COM1 --demo --no-interactive");
         Console.WriteLine("  dotnet run -- COM1 --stress-test 500");
         Console.WriteLine("  dotnet run -- COM1 --mode df1master --scan-nodes");
         Console.WriteLine("  dotnet run -- COM1 --mode df1master --scan-nodes 1 8");
