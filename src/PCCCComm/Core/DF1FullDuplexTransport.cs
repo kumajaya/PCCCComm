@@ -42,15 +42,19 @@ public class DF1FullDuplexTransport : DF1BaseTransport
     private const int FrameTimeoutMs = 500;      // Max time between DLE STX and DLE ETX
     private const int MaxBufferBytes = 4096;     // Safety limit
 
-    // --- ACK/NAK polling flags (used during SendFrame) ---
+    // --- ACK/NAK signalling (SendFrame waits on this event) ---
+    // ManualResetEventSlim replaces the previous 20 ms tick-polling loop:
+    // the receive thread sets the event as soon as ACK or NAK arrives,
+    // so SendFrame wakes up immediately rather than up to 20 ms late.
+    private readonly ManualResetEventSlim _ackNakEvent = new ManualResetEventSlim(false);
     private volatile bool _ackReceived;
     private volatile bool _nakReceived;
 
-    // --- ENQ polling flags (used by auto-detect) ---
+    // --- ENQ signalling (SendEnqAndWaitForAck uses this event) ---
+    private readonly ManualResetEventSlim _enqEvent = new ManualResetEventSlim(false);
     private volatile bool _ackFlagForEnq;
     private volatile bool _nakFlagForEnq;
 
-    private int _ackWaitTicks = 0;
     private bool _lastResponseWasNAK = false;
 
     /// <summary>
@@ -86,23 +90,26 @@ public class DF1FullDuplexTransport : DF1BaseTransport
         int retries = 0;
         const int maxRetries = 2;
 
+        // Timeout in ms derived from MaxTicks (each tick was 20 ms in the old loop).
+        int timeoutMs = MaxTicks * 20;
+
         while (retries < maxRetries)
         {
             _ackReceived = false;
             _nakReceived = false;
+            _ackNakEvent.Reset();
 
+            // SleepDelay is applied before writing (not after receiving ACK).
+            // The original code slept inside the receive-thread lock after ACK — that
+            // blocked the serial port reader. Sleeping here on the send thread is equivalent
+            // for flow control purposes and does not block incoming bytes.
             if (SleepDelay > 0)
                 Thread.Sleep(SleepDelay);
 
             _port.Write(frame, 0, frame.Length);
 
-            // Poll for ACK/NAK using 20 ms ticks
-            _ackWaitTicks = 0;
-            while (!_ackReceived && !_nakReceived && _ackWaitTicks < MaxTicks)
-            {
-                Thread.Sleep(20);
-                _ackWaitTicks++;
-            }
+            // Wait for ACK or NAK — wakes immediately when the receive thread signals.
+            _ackNakEvent.Wait(timeoutMs);
 
             if (_ackReceived)
                 return;                     // Success
@@ -134,15 +141,12 @@ public class DF1FullDuplexTransport : DF1BaseTransport
 
         _ackFlagForEnq = false;
         _nakFlagForEnq = false;
+        _enqEvent.Reset();
 
         SendControl(ENQ);
 
-        int waitTicks = 0;
-        while (!_ackFlagForEnq && !_nakFlagForEnq && waitTicks < MaxTicks)
-        {
-            Thread.Sleep(20);
-            waitTicks++;
-        }
+        int timeoutMs = MaxTicks * 20;
+        _enqEvent.Wait(timeoutMs);
 
         if (_ackFlagForEnq) return 0;
         if (_nakFlagForEnq) return -2;
@@ -201,15 +205,20 @@ public class DF1FullDuplexTransport : DF1BaseTransport
 
                     if (ctrl == ACK)
                     {
-                        if (SleepDelay > 0) Thread.Sleep(SleepDelay);
+                        // Set flag first, then signal — SendFrame checks the flag
+                        // after Wait() returns, so order matters.
                         _ackReceived = true;
                         _ackFlagForEnq = true;
+                        _ackNakEvent.Set();
+                        _enqEvent.Set();
                     }
                     else if (ctrl == NAK)
                     {
                         _nakReceived = true;
                         _nakFlagForEnq = true;
                         _lastResponseWasNAK = true;
+                        _ackNakEvent.Set();
+                        _enqEvent.Set();
                     }
                     else if (ctrl == ENQ)
                     {
@@ -341,6 +350,8 @@ public class DF1FullDuplexTransport : DF1BaseTransport
     public override void Dispose()
     {
         _port.BytesReceived -= OnBytesReceived;
+        _ackNakEvent.Dispose();
+        _enqEvent.Dispose();
         base.Dispose();
     }
 }
