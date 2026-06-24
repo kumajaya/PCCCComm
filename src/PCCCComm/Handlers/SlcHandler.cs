@@ -67,6 +67,10 @@ public class SlcHandler : IPlcHandler
     
     private void OnFileProgress(PCCCComm.FileProgressEventArgs e)
     {
+        // Check for cancellation at each file boundary — natural checkpoint
+        // during long upload/download operations.
+        _context.CancellationToken.ThrowIfCancellationRequested();
+
         // Raise event only if progress changed by at least 5% or file completed
         int percent = (int)((double)e.TotalBytesTransferred / e.GrandTotalBytes * 100);
         if (percent != _lastFileProgressPercent && (percent % 5 == 0 || percent == 100))

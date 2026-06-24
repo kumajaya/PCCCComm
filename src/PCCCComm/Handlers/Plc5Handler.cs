@@ -70,6 +70,9 @@ public class Plc5Handler : IPlcHandler
 
     private void OnFileProgress(PCCCComm.FileProgressEventArgs e)
     {
+        // Check for cancellation at each file boundary.
+        _context.CancellationToken.ThrowIfCancellationRequested();
+
         int percent = (int)((double)e.TotalBytesTransferred / e.GrandTotalBytes * 100);
         if (percent != _lastFileProgressPercent && (percent % 5 == 0 || percent == 100))
         {

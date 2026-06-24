@@ -20,6 +20,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 using System;
+using System.Threading;
 
 namespace PCCCComm.Handlers;
 
@@ -42,4 +43,11 @@ public interface IHandlerContext
 
     /// <summary>Raises the file progress event for upload/download operations.</summary>
     void RaiseFileProgress(PCCCComm.FileProgressEventArgs e);
+
+    /// <summary>
+    /// Token used to cancel long-running bulk operations (upload, download).
+    /// Handlers should call <see cref="CancellationToken.ThrowIfCancellationRequested"/>
+    /// at each per-file checkpoint during transfer.
+    /// </summary>
+    CancellationToken CancellationToken { get; }
 }

@@ -21,6 +21,7 @@
 
 using System.Collections.ObjectModel;
 using System.Net.Http;
+using System.Threading;
 using System.Text;
 using System.Xml;
 using PCCCComm.Core;
@@ -39,11 +40,11 @@ public class PCCCComm : IDisposable, IHandlerContext
     private PCCCConstants.ProcessorFamily _processorFamily = PCCCConstants.ProcessorFamily.Unknown;
     private int _processorType;  // cached processor type from diagnostic status
 
-    // Written by the handler thread (SlcHandler/Plc5Handler) at the start and end of
-    // bulk upload/download; read by the transport receive thread in OnFrameReceived.
-    // volatile is correct here: single-bit flag with no compound operation, so
-    // Interlocked is not needed — volatile guarantees cross-thread visibility.
-    private volatile bool _disableEvent;
+    private volatile bool _disableEvent;            // suppress DataReceived during bulk transfers
+
+    // CancellationToken for the current bulk transfer (upload/download).
+    // Reset to None after the operation completes.
+    private CancellationToken _cancellationToken = CancellationToken.None;
 
     private ITransport? _currentTransport;
     private readonly string? _remoteHost;
@@ -227,6 +228,8 @@ public class PCCCComm : IDisposable, IHandlerContext
 
     void IHandlerContext.RaiseFileProgress(FileProgressEventArgs e)
     => FileProgress?.Invoke(this, e);
+
+    CancellationToken IHandlerContext.CancellationToken => _cancellationToken;
 
     int IHandlerContext.MyNode => MyNode;
     int IHandlerContext.TargetNode => TargetNode;
@@ -513,16 +516,30 @@ public class PCCCComm : IDisposable, IHandlerContext
 
     /// <summary>Uploads the entire program and data from the PLC.</summary>
     public Collection<PLCFileDetails> UploadProgramData()
+        => UploadProgramData(CancellationToken.None);
+
+    /// <summary>Uploads the entire program and data from the PLC.</summary>
+    /// <param name="cancellationToken">Token to cancel the operation between files.</param>
+    public Collection<PLCFileDetails> UploadProgramData(CancellationToken cancellationToken)
     {
         EnsureHandler();
-        return _handler!.UploadProgramData();
+        _cancellationToken = cancellationToken;
+        try   { return _handler!.UploadProgramData(); }
+        finally { _cancellationToken = CancellationToken.None; }
     }
 
     /// <summary>Downloads a program to the PLC.</summary>
     public void DownloadProgramData(Collection<PLCFileDetails> plcFiles)
+        => DownloadProgramData(plcFiles, CancellationToken.None);
+
+    /// <summary>Downloads a program to the PLC.</summary>
+    /// <param name="cancellationToken">Token to cancel the operation between files.</param>
+    public void DownloadProgramData(Collection<PLCFileDetails> plcFiles, CancellationToken cancellationToken)
     {
         EnsureHandler();
-        _handler!.DownloadProgramData(plcFiles);
+        _cancellationToken = cancellationToken;
+        try   { _handler!.DownloadProgramData(plcFiles); }
+        finally { _cancellationToken = CancellationToken.None; }
     }
 
     /// <summary>Returns the number of slots in the chassis.</summary>
@@ -760,6 +777,10 @@ public class PCCCComm : IDisposable, IHandlerContext
     }
 
     public int DetectCommSettings()
+        => DetectCommSettings(CancellationToken.None);
+
+    /// <param name="cancellationToken">Token to cancel between baud rate attempts.</param>
+    public int DetectCommSettings(CancellationToken cancellationToken)
     {
         CloseComms();
 
@@ -778,6 +799,7 @@ public class PCCCComm : IDisposable, IHandlerContext
         foreach (int baud in baudRates)
         {
             if (reply == 0 || portError) break;
+            cancellationToken.ThrowIfCancellationRequested();
             foreach (var parity in parities)
             {
                 if (reply == 0 || portError) break;
