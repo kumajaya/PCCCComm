@@ -181,16 +181,26 @@ public partial class EIPTransport : ILinkTransport, IDisposable
     // The Identity Object attributes here are from RSLinx EDS files.
 
     private const ushort EIP_VENDOR_ID    = 0x0001; // Rockwell Automation / Allen-Bradley
-    private const ushort EIP_DEVICE_TYPE  = 0x000C; // Communication Adapter
-    private const ushort EIP_PRODUCT_CODE = 0x00B2; // SLC-5/05 (1747-L553/C)
-    private const byte   EIP_REV_MAJOR    = 3;     // Firmware major revision
-    private const byte   EIP_REV_MINOR    = 9;      // Firmware minor revision
     private const uint   EIP_SERIAL_NUM   = 0x600DCAFE; // Emulator serial number
-    private const string EIP_PRODUCT_NAME = "1747-L553/C SLC-5/05";
 
-    // Identity attribute bytes, built once at type initialisation.
+    // SLC 5/05 identity (default — SLC/MicroLogix family)
+    private const ushort EIP_DEVICE_TYPE_SLC  = 0x000C; // Communication Adapter
+    private const ushort EIP_PRODUCT_CODE_SLC = 0x00B2; // SLC-5/05 (1747-L553/C)
+    private const byte   EIP_REV_MAJOR_SLC    = 3;
+    private const byte   EIP_REV_MINOR_SLC    = 9;
+    private const string EIP_PRODUCT_NAME_SLC = "1747-L553/C SLC-5/05";
+
+    // ML1400 identity (matches 1766-L32BWA Series B/C via EIP)
+    // DeviceType 0x000E = PLC, ProductCode 0x005A = 90 (from EDS file)
+    private const ushort EIP_DEVICE_TYPE_ML1400  = 0x000E; // Programmable Logic Controller
+    private const ushort EIP_PRODUCT_CODE_ML1400 = 0x005A; // MicroLogix 1400 (1766-L32)
+    private const byte   EIP_REV_MAJOR_ML1400    = 2;
+    private const byte   EIP_REV_MINOR_ML1400    = 8;
+    private const string EIP_PRODUCT_NAME_ML1400 = "1766-L32BWA";
+
+    // Identity attribute bytes — built per-instance (depends on EmulationFamily).
     // Shared by List Identity, Get Attributes All, and Get Attribute Single replies.
-    private static readonly byte[] s_identityData = BuildIdentityData();
+    internal readonly byte[] _identityData;
 
     // ── Vendor identification embedded in Execute PCCC Request ID ────────────
     //
@@ -201,6 +211,11 @@ public partial class EIPTransport : ILinkTransport, IDisposable
     private const uint   VENDOR_SERIAL_NUMBER = 0x21504345; // "!PCE" (ASCII)
 
     // ── ILinkTransport ────────────────────────────────────────────────────────
+
+    /// <summary>Product name string used in log messages.</summary>
+    internal string ProductName => _emulator.Family == PCCCEmulator.EmulationFamily.Ml1400
+        ? EIP_PRODUCT_NAME_ML1400
+        : EIP_PRODUCT_NAME_SLC;
 
     public string Name => "EIP";
 
@@ -216,8 +231,9 @@ public partial class EIPTransport : ILinkTransport, IDisposable
 
     public EIPTransport(PCCCEmulator emulator, int port = EIP_DEFAULT_PORT)
     {
-        _emulator = emulator ?? throw new ArgumentNullException(nameof(emulator));
-        _port     = port;
+        _emulator     = emulator ?? throw new ArgumentNullException(nameof(emulator));
+        _port         = port;
+        _identityData = BuildIdentityData(emulator.Family == PCCCEmulator.EmulationFamily.Ml1400);
     }
 
     public const int EIP_DEFAULT_PORT = 44818;
@@ -677,21 +693,27 @@ public partial class EIPTransport : ILinkTransport, IDisposable
     /// responses.  Constructed once at static initialisation to avoid
     /// repeated allocations.
     /// </summary>
-    private static byte[] BuildIdentityData()
+    private static byte[] BuildIdentityData(bool isMl1400)
     {
+        ushort deviceType  = isMl1400 ? EIP_DEVICE_TYPE_ML1400  : EIP_DEVICE_TYPE_SLC;
+        ushort productCode = isMl1400 ? EIP_PRODUCT_CODE_ML1400 : EIP_PRODUCT_CODE_SLC;
+        byte   revMajor    = isMl1400 ? EIP_REV_MAJOR_ML1400    : EIP_REV_MAJOR_SLC;
+        byte   revMinor    = isMl1400 ? EIP_REV_MINOR_ML1400    : EIP_REV_MINOR_SLC;
+        string productName = isMl1400 ? EIP_PRODUCT_NAME_ML1400 : EIP_PRODUCT_NAME_SLC;
+
         using var ms = new MemoryStream();
         using var w  = new BinaryWriter(ms);
 
         w.Write(EIP_VENDOR_ID);    // Attribute 1: Vendor ID          (UINT)
-        w.Write(EIP_DEVICE_TYPE);  // Attribute 2: Device Type         (UINT)
-        w.Write(EIP_PRODUCT_CODE); // Attribute 3: Product Code        (UINT)
-        w.Write(EIP_REV_MAJOR);    // Attribute 4: Revision — Major    (USINT)
-        w.Write(EIP_REV_MINOR);    // Attribute 4: Revision — Minor    (USINT)
+        w.Write(deviceType);       // Attribute 2: Device Type         (UINT)
+        w.Write(productCode);      // Attribute 3: Product Code        (UINT)
+        w.Write(revMajor);         // Attribute 4: Revision — Major    (USINT)
+        w.Write(revMinor);         // Attribute 4: Revision — Minor    (USINT)
         w.Write((ushort)0x0060);   // Attribute 5: Status              (WORD)  — Owned, no faults
         w.Write(EIP_SERIAL_NUM);   // Attribute 6: Serial Number       (UDINT)
 
         // Attribute 7: Product Name — SHORT_STRING (1-byte length prefix + chars).
-        byte[] nameBytes = Encoding.ASCII.GetBytes(EIP_PRODUCT_NAME);
+        byte[] nameBytes = Encoding.ASCII.GetBytes(productName);
         w.Write((byte)nameBytes.Length);
         w.Write(nameBytes);
         if ((nameBytes.Length % 2) != 0) w.Write((byte)0); // Pad to even byte boundary
@@ -711,7 +733,7 @@ public partial class EIPTransport : ILinkTransport, IDisposable
     /// <param name="senderContext">Sender Context bytes from request — echoed verbatim.</param>
     /// <param name="sessionHandle">EIP session handle; use 0 for UDP replies.</param>
     /// <param name="localEndpoint">Local endpoint (IP and port) for Socket Address field.</param>
-    private static byte[] BuildListIdentityResponse(ulong senderContext, uint sessionHandle, IPEndPoint localEndpoint)
+    internal byte[] BuildListIdentityResponse(ulong senderContext, uint sessionHandle, IPEndPoint localEndpoint)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
@@ -752,7 +774,7 @@ public partial class EIPTransport : ILinkTransport, IDisposable
         // ========================================================================
         // Part 3c: Identity Object Attributes
         // ========================================================================
-        w.Write(s_identityData);   // Vendor ID, Device Type, Product Code, etc.
+        w.Write(_identityData);    // Vendor ID, Device Type, Product Code, etc.
 
         // ========================================================================
         // Fix lengths

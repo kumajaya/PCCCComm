@@ -518,9 +518,9 @@ public sealed partial class EIPTransport
             }
             
             IPEndPoint localEndpoint = new IPEndPoint(_transport._cachedLocalAddress, _transport._port);
-            byte[] reply = BuildListIdentityResponse(context.SenderContext, _sessionHandle, localEndpoint);
+            byte[] reply = _transport.BuildListIdentityResponse(context.SenderContext, _sessionHandle, localEndpoint);
             await SendRawResponse(reply, reply.Length).ConfigureAwait(false);
-            Logger.Info(this, $"ListIdentity response sent ({EIP_PRODUCT_NAME})");
+            Logger.Info(this, $"ListIdentity response sent ({_transport.ProductName})");
         }
 
         /// <summary>
@@ -842,7 +842,7 @@ public sealed partial class EIPTransport
             w.Write((byte)0x00);       // Reserved
             w.Write(CIP_STATUS_OK);
             w.Write((byte)0x00);       // Additional status size = 0
-            w.Write(s_identityData);   // Identity attributes payload
+            w.Write(_transport._identityData);   // Identity attributes payload
 
             long dataEnd = ms.Position;
             ms.Seek(lenPos, SeekOrigin.Begin);

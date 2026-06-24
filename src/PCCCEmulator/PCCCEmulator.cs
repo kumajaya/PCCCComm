@@ -105,7 +105,8 @@ public class PCCCEmulator : IDisposable
     public enum EmulationFamily
     {
         SlcMicroLogix,   // default, type extender 0xEE, catalog "5/04"
-        Plc5             // processor type low nibble 0x?E (e.g., 0xBE), catalog "PLC-5"
+        Plc5,            // processor type low nibble 0x?E (e.g., 0xBE), catalog "PLC-5"
+        Ml1400           // MicroLogix 1400 (1766-LEC), processor type 0x9F
     }
 
     private EmulationFamily _family = EmulationFamily.SlcMicroLogix;
@@ -1765,7 +1766,21 @@ public class PCCCEmulator : IDisposable
         lock (_cacheLock)
         {
             if (_family == EmulationFamily.SlcMicroLogix)
+            {
                 _cachedGetStatusPayload[18] = mode;
+            }
+            else if (_family == EmulationFamily.Ml1400)
+            {
+                // ML1400 mode byte is at offset 28 in GetStatus response
+                // Mode values: 0x02 = RemoteRun, 0x00 = RemoteProg
+                _cachedGetStatusPayload[28] = mode switch
+                {
+                    (byte)ProcessorMode.RemoteRun  => 0x02,
+                    (byte)ProcessorMode.LocalRun   => 0x02,
+                    (byte)ProcessorMode.RemoteProg => 0x00,
+                    _ => 0x00
+                };
+            }
             else
             {
                 // For PLC-5, we update byte 0 according to the operating status
@@ -1810,13 +1825,10 @@ public class PCCCEmulator : IDisposable
     private byte[] BuildGetStatusPayload()
     {
         if (_family == EmulationFamily.Plc5)
-        {
             return BuildPlc5GetStatusPayload();
-        }
-        else
-        {
-            return BuildSlcGetStatusPayload();
-        }
+        if (_family == EmulationFamily.Ml1400)
+            return BuildMl1400GetStatusPayload();
+        return BuildSlcGetStatusPayload();
     }
 
     /// <summary>
@@ -1848,6 +1860,66 @@ public class PCCCEmulator : IDisposable
         payload[21] = 0x00;     // Program ID (high byte)
         payload[22] = 0x40;     // RAM size in Kbytes — 0x40 = 64 KB (1747-L542)
         payload[23] = 0x3F;     // Flags (no program owner, directory not corrupted)
+
+        return payload;
+    }
+
+    /// <summary>
+    /// Builds the 29-byte GetStatus payload for MicroLogix 1400 (1766-LEC).
+    ///
+    /// Byte layout derived from real hardware capture (1766-L32BWA Series C FRN 15.0):
+    ///   [0]    = 0x00  mode/status flags
+    ///   [1]    = 0xEE  type extender (SLC/ML family)
+    ///   [2]    = 0x34  extended interface type
+    ///   [3]    = 0x9F  processor type = ML1400
+    ///   [4]    = 0x23  series/revision byte
+    ///   [5-15] = "1766-LEC   " product name, space-padded to 11 bytes
+    ///   [16]   = 0x00  major error word low
+    ///   [17]   = 0x00  major error word high
+    ///   [18]   = 0x26  firmware revision (FRN)
+    ///   [19]   = 0x04  firmware revision minor
+    ///   [20]   = 0x71  flags
+    ///   [21]   = 0x43  flags
+    ///   [22]   = 0x9E  flags
+    ///   [23]   = 0xFC  flags
+    ///   [24-27]= reserved
+    ///   [28]   = mode  processor mode (0x02=RemoteRun, 0x00=RemoteProg)
+    /// </summary>
+    private byte[] BuildMl1400GetStatusPayload()
+    {
+        byte[] payload = new byte[29];
+
+        payload[0]  = 0x00;     // Mode/status flags
+        payload[1]  = 0xEE;     // Type extender (SLC/ML family)
+        payload[2]  = 0x34;     // Extended interface type
+        payload[3]  = 0x9F;     // Processor type = ML1400
+        payload[4]  = 0x23;     // Series/revision byte
+
+        // Product name "1766-LEC" space-padded to 11 bytes (bytes 5–15)
+        string catalog = "1766-LEC";
+        byte[] catBytes = System.Text.Encoding.ASCII.GetBytes(catalog);
+        Array.Copy(catBytes, 0, payload, 5, catBytes.Length);
+        for (int i = 5 + catBytes.Length; i < 16; i++) payload[i] = 0x20;
+
+        payload[16] = 0x00;     // Major error word low
+        payload[17] = 0x00;     // Major error word high
+        payload[18] = 0x26;     // Firmware revision (FRN 15.0 encoded as 0x26=38? empirical)
+        payload[19] = 0x04;     // Firmware revision minor
+        payload[20] = 0x71;     // Flags (empirical from capture)
+        payload[21] = 0x43;     // Flags
+        payload[22] = 0x9E;     // Flags
+        payload[23] = 0xFC;     // Flags
+        payload[24] = 0x00;     // Reserved
+        payload[25] = 0x00;     // Reserved
+        payload[26] = 0x00;     // Reserved
+        payload[27] = 0x00;     // Reserved
+        payload[28] = (byte)ProcessorModeValue switch
+        {
+            (byte)ProcessorMode.RemoteRun  => 0x02,
+            (byte)ProcessorMode.LocalRun   => 0x02,
+            (byte)ProcessorMode.RemoteProg => 0x00,
+            _ => 0x00
+        };
 
         return payload;
     }

@@ -158,8 +158,12 @@ class Program
             Logger.Always(null, $"CSP mode ignores serial port '{portName}'. Using Ethernet only.");
         }
 
-        PCCCEmulator.EmulationFamily emuFamily = family == "plc5" ? 
-            PCCCEmulator.EmulationFamily.Plc5 : PCCCEmulator.EmulationFamily.SlcMicroLogix;
+        PCCCEmulator.EmulationFamily emuFamily = family switch
+        {
+            "plc5"   => PCCCEmulator.EmulationFamily.Plc5,
+            "ml1400" => PCCCEmulator.EmulationFamily.Ml1400,
+            _        => PCCCEmulator.EmulationFamily.SlcMicroLogix
+        };
 
         // Create and start emulator
         using var emulator = new PCCCEmulator(portName, baud, parity, emulatorMode, eipPort, cspPort, emuFamily)
@@ -217,7 +221,7 @@ class Program
                 Console.WriteLine($"      Node ID   : {node}");
             }
             
-            Console.WriteLine($"      Family    : {(family == "plc5" ? "PLC-5" : "SLC/MicroLogix")}");
+            Console.WriteLine($"      Family    : {family switch { "plc5" => "PLC-5", "ml1400" => "MicroLogix 1400 (1766-LEC)", _ => "SLC/MicroLogix" }}");
             Console.WriteLine($"      Logging   : {(quietMode ? "Disabled (High Performance)" : "Enabled")}");
             Logger.Always(null, "Press Enter to stop.");
             Console.ReadLine();
@@ -242,7 +246,8 @@ class Program
         Console.WriteLine("  --node <n>                Emulator node ID (default 1)");
         Console.WriteLine("  --checksum <crc|bcc>      Checksum mode (default crc)");
         Console.WriteLine("  --mode <df1|df1slave|uic|eip|csp> Transport mode (default df1)");
-        Console.WriteLine("  --family <slc|plc5>       Emulation family (default slc). plc5 enables PLC-5 mode");
+        Console.WriteLine("  --family <slc|plc5|ml1400>       Emulation family (default slc)");
+        Console.WriteLine("                                   ml1400: impersonate MicroLogix 1400 (1766-LEC)");
         Console.WriteLine("  --rs485-mode <auto|rts|dtr>      RS-485 direction control (default auto)");
         Console.WriteLine("  --rts-assert-delay <ms>          Delay after enabling driver (default 1)");
         Console.WriteLine("  --rts-deassert-delay <ms>        Delay after last byte before disabling (default 5)");
@@ -258,11 +263,15 @@ class Program
         Console.WriteLine("  dotnet run -- --mode eip --port 44818");
         Console.WriteLine("  dotnet run -- COM2 --quiet                    # High performance mode");
         Console.WriteLine("  dotnet run -- COM2 --family plc5              # PLC-5 emulation mode");
+        Console.WriteLine("  dotnet run -- --mode eip --family ml1400      # MicroLogix 1400 emulation");
         Console.WriteLine();
         Console.WriteLine("Note: Disabling logging eliminates string allocations and");
         Console.WriteLine("      significantly improves throughput under high load.");
         Console.WriteLine();
-        Console.WriteLine("Transport Modes:");
+        Console.WriteLine("Emulation Families:");
+        Console.WriteLine("  slc      - SLC 5/04 / MicroLogix (default)");
+        Console.WriteLine("  plc5     - PLC-5 (1785-L40E)");
+        Console.WriteLine("  ml1400   - MicroLogix 1400 (1766-LEC, processor type 0x9F)");
         Console.WriteLine("  df1      - Serial DF1 full-duplex (default, fully implemented)");
         Console.WriteLine("  df1slave - Serial DF1 half-duplex slave (implemented)");
         Console.WriteLine("  uic      - DH485 via 1747-UIC (implemented)");
