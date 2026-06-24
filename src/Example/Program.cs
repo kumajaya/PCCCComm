@@ -181,6 +181,8 @@ class Program
         public bool   ScanNodes         { get; init; } = false;
         public int    ScanFrom          { get; init; } = 1;
         public int    ScanTo            { get; init; } = 31;
+        public string? WebUsername      { get; init; } = null;
+        public string? WebPassword      { get; init; } = null;
     }
 
     // =========================================================================
@@ -218,6 +220,8 @@ class Program
         bool   scanNodes          = false;
         int    scanFrom           = 1;
         int    scanTo             = 31;
+        string? webUsername       = null;
+        string? webPassword       = null;
 
         cfg = new Config(); // satisfy out parameter before early returns
 
@@ -238,7 +242,9 @@ class Program
                 case "--baud"    when i + 1 < args.Length: if (int.TryParse(args[++i], out var b))  baud       = b; break;
                 case "--target"  when i + 1 < args.Length: if (int.TryParse(args[++i], out var n))  targetNode = n; break;
                 case "--mynode"  when i + 1 < args.Length: if (int.TryParse(args[++i], out var mn)) myNode     = mn; break;
-                case "--host"    when i + 1 < args.Length: remoteHost = args[++i]; break;
+                case "--host"    when i + 1 < args.Length: remoteHost   = args[++i]; break;
+                case "--web-user"     when i + 1 < args.Length: webUsername  = args[++i]; break;
+                case "--web-password" when i + 1 < args.Length: webPassword  = args[++i]; break;
                 case "--eip-port" when i + 1 < args.Length: if (int.TryParse(args[++i], out var p)) eipPort   = p; break;
                 case "--csp-port" when i + 1 < args.Length: if (int.TryParse(args[++i], out var c)) cspPort   = c; break;
                 case "--timeout"  when i + 1 < args.Length: if (int.TryParse(args[++i], out var t)) timeoutMs = t; break;
@@ -313,6 +319,8 @@ class Program
             ScanNodes          = scanNodes,
             ScanFrom           = scanFrom,
             ScanTo             = scanTo,
+            WebUsername        = webUsername,
+            WebPassword        = webPassword,
         };
         return true;
     }
@@ -342,7 +350,7 @@ class Program
                 if (string.IsNullOrEmpty(cfg.RemoteHost))
                     throw new Exception("EIP mode requires --host <IP>");
 
-                pccc = Comm.PCCCComm.ForEip(cfg.RemoteHost, cfg.EipPort, cfg.TimeoutMs);
+                pccc = Comm.PCCCComm.ForEip(cfg.RemoteHost, cfg.EipPort, cfg.TimeoutMs, cfg.WebUsername, cfg.WebPassword);
                 pccc.TargetNode = cfg.TargetNode;
                 pccc.MyNode     = cfg.MyNode;
                 Console.WriteLine($"EIP: Connecting to {cfg.RemoteHost}:{cfg.EipPort} (timeout {cfg.TimeoutMs} ms)");
@@ -557,7 +565,7 @@ class Program
         Comm.DataFileDetails[]? files = Execute(() => pccc.GetDataMemory(), "GetDataMemory");
         if (files != null)
             foreach (var f in files)
-                Console.WriteLine($"  File {f.FileNumber,2}: Type=0x{f.FileType:X2}  Elements={f.NumberOfElements}");
+                Console.WriteLine($"  File {f.FileNumber,3}: Type={f.FileType,-4}  Elements={f.NumberOfElements}");
         else
             Console.WriteLine("  (Failed to retrieve data files)");
 
@@ -1258,6 +1266,43 @@ class Program
     }
 
     /// <summary>
+    /// Retrieves and displays the data file directory from the PLC.
+    /// For ML1400 via EIP: fetched from built-in web server (filelist.xml).
+    /// For SLC/ML other: read via PCCC GetDataMemory (FNC 0x26).
+    /// </summary>
+    private static void HandleDataMemory(Comm.PCCCComm pccc)
+    {
+        Comm.DataFileDetails[] files;
+        try
+        {
+            files = pccc.GetDataMemory();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"GetDataMemory failed: {ex.Message}");
+            return;
+        }
+
+        if (files.Length == 0)
+        {
+            Console.WriteLine("No data files found.");
+            return;
+        }
+
+        Console.WriteLine($"{"No",4}  {"Name",-6}  {"Type",-8}  {"Elements",8}");
+        Console.WriteLine(new string('-', 36));
+        int seq = 1;
+        foreach (var f in files)
+        {
+            string name = $"{f.FileType}{f.FileNumber}";
+            Console.WriteLine($"{seq,4}  {name,-6}  {f.FileType,-8}  {f.NumberOfElements,8}");
+            seq++;
+        }
+        Console.WriteLine(new string('-', 36));
+        Console.WriteLine($"  {files.Length} file(s) total.");
+    }
+
+    /// <summary>
     /// Translates a file type letter to PLC-5 wire file type code (1770-6.5.16 Table 13-1)
     /// </summary>
     private static int Plc5FileTypeCode(string letter) => letter switch
@@ -1423,6 +1468,14 @@ class Program
 
                     case "wordwrite":
                         HandleWordWrite(pccc, parts);
+                        break;
+
+                    // datamem
+                    // Lists all data files configured in the PLC.
+                    // For ML1400 via EIP: reads from built-in web server (filelist.xml).
+                    // For SLC/ML other: reads via PCCC GetDataMemory (FNC 0x26).
+                    case "datamem":
+                        HandleDataMemory(pccc);
                         break;
 
                     // ── Hidden commands (intentionally omitted from help output) ─────
@@ -2788,6 +2841,7 @@ class Program
         Console.WriteLine("  read <addr> [count]            Read one or more elements");
         Console.WriteLine("  write <addr> <val> [val...]    Write integer(s) to address");
         Console.WriteLine("  writestring <addr> <text>      Write string to ST file");
+        Console.WriteLine("  datamem                        List all data files in PLC");
         Console.WriteLine("  sendhex <DST> <CMD> <FNC> [data...]");
         Console.WriteLine("                                 Send raw PCCC PDU (hex bytes)");
         Console.WriteLine("  wordread <type> <num> <elem> <offset> <words>");

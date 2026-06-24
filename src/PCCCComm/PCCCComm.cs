@@ -20,7 +20,9 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 using System.Collections.ObjectModel;
+using System.Net.Http;
 using System.Text;
+using System.Xml;
 using PCCCComm.Core;
 using PCCCComm.Handlers;
 using PCCCComm.Pccc;
@@ -62,6 +64,15 @@ public class PCCCComm : IDisposable, IHandlerContext
     // PCCC engine
     private PCCCProtocol? _protocol;
     private IPlcHandler? _handler;
+
+    // ML1400 web server credentials for filelist.xml access.
+    // Default: administrator / ml1400 (factory default per AB documentation).
+    // Override via ForEip(..., webUsername, webPassword) if password has been changed.
+    private const string DefaultWebUsername = "administrator";
+    private const string DefaultWebPassword = "ml1400";
+
+    private readonly string _webUsername = DefaultWebUsername;
+    private readonly string _webPassword = DefaultWebPassword;
 
     // ─── Properties (exactly as original) ──────────────────────────────────
     public int MyNode { get; set; }
@@ -234,20 +245,36 @@ public class PCCCComm : IDisposable, IHandlerContext
         }
     }
 
-    private PCCCComm(NetworkTransportType networkType, string host, int port, int timeoutMs, byte lsapControlByte)
+    private PCCCComm(NetworkTransportType networkType, string host, int port, int timeoutMs, byte lsapControlByte, string? webUsername = null, string? webPassword = null)
     {
         _responseTimeoutMs = timeoutMs;
         _remoteHost = host;
         _remotePort = port;
         _networkType = networkType;
-        _lsapControlByte = lsapControlByte; // diabaikan kalau networkType == EIP
+        _lsapControlByte = lsapControlByte;
+        _webUsername = webUsername ?? DefaultWebUsername;
+        _webPassword = webPassword ?? DefaultWebPassword;
     }
 
     /// <summary>Creates a PCCCComm instance for EtherNet/IP communication.
     /// The connection is not opened automatically; call <see cref="OpenComms"/> to establish the session.
     /// </summary>
-    public static PCCCComm ForEip(string host, int port = 44818, int timeoutMs = 5000)
-        => new(NetworkTransportType.EIP, host, port, timeoutMs, lsapControlByte: 0x00);
+    /// <param name="host">IP address or hostname of the EIP device.</param>
+    /// <param name="port">EIP TCP port (default 44818).</param>
+    /// <param name="timeoutMs">Response timeout in milliseconds.</param>
+    /// <param name="webUsername">
+    /// Username for ML1400 built-in web server (used by GetDataMemory).
+    /// Defaults to "administrator" if not specified.
+    /// </param>
+    /// <param name="webPassword">
+    /// Password for ML1400 built-in web server (used by GetDataMemory).
+    /// Defaults to "ml1400" (factory default) if not specified.
+    /// Supply the actual password if it has been changed in RSLogix 500.
+    /// </param>
+    public static PCCCComm ForEip(string host, int port = 44818, int timeoutMs = 5000,
+        string? webUsername = null, string? webPassword = null)
+        => new(NetworkTransportType.EIP, host, port, timeoutMs, lsapControlByte: 0x00,
+               webUsername, webPassword);
 
     /// <summary>
     /// Creates a PCCCComm instance for CSPv4 (Client Server Protocol) communication.
@@ -508,11 +535,104 @@ public class PCCCComm : IDisposable, IHandlerContext
         return _handler!.GetIOConfig();
     }
 
-    /// <summary>Returns a list of data files present in the processor.</summary>
+    /// <summary>
+    /// Returns a list of data files present in the processor.
+    ///
+    /// For MicroLogix 1400 (processor type 0x9F), the standard PCCC GetDataMemory
+    /// command (FNC 0x26) is not supported. Instead, the file directory is retrieved
+    /// from the built-in web server via HTTP GET to /filelist.xml.
+    ///
+    /// This requires EIP transport — ML1400 does not support CSPv4, and DF1 serial
+    /// transport has no network path to the web server.
+    ///
+    /// All ML1400 variants include an embedded web server accessible on the same
+    /// IP address used for EIP communication (port 80).
+    /// Reference: Rockwell Automation Publication 1766-UM002 (Embedded Web Server).
+    /// </summary>
     public DataFileDetails[] GetDataMemory()
     {
         EnsureHandler();
+
+        if (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1400)
+        {
+            if (_networkType == NetworkTransportType.EIP && _remoteHost != null)
+                return GetDataMemoryMl1400ViaHttp(_remoteHost);
+
+            throw new NotSupportedException(
+                "GetDataMemory for MicroLogix 1400 requires EIP transport. " +
+                "The file directory is retrieved from the built-in web server " +
+                "(http://<host>/filelist.xml) which is only reachable via EIP. " +
+                "DF1 serial transport does not support GetDataMemory for ML1400.");
+        }
+
         return _handler!.GetDataMemory();
+    }
+
+    /// <summary>
+    /// Retrieves the ML1400 data file directory from the built-in web server.
+    ///
+    /// Fetches http://{host}/filelist.xml and parses the XML into DataFileDetails[].
+    ///
+    /// XML structure (one &lt;CD&gt; element per data file):
+    ///   T2 = FileType code, decimal representation of SlcFileTypeCode byte value
+    ///        e.g. 137 = 0x89 = Integer (N), 138 = 0x8A = Float (F), 145 = 0x91 = Long (L)
+    ///   T3 = FileNumber (actual file number, not sequential index — may have gaps)
+    ///   T4 = NumberOfElements
+    ///   T5 = Access group (0 = Administrator; reserved, not used by PCCCComm)
+    ///
+    /// Example entry:
+    ///   &lt;CD&gt;&lt;T2&gt;137&lt;/T2&gt;&lt;T3&gt;7&lt;/T3&gt;&lt;T4&gt;17&lt;/T4&gt;&lt;T5&gt;0&lt;/T5&gt;&lt;/CD&gt;
+    ///   → FileNumber=7, FileType="N" (Integer), NumberOfElements=17  (N7[17])
+    ///
+    /// Verified on: MicroLogix 1400 1766-LEC/C via EIP (192.168.1.80).
+    /// Reference: Empirical — filelist.xml loaded by newdata.htm (web server UI).
+    /// </summary>
+    private DataFileDetails[] GetDataMemoryMl1400ViaHttp(string host)
+    {
+        string url = $"http://{host}/filelist.xml";
+
+        // HttpClient is created per-call here because credentials are instance-specific
+        // and GetDataMemory() is called infrequently (typically once at startup).
+        // Using a static HttpClient with per-call credentials would require
+        // HttpClientHandler replacement which is not supported after first use.
+        var handler = new HttpClientHandler
+        {
+            Credentials = new System.Net.NetworkCredential(_webUsername, _webPassword)
+        };
+        string xml;
+        using (var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) })
+            xml = client.GetStringAsync(url).GetAwaiter().GetResult();
+
+        var doc = new XmlDocument();
+        doc.LoadXml(xml);
+
+        var result = new List<DataFileDetails>();
+
+        XmlNodeList? nodes = doc.SelectNodes("/C/CD");
+        if (nodes == null)
+            return result.ToArray();
+
+        foreach (XmlNode cd in nodes)
+        {
+            if (!byte.TryParse(cd["T2"]?.InnerText, out byte typeCode)) continue;
+            if (!int.TryParse(cd["T3"]?.InnerText,  out int fileNum))   continue;
+            if (!int.TryParse(cd["T4"]?.InnerText,  out int elemCount)) continue;
+
+            var ftEnum = (PCCCConstants.SlcFileTypeCode)typeCode;
+            string ftStr = PCCCConstants.SlcFileTypeInfo.GetTypeName(ftEnum);
+
+            // Skip unrecognised file types
+            if (ftStr == "??") continue;
+
+            result.Add(new DataFileDetails
+            {
+                FileNumber       = fileNum,
+                FileType         = ftStr,
+                NumberOfElements = elemCount,
+            });
+        }
+
+        return result.ToArray();
     }
 
     /// <summary>Returns data file information specific to MicroLogix 1500.</summary>
