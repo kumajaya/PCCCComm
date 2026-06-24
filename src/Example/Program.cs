@@ -109,11 +109,11 @@ class Program
             // before any read or write operations are attempted.
             bool nodeOk = VerifyTargetNode(pccc, cfg);
 
-            // Run the quick demo only when explicitly requested via --demo,
-            // and only when the target node is confirmed reachable.
-            // Demo is opt-in because it performs writes to N7, F8, B3, and ST18.
+            // --demo runs read-only self-test (safe on any live PLC).
+            // Write/destructive tests are only available via 'selftest --emulator'
+            // in the CLI, and only intended for use against PCCCEmulator.
             if (nodeOk && cfg.RunDemo)
-                RunDemo(pccc);
+                RunSelfTest(pccc, Array.Empty<string>());
 
             // Scan DF1/RS-485 nodes if requested via --scan-nodes.
             // This runs before the stress test so the target node is restored
@@ -1420,13 +1420,11 @@ class Program
 
                     // ── Self-test suite ──────────────────────────────────────────
 
-                    // selftest
-                    // Runs the exhaustive PCCCComm self-test suite and prints a
-                    // PASS/FAIL verdict for every individual test case.
-                    // Safe to run against the PCCCEmulator; see the caution note in
-                    // RunSelfTest() before running against a real PLC.
+                    // selftest [--emulator]
+                    // Without flags: read-only tests, safe on any live PLC.
+                    // --emulator: full suite with writes; PCCCEmulator only.
                     case "selftest":
-                        RunSelfTest(pccc);
+                        RunSelfTest(pccc, parts);
                         break;
 
                     // ── Node management ──────────────────────────────────────────
@@ -1723,40 +1721,67 @@ class Program
     // ── Self-test entry point ────────────────────────────────────────────────
 
     /// <summary>
-    /// Runs the full PCCCComm self-test suite and prints a summary.
+    /// Runs the PCCCComm self-test suite with mode selected by command flags.
     ///
-    /// Each test group is independent: a failure in one group does not prevent
-    /// subsequent groups from running. The final summary shows the total pass
-    /// and fail counts and the elapsed time.
+    /// Two modes:
+    ///   (no flag)    — read-only tests, safe on any live PLC.
+    ///                  Covers: ProcessorInfo, DirectoryEnumeration,
+    ///                  BoundaryConditions, Latency.
+    ///   --emulator   — full suite including write and destructive tests.
+    ///                  ONLY for PCCCEmulator — never on a real PLC.
+    ///                  Writes to: N7:2-9, F8:2-7, B3:1-2, ST18:2-5.
+    ///                  Also runs InitializeMemory (clears ALL data files).
+    ///
+    /// Each test group is independent — a failure in one group does not prevent
+    /// subsequent groups from running.
     /// </summary>
-    private static void RunSelfTest(Comm.PCCCComm pccc)
+    private static void RunSelfTest(Comm.PCCCComm pccc, string[] parts)
     {
+        bool emulatorMode = parts.Any(p => p.Equals("--emulator", StringComparison.OrdinalIgnoreCase));
+
         _testPass = 0;
         _testFail = 0;
 
         Console.WriteLine("\n╔══════════════════════════════════════════════╗");
         Console.WriteLine("║         PCCCComm Self-Test Suite             ║");
         Console.WriteLine("╚══════════════════════════════════════════════╝");
-        Console.WriteLine("  Caution: writes to N7:2-9, F8:2-7, B3:1-2,");
-        Console.WriteLine("  ST18:2-5. Do not use on a live PLC.");
+
+        if (emulatorMode)
+        {
+            Console.WriteLine("  Mode     : EMULATOR — full suite");
+            Console.WriteLine("  Target   : PCCCEmulator only. NEVER use on a real PLC.");
+            Console.WriteLine("  Writes to: N7:2-9, F8:2-7, B3:1-2, ST18:2-5");
+            Console.WriteLine("  Also runs: InitializeMemory (clears ALL data files)");
+        }
+        else
+        {
+            Console.WriteLine("  Mode     : READ-ONLY — safe on any live PLC");
+            Console.WriteLine("  Use 'selftest --emulator' for full suite (emulator only).");
+        }
         Console.WriteLine();
 
         var sw = Stopwatch.StartNew();
 
+        // ── Read-only tests — always run ──────────────────────────────────────
         SelfTest_ProcessorInfo(pccc);
         SelfTest_DirectoryEnumeration(pccc);
-        SelfTest_IntegerReadWrite(pccc);
-        SelfTest_FloatReadWrite(pccc);
-        SelfTest_BitReadWrite(pccc);
-        SelfTest_MultiElementRead(pccc);
-        SelfTest_MultiElementWrite(pccc);
-        SelfTest_StringReadWrite(pccc);
-        SelfTest_BoundaryConditions(pccc);
-        SelfTest_ProcessorMode(pccc);
-        SelfTest_InitializeMemory(pccc);
-        SelfTest_LinkParameters(pccc);
-        SelfTest_ReadModifyWrite(pccc);
+        SelfTest_BoundaryConditions(pccc, emulatorMode);
         SelfTest_Latency(pccc);
+
+        // ── Emulator-only tests (write + destructive) ─────────────────────────
+        if (emulatorMode)
+        {
+            SelfTest_IntegerReadWrite(pccc);
+            SelfTest_FloatReadWrite(pccc);
+            SelfTest_BitReadWrite(pccc);
+            SelfTest_MultiElementRead(pccc);
+            SelfTest_MultiElementWrite(pccc);
+            SelfTest_ProcessorMode(pccc);
+            SelfTest_ReadModifyWrite(pccc);
+            SelfTest_StringReadWrite(pccc);
+            SelfTest_InitializeMemory(pccc);
+            SelfTest_LinkParameters(pccc);
+        }
 
         sw.Stop();
 
@@ -2153,21 +2178,24 @@ class Program
     ///   Non-existent file — reading from file 100 (never registered) must
     ///     throw a PCCCException. The emulator returns STS=0x50 (bad address).
     /// </summary>
-    private static void SelfTest_BoundaryConditions(Comm.PCCCComm pccc)
+    private static void SelfTest_BoundaryConditions(Comm.PCCCComm pccc, bool emulatorMode = false)
     {
         Console.WriteLine("── Boundary Conditions ──────────────────────────");
 
-        // Files that should be readable at element 0.
-        (string addr, string name)[] readable =
+        // Standard files readable at element 0 on any SLC/ML PLC.
+        var readable = new System.Collections.Generic.List<(string addr, string name)>
         {
-            ("O0:0",   "O0:0   output image"),
-            ("I1:0",   "I1:0   input image"),
-            ("S2:0",   "S2:0   status"),
-            ("B3:0",   "B3:0   binary"),
-            ("N7:0",   "N7:0   integer"),
-            ("F8:0",   "F8:0   float"),
-            ("ST18:0", "ST18:0 string"),
+            ("O0:0", "O0:0   output image"),
+            ("I1:0", "I1:0   input image"),
+            ("S2:0", "S2:0   status"),
+            ("B3:0", "B3:0   binary"),
+            ("N7:0", "N7:0   integer"),
+            ("F8:0", "F8:0   float"),
         };
+
+        // ST18 is only present in the PCCCEmulator — skip on real PLCs.
+        if (emulatorMode)
+            readable.Add(("ST18:0", "ST18:0 string"));
 
         foreach (var (addr, name) in readable)
         {
@@ -2839,33 +2867,52 @@ class Program
     {
         Console.WriteLine("Data access:");
         Console.WriteLine("  read <addr> [count]            Read one or more elements");
-        Console.WriteLine("  write <addr> <val> [val...]    Write integer(s) to address");
-        Console.WriteLine("  writestring <addr> <text>      Write string to ST file");
-        Console.WriteLine("  datamem                        List all data files in PLC");
-        Console.WriteLine("  sendhex <DST> <CMD> <FNC> [data...]");
-        Console.WriteLine("                                 Send raw PCCC PDU (hex bytes)");
-        Console.WriteLine("  wordread <type> <num> <elem> <offset> <words>");
-        Console.WriteLine("                                 Word Range Read (PLC-5)");
-        Console.WriteLine("  wordwrite <type> <num> <elem> <offset> <hex...>");
-        Console.WriteLine("                                 Word Range Write (PLC-5)");
+        Console.WriteLine("                                 Example: read N7:0  /  read F8:0 5");
+        Console.WriteLine("  write <addr> <val> [val...]    Write integer value(s) to address");
+        Console.WriteLine("                                 Example: write N7:0 100");
+        Console.WriteLine("  writestring <addr> <text>      Write ASCII string to ST file");
+        Console.WriteLine("                                 Example: writestring ST21:0 Hello");
+        Console.WriteLine("  datamem                        List all data files configured in PLC");
+        Console.WriteLine("  watch <addr> [interval_ms]     Monitor address, print on change");
+        Console.WriteLine("                                 (default interval: 500 ms, any key to stop)");
         Console.WriteLine();
         Console.WriteLine("Processor:");
         Console.WriteLine("  type                           Show processor type code");
         Console.WriteLine("  mode                           Show current mode (RUN/PROGRAM)");
-        Console.WriteLine("  setrun                         Switch to RUN mode");
-        Console.WriteLine("  setprog                        Switch to PROGRAM mode");
+        Console.WriteLine("  setrun                         [!] Switch processor to RUN mode");
+        Console.WriteLine("  setprog                        [!] Switch processor to PROGRAM mode");
+        Console.WriteLine("                                 Note: keyswitch must be in REM position");
         Console.WriteLine();
-        Console.WriteLine("Testing:");
-        Console.WriteLine("  selftest                       Run exhaustive self-test suite");
+        Console.WriteLine("Password management (MicroLogix 1100/1200/1400 series B+):");
+        Console.WriteLine("  getpass                        Read current web server password");
+        Console.WriteLine("  setpass <password>             Set new web server password");
+        Console.WriteLine("  clearpass                      Clear password (disable protection)");
+        Console.WriteLine("  getmaster                      Read current master password");
+        Console.WriteLine("  setmaster <password>           Set new master password");
+        Console.WriteLine("  clearmaster                    Clear master password");
+        Console.WriteLine();
+        Console.WriteLine("Diagnostics:");
+        Console.WriteLine("  selftest                       Read-only self-test (safe on any live PLC)");
+        Console.WriteLine("  selftest --emulator            [!] Full suite with writes — PCCCEmulator only,");
+        Console.WriteLine("                                 NEVER run against a real PLC");
         Console.WriteLine("  stats                          Show communication statistics");
         Console.WriteLine("  resetstats                     Reset statistics counters");
         Console.WriteLine();
-        Console.WriteLine("Node management:");
-        Console.WriteLine("  scannodes [from] [to]          Scan DF1 node range for live PLCs");
+        Console.WriteLine("Node management (DF1/RS-485):");
+        Console.WriteLine("  scannodes [from] [to]          Scan node range for live PLCs");
         Console.WriteLine("                                 (default range: 1–31)");
         Console.WriteLine("  settarget <node>               Change target node at runtime and probe");
-        Console.WriteLine("  watch <addr> [interval_ms]     Monitor address, print on change");
-        Console.WriteLine("                                 (default interval: 500 ms)");
+        Console.WriteLine();
+        Console.WriteLine("Advanced:");
+        Console.WriteLine("  sendhex <DST> <CMD> <FNC> [data...]");
+        Console.WriteLine("                                 [!] Send raw PCCC PDU (hex bytes)");
+        Console.WriteLine("                                 Example: sendhex 01 06 03");
+        Console.WriteLine("  wordread <type> <num> <elem> <offset> <words>");
+        Console.WriteLine("                                 Word Range Read (PLC-5 only)");
+        Console.WriteLine("  wordwrite <type> <num> <elem> <offset> <hex...>");
+        Console.WriteLine("                                 [!] Word Range Write (PLC-5 only)");
+        Console.WriteLine();
+        Console.WriteLine("  [!] = command modifies PLC state — use with caution");
         Console.WriteLine();
         Console.WriteLine("  exit / quit                    Leave interactive mode");
         Console.WriteLine("  help                           This reference");
