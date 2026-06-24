@@ -70,9 +70,6 @@ public class Plc5Handler : IPlcHandler
 
     private void OnFileProgress(PCCCComm.FileProgressEventArgs e)
     {
-        // Check for cancellation at each file boundary.
-        _context.CancellationToken.ThrowIfCancellationRequested();
-
         int percent = (int)((double)e.TotalBytesTransferred / e.GrandTotalBytes * 100);
         if (percent != _lastFileProgressPercent && (percent % 5 == 0 || percent == 100))
         {
@@ -1009,5 +1006,10 @@ public class Plc5Handler : IPlcHandler
     public void ResetDiagnosticCounters() => throw new NotSupportedException("Diagnostic counters not yet implemented.");
     public byte ReadLinkParameters() => throw new NotSupportedException("Link parameters not yet implemented.");
     public void SetLinkParameters(byte maxAddress) => throw new NotSupportedException("Link parameters not yet implemented.");
-    public byte[] Echo(byte[] data) => throw new NotSupportedException("Echo not yet implemented.");
+    /// <summary>
+    /// Sends an Echo command (CMD 0x06 FNC 0x00) and returns the echoed data.
+    /// Defined in AB Publication 1770-6.5.16 and supported by all PCCC-compatible PLCs.
+    /// </summary>
+    public byte[] Echo(byte[] data)
+        => _protocol.Echo(data, (byte)MyNode, (byte)TargetNode);
 }

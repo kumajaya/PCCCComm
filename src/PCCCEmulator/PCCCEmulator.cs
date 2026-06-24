@@ -1560,9 +1560,13 @@ public class PCCCEmulator : IDisposable
     private void SendDataResponse(int dst, int tns, int cmd, byte[] data, object clientContext)
         => SendResponse(dst, tns, cmd, 0x00, 0x00, data, withFunc: false, clientContext);
 
-    /// <summary>Get Status loopback response (CMD=0x06, FNC=0x00) — echoes request data, FUNC included.</summary>
+    /// <summary>
+    /// Echo response (CMD=0x06, FNC=0x00) — echoes request data back without FNC byte.
+    /// Real PLC behaviour (confirmed on ML1400 via EIP): FNC byte is NOT included
+    /// in the response frame, only the echoed data payload.
+    /// </summary>
     private void SendGetStatusLoopbackResponse(int dst, int tns, byte[] data, object clientContext)
-        => SendResponse(dst, tns, 0x46, 0x00, 0x00, data, withFunc: true, clientContext);
+        => SendResponse(dst, tns, 0x46, 0x00, 0x00, data, withFunc: false, clientContext);
 
     /// <summary>Diagnostic loopback response (CMD=0x06, FNC=0x02) — echoes request data, FUNC included.</summary>
     private void SendLoopbackResponse(int dst, int tns, byte[] data, object clientContext)
@@ -1828,7 +1832,7 @@ public class PCCCEmulator : IDisposable
             return BuildPlc5GetStatusPayload();
         if (_family == EmulationFamily.Ml1400)
             return BuildMl1400GetStatusPayload();
-        return BuildSlcGetStatusPayload();
+            return BuildSlcGetStatusPayload();
     }
 
     /// <summary>

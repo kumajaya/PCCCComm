@@ -386,7 +386,18 @@ namespace PCCCComm.Pccc
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success || reply?.Data == null)
                 throw new PCCCException($"Echo failed: {PCCCErrors.DecodeStatus(sts)}");
-            return reply.Data;
+
+            // Echo response format (AB 1770-6.5.16): CMD_reply STS TNS FNC(0x00) DATA
+            // SendRequest parses with hasFnc:false so FNC byte lands in Data[0].
+            // Strip it so callers receive only the echoed payload.
+            byte[] d = reply.Data;
+            if (d.Length > 0 && d[0] == PCCCConstants.Fnc.Echo)
+            {
+                byte[] stripped = new byte[d.Length - 1];
+                Array.Copy(d, 1, stripped, 0, stripped.Length);
+                return stripped;
+            }
+            return d;
         }
 
         /// <summary>Performs a Word Range Read (PLC-5, FNC=0x01).</summary>

@@ -351,6 +351,13 @@ public class PCCCComm : IDisposable, IHandlerContext
             case PCCCConstants.ProcessorFamily.Plc5:
                 _handler = new Plc5Handler(this, _protocol!, _processorType);
                 break;
+            case PCCCConstants.ProcessorFamily.Unknown when _processorType != 0:
+                // DetectFamily could not identify the family from the type-extender byte
+                // (e.g. some DF1 responses omit it or use a non-standard value), but we
+                // do have a valid processor type code. Fall back to SlcHandler which
+                // covers the broadest range of PCCC-compatible PLCs.
+                _handler = new SlcHandler(this, _protocol!, _processorType);
+                break;
             case PCCCConstants.ProcessorFamily.Plc3:
             case PCCCConstants.ProcessorFamily.Plc2:
             default:
@@ -421,6 +428,19 @@ public class PCCCComm : IDisposable, IHandlerContext
     {
         EnsureHandler();
         return _handler!.GetDiagnosticStatusRaw();
+    }
+
+    /// <summary>
+    /// Sends an Echo command (CMD 0x06 FNC 0x00) and returns the echoed payload.
+    /// Supported by all PCCC-compatible PLCs (SLC, MicroLogix, PLC-5).
+    /// Useful as a lightweight connectivity probe or round-trip latency check.
+    /// </summary>
+    /// <param name="data">Payload to echo (max 243 bytes per AB spec).</param>
+    /// <returns>Echoed bytes — should match <paramref name="data"/> exactly.</returns>
+    public byte[] Echo(byte[] data)
+    {
+        EnsureHandler();
+        return _handler!.Echo(data);
     }
 
     /// <summary>Reads raw 16-bit words from the specified PCCC address.</summary>

@@ -109,6 +109,10 @@ class Program
             // before any read or write operations are attempted.
             bool nodeOk = VerifyTargetNode(pccc, cfg);
 
+            // Start silent keepalive if node is reachable.
+            if (nodeOk)
+                StartKeepalive(pccc, cfg);
+
             // --demo runs read-only self-test (safe on any live PLC).
             // Write/destructive tests are only available via 'selftest --emulator'
             // in the CLI, and only intended for use against PCCCEmulator.
@@ -131,7 +135,7 @@ class Program
             // The CLI is always offered even when verification failed so the
             // user can run scannodes or change the target node and retry.
             if (!cfg.NoInteractive)
-                RunInteractiveCli(pccc);
+                RunInteractiveCli(pccc, cfg);
         }
         catch (Exception ex)
         {
@@ -139,6 +143,7 @@ class Program
         }
         finally
         {
+            StopKeepalive();
             pccc.CloseComms();
             pccc.Dispose();
             Console.WriteLine("\nPress Enter to exit.");
@@ -326,6 +331,142 @@ class Program
     }
 
     // =========================================================================
+    // Keepalive / auto-reconnect state
+    // =========================================================================
+
+    /// <summary>True while the keepalive background thread should be running.</summary>
+    private static volatile bool _keepaliveRunning = false;
+
+    /// <summary>Interval between silent echo probes. Defaults to 5 s.</summary>
+    private static TimeSpan _keepaliveInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Number of consecutive echo failures before the link is declared down.
+    /// Keepalive calls CloseComms() immediately when this threshold is reached.
+    /// </summary>
+    private const int KeepaliveFailThreshold = 2;
+
+    /// <summary>
+    /// True = transport is open and PLC is responding.
+    /// False = keepalive declared link down and already called CloseComms().
+    /// Written by the keepalive thread; read by the CLI thread before every command.
+    /// </summary>
+    private static volatile bool _linkConnected = true;
+
+    /// <summary>Maximum reconnect attempts before giving up.</summary>
+    private const int MaxReconnectAttempts = 3;
+
+    // =========================================================================
+    // Keepalive (silent echo) and auto-reconnect
+    // =========================================================================
+
+    /// <summary>
+    /// Starts a background thread that sends a silent Echo command to the PLC
+    /// every <see cref="_keepaliveInterval"/>. If the echo fails
+    /// <see cref="KeepaliveFailThreshold"/> times in a row, <see cref="_linkConnected"/>
+    /// is set to false so the next CLI command knows to attempt reconnect first.
+    /// The thread is a daemon (IsBackground=true) so it does not block process exit.
+    /// </summary>
+    private static void StartKeepalive(Comm.PCCCComm pccc, Config cfg)
+    {
+        _keepaliveRunning = true;
+        _linkConnected    = true;
+
+        var thread = new System.Threading.Thread(() =>
+        {
+            int failures = 0;
+            while (_keepaliveRunning)
+            {
+                System.Threading.Thread.Sleep(_keepaliveInterval);
+                if (!_keepaliveRunning) break;
+
+                // Skip echo probe if already known disconnected —
+                // reconnect is the CLI thread's responsibility.
+                if (!_linkConnected) continue;
+
+                try
+                {
+                    // Echo with a 1-byte payload — lightest PCCC round-trip.
+                    pccc.Echo(new byte[] { 0xAA });
+                    failures = 0;
+                }
+                catch
+                {
+                    failures++;
+                    if (failures >= KeepaliveFailThreshold)
+                    {
+                        // Declare link down and close transport immediately so
+                        // the next CLI command knows to reconnect before sending.
+                        _linkConnected = false;
+                        failures = 0;
+                        try { pccc.CloseComms(); } catch { }
+                        Console.WriteLine(
+                            "\n  [keepalive] Link lost — type any command to reconnect.\nPCCC> ");
+                    }
+                }
+            }
+        })
+        {
+            IsBackground = true,
+            Name         = "PCCCComm-Keepalive",
+        };
+        thread.Start();
+    }
+
+    /// <summary>Signals the keepalive thread to exit on the next wake.</summary>
+    private static void StopKeepalive()
+    {
+        _keepaliveRunning = false;
+    }
+
+    /// <summary>
+    /// Called after any CLI command exception. If <see cref="_linkConnected"/> is
+    /// false (keepalive detected link down) or if the exception looks like a
+    /// transport error, attempts to reconnect up to <see cref="MaxReconnectAttempts"/>
+    /// times with a short backoff between attempts.
+    /// Prints a status line for each attempt so the user knows what is happening.
+    /// </summary>
+    /// <summary>
+    /// Called at the top of every CLI command dispatch.
+    /// If the keepalive thread has declared the link down (and already called
+    /// CloseComms), this method attempts to reopen the connection before the
+    /// command is executed. Returns true if connected (or was already connected),
+    /// false if reconnect failed after all attempts.
+    /// </summary>
+    private static bool EnsureConnected(Comm.PCCCComm pccc, Config cfg)
+    {
+        if (_linkConnected) return true;  // already up — fast path
+
+        Console.WriteLine("  [reconnect] Link was down — reconnecting...");
+
+        for (int attempt = 1; attempt <= MaxReconnectAttempts; attempt++)
+        {
+            Console.Write($"  Attempt {attempt}/{MaxReconnectAttempts}... ");
+            try
+            {
+                System.Threading.Thread.Sleep(1000 * attempt); // backoff
+                pccc.OpenComms();
+
+                // Verify PLC is actually responding.
+                _ = pccc.GetProcessorType();
+
+                _linkConnected = true;
+                Console.WriteLine("OK — resuming.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"failed ({ex.Message})");
+                try { pccc.CloseComms(); } catch { }
+            }
+        }
+
+        Console.WriteLine($"  Could not reconnect after {MaxReconnectAttempts} attempts.");
+        Console.WriteLine("  Type 'exit' to quit or try again later.");
+        return false;
+    }
+
+    // =========================================================================
     // Transport factory
     // =========================================================================
 
@@ -455,19 +596,35 @@ class Program
     {
         Console.Write($"Verifying target node {cfg.TargetNode}... ");
 
+        // Retry up to 3 times — some PLCs (e.g. ML1400 via DF1) need a short
+        // settling period after the port opens before responding reliably.
+        const int maxAttempts = 3;
+        Exception? lastEx = null;
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            try
+            {
+                string name = ProcessorTypeName(pccc);
+                Console.WriteLine($"OK  ({name})");
+                Console.WriteLine();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                lastEx = ex;
+                if (attempt < maxAttempts - 1)
+                    System.Threading.Thread.Sleep(500);
+            }
+        }
+
+        // All attempts failed.
+        Console.WriteLine($"FAILED");
+        Console.WriteLine();
+        Console.WriteLine($"  Error    : {lastEx?.Message ?? "unknown error"}");
+        Console.WriteLine($"  Transport: {cfg.Transport.ToUpperInvariant()}");
+
         try
         {
-            Console.WriteLine($"OK  ({ProcessorTypeName(pccc)})");
-            Console.WriteLine();
-            return true;
-        }
-        catch (Comm.Pccc.PCCCException ex)
-        {
-            Console.WriteLine($"FAILED");
-            Console.WriteLine();
-            Console.WriteLine($"  Error    : {ex.Message}");
-            Console.WriteLine($"  Transport: {cfg.Transport.ToUpperInvariant()}");
-
             if (cfg.Transport == "eip")
             {
                 Console.WriteLine($"  Target   : {cfg.RemoteHost}:{cfg.EipPort}");
@@ -1329,7 +1486,7 @@ class Program
     /// global communication statistics so that manual exploration does not
     /// distort the automated test numbers from the demo or stress test.
     /// </summary>
-    private static void RunInteractiveCli(Comm.PCCCComm pccc)
+    private static void RunInteractiveCli(Comm.PCCCComm pccc, Config cfg)
     {
         Console.WriteLine("\n=== Interactive CLI Mode ===");
         Console.WriteLine("Type 'help' for commands, 'exit' to quit.\n");
@@ -1345,6 +1502,9 @@ class Program
 
             try
             {
+                // Reconnect first if keepalive declared link down.
+                if (!EnsureConnected(pccc, cfg)) continue;
+
                 switch (cmd)
                 {
                     // ── Navigation ──────────────────────────────────────────────
@@ -1395,6 +1555,16 @@ class Program
                     // Example: sendhex 01 0F A1 02 07 89 00
                     case "sendhex":
                         HandleSendHex(pccc, parts);
+                        break;
+
+                    // echo [hex byte...]
+                    // Sends an Echo command (CMD 0x06 FNC 0x00) to the PLC.
+                    // If no bytes supplied, sends a default 4-byte payload.
+                    // Response should exactly match the sent payload.
+                    // Example: echo          (default payload)
+                    //          echo AA BB CC  (custom hex bytes)
+                    case "echo":
+                        HandleEcho(pccc, parts);
                         break;
 
                     // ── Processor mode ───────────────────────────────────────────
@@ -1512,6 +1682,10 @@ class Program
             {
                 Console.WriteLine($"PCCC Error: {ex.Message}");
             }
+            catch (TimeoutException ex)
+            {
+                Console.WriteLine($"Timeout: {ex.Message}");
+            }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error: {ex.Message}");
@@ -1604,6 +1778,54 @@ class Program
     /// Example — read 2 bytes from N7:0 (file 7, type 0x89, element 0):
     ///   PCCC&gt; sendhex 01 0F A1 02 07 89 00
     /// </summary>
+
+    /// <summary>
+    /// Handles the "echo" interactive command.
+    /// Sends an Echo command and verifies the PLC returns the same payload.
+    /// </summary>
+    private static void HandleEcho(Comm.PCCCComm pccc, string[] parts)
+    {
+        // Build payload: use supplied hex bytes or a default 4-byte pattern.
+        byte[] payload;
+        if (parts.Length > 1)
+        {
+            var bytes = new List<byte>();
+            foreach (var token in parts[1..])
+            {
+                if (byte.TryParse(token, System.Globalization.NumberStyles.HexNumber,
+                    null, out byte b))
+                    bytes.Add(b);
+                else
+                {
+                    Console.WriteLine($"Invalid hex byte: '{token}'. Use e.g. echo AA BB CC");
+                    return;
+                }
+            }
+            payload = bytes.ToArray();
+        }
+        else
+        {
+            // Default: 4-byte test pattern
+            payload = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF };
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        byte[] response = pccc.Echo(payload);
+        sw.Stop();
+
+        bool match = response.Length == payload.Length;
+        if (match)
+            for (int i = 0; i < payload.Length; i++)
+                if (response[i] != payload[i]) { match = false; break; }
+
+        string sentHex  = BitConverter.ToString(payload).Replace("-", " ");
+        string recvHex  = BitConverter.ToString(response).Replace("-", " ");
+        Console.WriteLine($"  Sent   : {sentHex}");
+        Console.WriteLine($"  Receive: {recvHex}");
+        Console.WriteLine($"  Match  : {(match ? "YES" : "NO — payload mismatch!")}");
+        Console.WriteLine($"  RTT    : {sw.Elapsed.TotalMilliseconds:F1} ms");
+    }
+
     private static void HandleSendHex(Comm.PCCCComm pccc, string[] parts)
     {
         if (parts.Length < 4)
@@ -2904,6 +3126,8 @@ class Program
         Console.WriteLine("  settarget <node>               Change target node at runtime and probe");
         Console.WriteLine();
         Console.WriteLine("Advanced:");
+        Console.WriteLine("  echo [hex byte...]             Send Echo command and verify response");
+        Console.WriteLine("                                 Example: echo  /  echo AA BB CC");
         Console.WriteLine("  sendhex <DST> <CMD> <FNC> [data...]");
         Console.WriteLine("                                 [!] Send raw PCCC PDU (hex bytes)");
         Console.WriteLine("                                 Example: sendhex 01 06 03");
