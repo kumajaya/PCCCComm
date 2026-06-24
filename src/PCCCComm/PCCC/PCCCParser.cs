@@ -70,11 +70,16 @@ public static partial class PCCCParser
         // ── FileNumber ────────────────────────────────────────────────────────
         if (mc.Groups["FileNumber"].Length == 0)
         {
-            // I/O/S addresses without an explicit file number
-            string addr = dataAddress.ToUpperInvariant();
-            if      (addr.Contains("I")) result.FileNumber = 1;
-            else if (addr.Contains("O")) result.FileNumber = 0;
-            else                         result.FileNumber = 2;
+            // I/O/S addresses without an explicit file number.
+            // Use the already-parsed FileType group instead of searching the raw
+            // string — addr.Contains("I") would false-positive on any address
+            // whose string happens to contain the letter (e.g. "SI:0").
+            switch (mc.Groups["FileType"].Value.ToUpperInvariant())
+            {
+                case "I": result.FileNumber = 1; break;
+                case "O": result.FileNumber = 0; break;
+                default:  result.FileNumber = 2; break; // "S"
+            }
         }
         else
         {
