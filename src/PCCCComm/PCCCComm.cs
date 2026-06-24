@@ -39,7 +39,11 @@ public class PCCCComm : IDisposable, IHandlerContext
     private PCCCConstants.ProcessorFamily _processorFamily = PCCCConstants.ProcessorFamily.Unknown;
     private int _processorType;  // cached processor type from diagnostic status
 
-    private volatile bool _disableEvent;            // suppress DataReceived during bulk transfers
+    // Written by the handler thread (SlcHandler/Plc5Handler) at the start and end of
+    // bulk upload/download; read by the transport receive thread in OnFrameReceived.
+    // volatile is correct here: single-bit flag with no compound operation, so
+    // Interlocked is not needed — volatile guarantees cross-thread visibility.
+    private volatile bool _disableEvent;
 
     private ITransport? _currentTransport;
     private readonly string? _remoteHost;
