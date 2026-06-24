@@ -67,9 +67,10 @@ namespace PCCCComm.Pccc
         private void OnFrameReceived(object? sender, byte[] innerFrame)
         {
             if (innerFrame == null || innerFrame.Length < 6) return;
-            ushort tns = (ushort)(innerFrame[4] | (innerFrame[5] << 8));
-            _responseData[tns] = innerFrame;
-            if (_responseEvents.TryGetValue(tns, out var ev))
+            // Parse into a PCCCMessage so field names are used instead of raw indices.
+            var msg = PCCCMessage.FromBytes(innerFrame);
+            _responseData[msg.Tns] = innerFrame;
+            if (_responseEvents.TryGetValue(msg.Tns, out var ev))
                 ev.Set();
         }
 

@@ -150,17 +150,17 @@ public static partial class PCCCParser
             case "B":   result.FileType = 0x85; break;
             case "T":   result.FileType = 0x86; break;
             case "C":   result.FileType = 0x87; break;
-            case "F":   result.FileType = 0x8A; result.BytesPerElements = 4;  break;
+            case "F":   result.FileType = 0x8A; result.BytesPerElements = PCCCConstants.Df1Limits.BytesPerFloat; break;
             case "S":   result.FileType = 0x84; break;
-            case "ST":  result.FileType = 0x8D; result.BytesPerElements = 84; break;
+            case "ST":  result.FileType = 0x8D; result.BytesPerElements = PCCCConstants.Df1Limits.SlcStringElementBytes; break;
             case "A":   result.FileType = 0x8E; break;
             case "R":   result.FileType = 0x88; break;
             case "O":   result.FileType = 0x8B; break;
             case "I":   result.FileType = 0x8C; break;
-            case "L":   result.FileType = 0x91; result.BytesPerElements = 4;  break;
-            case "MG":  result.FileType = 0x92; result.BytesPerElements = 50; break;
-            case "PD":  result.FileType = 0x93; result.BytesPerElements = 46; break;
-            case "PLS": result.FileType = 0x94; result.BytesPerElements = 12; break;
+            case "L":   result.FileType = 0x91; result.BytesPerElements = PCCCConstants.Df1Limits.BytesPerLong; break;
+            case "MG":  result.FileType = 0x92; result.BytesPerElements = PCCCConstants.Df1Limits.SlcMessageElementBytes; break;
+            case "PD":  result.FileType = 0x93; result.BytesPerElements = PCCCConstants.Df1Limits.SlcPidElementBytes; break;
+            case "PLS": result.FileType = 0x94; result.BytesPerElements = PCCCConstants.Df1Limits.SlcPlsElementBytes; break;
         }
 
         return result;

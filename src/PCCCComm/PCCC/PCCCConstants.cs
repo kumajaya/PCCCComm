@@ -58,12 +58,6 @@ public static class PCCCConstants
         public const byte SetRunModeSLC = 0x80;
         /// <summary>Set Run mode for MicroLogix 1000 (0x3A).</summary>
         public const byte SetRunModeML = 0x3A;
-        /// <summary>Set Program mode for SLC (0x80).</summary>
-        public const byte SetProgramModeSLC = 0x80;
-        /// <summary>Set Program mode for MicroLogix (0x3A).</summary>
-        public const byte SetProgramModeML = 0x3A;
-        /// <summary>Generic Set CPU mode (0x3A).</summary>
-        public const byte SetCpuMode = 0x3A;
         /// <summary>Get Run mode / diagnostic status (0x03).</summary>
         public const byte GetRunMode = 0x03;
 
@@ -89,9 +83,11 @@ public static class PCCCConstants
         /// <summary>Download complete (0x52).</summary>
         public const byte DownloadComplete = 0x52;
         /// <summary>Upload all request (0x53).</summary>
-        public const byte UploadAll = 0x53;
-        /// <summary>Upload complete (0x55).</summary>
-        public const byte UploadComplete = 0x55;
+        public const byte UploadAllRequest = 0x53;
+        /// <summary>Upload completed (0x55).</summary>
+        public const byte UploadCompleted = 0x55;
+        /// <summary>Download completed (0x52). Sent after all files written.</summary>
+        public const byte DownloadCompleted = 0x52;
 
         // --- Forces & Outputs -----------------------------------------------
         /// <summary>Disable forces (0x41).</summary>
@@ -118,9 +114,6 @@ public static class PCCCConstants
         public const byte OpenFile = 0x81;
         public const byte CloseFile = 0x82;
         public const byte DownloadAllRequest = 0x50;
-        public const byte UploadAllRequest = 0x53;   // alias for existing UploadAll (optional)
-        public const byte DownloadCompleted = 0x52;
-        public const byte UploadCompleted = 0x55;   // alias for UploadComplete
         public const byte FileWrite = 0xAF;
         public const byte FileRead = 0xA7;
         public const byte ApplyPortConfig = 0x8F;
@@ -431,6 +424,13 @@ public static class PCCCConstants
         /// <summary>SLC 500 PLS file element size in bytes (12 bytes).</summary>
         public const int SlcPlsElementBytes = 12;
 
+        /// <summary>
+        /// Bytes per slot entry in the SLC IO config response payload (6 bytes).
+        /// Each slot occupies 6 bytes: 2 reserved, 2 input, 2 output.
+        /// Reference: AB 1770-6.5.16, GetSlotCount response format.
+        /// </summary>
+        public const int SlcIoConfigBytesPerSlot = 6;
+
         /// <summary>Minimum file type value that requires 120-byte limit for Data Monitor file (0xA1).</summary>
         public const int MinFileTypeForExtendedLimit = 0xA1;
 
@@ -471,28 +471,19 @@ public static class PCCCConstants
             /// <summary>Offset of mode code within DATA payload (inner frame offset 24 → 18).</summary>
             public const int ModeCode = 18;
 
-            // --- Konstanta baru untuk deteksi keluarga processor ---
-            /// <summary>Offset of type extender (byte 2 of DATA).</summary>
+            // --- Konstanta untuk deteksi keluarga processor ---
+            /// <summary>Offset of type extender within DATA payload (byte 1).</summary>
+            public const int TypeExtenderOffset = 1;
+            /// <summary>Offset of type extender within DATA payload (byte 1). Alias for <see cref="TypeExtenderOffset"/>.</summary>
             public const int TypeExtender = 1;
-
-            /// <summary>Offset of extended interface type (byte 3 of DATA).</summary>
-            public const int ExtendedInterfaceType = 2;
-
+            /// <summary>Offset of expansion byte within DATA payload (byte 2). Used for PLC-5 family detection.</summary>
+            public const int ExpansionByteOffset = 2;
             /// <summary>Value of type extender for SLC and MicroLogix families.</summary>
             public const byte TypeExtenderSlcMl = 0xEE;
 
-            /// <summary>Mask for low nibble of processor type to detect PLC-5 family.</summary>
-            /// <remarks>PLC-5 processor type low nibble (e.g., 0x?B, 0xEB, etc.).</remarks>
-            public const byte Plc5TypeExtenderMask = 0x0B;
 
-            /// <summary>Offset of processor type within DATA payload (byte 3).</summary>
-            public const int ProcessorTypeOffset = 3;  // alias untuk ProcessorType
 
-            /// <summary>Offset of type extender (byte 1 of DATA).</summary>
-            public const int TypeExtenderOffset = 1;   // alias untuk TypeExtender
 
-            /// <summary>Offset of expansion byte (byte 2 of DATA) for PLC-5.</summary>
-            public const int ExpansionByteOffset = 2;  // alias untuk ExtendedInterfaceType
 
             /// <summary>Mask to get high nibble of a byte.</summary>
             public const byte HighNibbleMask = 0xF0;

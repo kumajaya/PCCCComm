@@ -1165,7 +1165,8 @@ public class SlcHandler : IPlcHandler
     {
         int slots = GetSlotCount();
         if (slots <= 0) throw new PCCCException("Failed to get Slot Count");
-        byte[] body = { (byte)(4 + (slots + 1) * 6 + 2), 0, 0x60, 0, 0 };
+        const int bytesPerSlot = PCCCConstants.Df1Limits.SlcIoConfigBytesPerSlot;
+        byte[] body = { (byte)(4 + (slots + 1) * bytesPerSlot + 2), 0, 0x60, 0, 0 };
         var req = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.GetSlotCount, body);
         var reply = _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
@@ -1174,12 +1175,12 @@ public class SlcHandler : IPlcHandler
         var result = new IOConfig[slots + 1];
         for (int i = 0; i <= slots; i++)
         {
-            int baseOffset = i * 6;
+            int baseOffset = i * bytesPerSlot;
             if (baseOffset + 9 >= reply.Data.Length)
                 throw new PCCCException($"IO Config packet too short for slot {i}.");
-            result[i].InputBytes = reply.Data[baseOffset + 4];
-            result[i].OutputBytes = reply.Data[baseOffset + 6];
-            result[i].CardCode = BitConverter.ToInt16(new byte[] { reply.Data[baseOffset + 8], reply.Data[baseOffset + 9] }, 0);
+            result[i].InputBytes  = reply.Data[baseOffset + 4];
+            result[i].OutputBytes = reply.Data[baseOffset + bytesPerSlot];
+            result[i].CardCode    = BitConverter.ToInt16(new byte[] { reply.Data[baseOffset + 8], reply.Data[baseOffset + 9] }, 0);
         }
         return result;
     }

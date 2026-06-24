@@ -818,26 +818,29 @@ public class PCCCComm : IDisposable, IHandlerContext
     private void OnFrameReceived(object? sender, byte[] innerFrame)
     {
         if (innerFrame.Length < 6) return;
-        ushort tns = (ushort)(innerFrame[4] | (innerFrame[5] << 8));
 
-        // Check if this is a reply frame: bit 6 (0x40) of the CMD byte is set
+        // Parse into a PCCCMessage so field names are used instead of raw indices.
+        var msg = PCCCMessage.FromBytes(innerFrame);
+
+        // Check if this is a reply frame: bit 6 (0x40) of the CMD byte is set.
         const byte replyBitMask = 0x40;
-        if (!_disableEvent && innerFrame.Length > 2 && (innerFrame[2] & replyBitMask) != 0)
+        if (!_disableEvent && (msg.Cmd & replyBitMask) != 0)
         {
-            // Check if this TNS is NOT being waited for by the protocol
-            if (_protocol != null && !_protocol.IsTnsPending(tns))
+            // Check if this TNS is NOT being waited for by the protocol.
+            if (_protocol != null && !_protocol.IsTnsPending(msg.Tns))
             {
                 DataReceived?.Invoke(this, EventArgs.Empty);
             }
         }
-        else if (innerFrame.Length > 6 && innerFrame[2] == PCCCConstants.Cmd.ProtectedWrite &&
-                    innerFrame[6] == PCCCConstants.Fnc.WriteWordRange)
+        else if (msg.Fnc.HasValue &&
+                 msg.Cmd == PCCCConstants.Cmd.ProtectedWrite &&
+                 msg.Fnc.Value == PCCCConstants.Fnc.WriteWordRange)
         {
-            // Unsolicited write message - same as original
+            // Unsolicited write message - same as original.
             if (_currentTransport is DF1BaseTransport)
             {
-                int replyTns = innerFrame[5] * 256 + innerFrame[4];
-                SendUnsolicitedResponse(innerFrame[2] + 0x40, replyTns);
+                // Reply CMD = request CMD | 0x40
+                SendUnsolicitedResponse(msg.Cmd | 0x40, msg.Tns);
             }
             UnsolicitedMessageRcvd?.Invoke(this, EventArgs.Empty);
         }
