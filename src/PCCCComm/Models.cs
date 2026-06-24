@@ -60,10 +60,17 @@ public struct DataFileDetails
 /// <summary>
 /// Program/ladder file container used by Upload/Download operations.
 /// </summary>
-public struct PLCFileDetails
+/// <remarks>
+/// Defined as a class (not struct) because it carries a <see cref="Data"/> byte array.
+/// A struct with a reference-type field produces unexpected shallow-copy semantics:
+/// assigning or iterating the struct copies the value fields but shares the same
+/// array reference, so mutations to <see cref="Data"/> through one copy silently
+/// affect all others.
+/// </remarks>
+public class PLCFileDetails
 {
     public int FileType { get; set; }
     public int FileNumber { get; set; }
     public int NumberOfBytes { get; set; }
-    public byte[] Data { get; set; }
+    public byte[] Data { get; set; } = Array.Empty<byte>();
 }

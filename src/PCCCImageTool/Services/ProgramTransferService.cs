@@ -313,7 +313,6 @@ public class ProgramTransferService
                 _progressPercent?.Report(90);
                 _progressMessage?.Report("Comparing files…");
 
-                var comparer = EqualityComparer<PLCFileDetails>.Default;
                 var results = new List<FullCompareResult>();
 
                 foreach (var file in fileFiles)
@@ -321,15 +320,15 @@ public class ProgramTransferService
                     _cancellationToken.ThrowIfCancellationRequested();
                     
                     var plcFile = plcFiles.FirstOrDefault(f => f.FileNumber == file.FileNumber && f.FileType == file.FileType);
-                    bool existsInPlc = !comparer.Equals(plcFile, default);
-                    bool sizeMatches = existsInPlc && plcFile.NumberOfBytes == file.NumberOfBytes;
+                    bool existsInPlc = plcFile != null;
+                    bool sizeMatches = existsInPlc && plcFile!.NumberOfBytes == file.NumberOfBytes;
                     uint? fileCrc = null, plcCrc = null;
                     bool dataMatches = false;
 
                     if (existsInPlc && sizeMatches)
                     {
                         fileCrc = Crc32.Compute(file.Data);
-                        plcCrc = Crc32.Compute(plcFile.Data);
+                        plcCrc = Crc32.Compute(plcFile!.Data);
                         dataMatches = (fileCrc == plcCrc);
                     }
 
@@ -342,7 +341,7 @@ public class ProgramTransferService
                         FileExistsInPlc = existsInPlc,
                         SizeMatches = sizeMatches,
                         FileSizeBytes = file.NumberOfBytes,
-                        PlcSizeBytes = existsInPlc ? plcFile.NumberOfBytes : (int?)null,
+                        PlcSizeBytes = existsInPlc ? plcFile!.NumberOfBytes : (int?)null,
                         FileCrc32 = fileCrc,
                         PlcCrc32 = plcCrc,
                         DataMatches = dataMatches
