@@ -1516,11 +1516,6 @@ class Program
 
                 switch (cmd)
                 {
-                    // ── Navigation ──────────────────────────────────────────────
-                    case "exit":
-                    case "quit":
-                        return;
-
                     case "help":
                         PrintInteractiveHelp();
                         break;
