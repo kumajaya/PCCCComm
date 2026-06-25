@@ -321,8 +321,8 @@ public class PCCCEmulator : IDisposable
         _timer        = new Timer(_ => UpdateDateTime(), null, Timeout.Infinite, Timeout.Infinite);
         _waveformTimer = new Timer(_ => UpdateWaveform(), null, Timeout.Infinite, Timeout.Infinite);
 
-        // Start HTTP server for ML1400 family (serves /filelist.xml)
-        if (_family == EmulationFamily.Ml1400)
+        // Start HTTP server if the family requires it (e.g. ML1400 serves /filelist.xml).
+        if (_profile.NeedsHttpServer)
             _httpServer = new Ml1400HttpServer(_profile.BuildMemoryConfig(), Ml1400HttpPort);
 
         Logger.Always(this, $"PCCC emulator initialized in {mode} mode");
@@ -694,14 +694,15 @@ public class PCCCEmulator : IDisposable
                         ushort tag;
                         lock (_tagLock)
                         {
-                            // Cari tag berikutnya yang belum dipakai (skip 0 dan 0xFFFF)
+                            // Allocate and register tag atomically to prevent
+                            // two concurrent requests receiving the same tag.
                             do {
                                 if (_nextTag == 0xFFFE) _nextTag = 1;
                                 else _nextTag++;
                             } while (_openFiles.ContainsKey(_nextTag));
                             tag = _nextTag;
+                            _openFiles[tag] = (fileType, fileNumber);
                         }
-                        _openFiles[tag] = (fileType, fileNumber);
                         byte[] tagBytes = new byte[] { (byte)(tag & 0xFF), (byte)((tag >> 8) & 0xFF) };
                         SendDataResponse(src, tns, 0x4F, tagBytes, clientContext);
                     }

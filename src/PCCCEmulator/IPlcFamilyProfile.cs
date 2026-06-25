@@ -110,6 +110,14 @@ public interface IPlcFamilyProfile
     /// </summary>
     bool UsesPlc5UploadProtocol { get; }
 
+    // ── HTTP server ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// True = this family requires a companion HTTP server to serve /filelist.xml.
+    /// PCCCEmulator will start an Ml1400HttpServer when this is true.
+    /// </summary>
+    bool NeedsHttpServer { get; }
+
     // ── Memory layout ─────────────────────────────────────────────────────────
 
     /// <summary>

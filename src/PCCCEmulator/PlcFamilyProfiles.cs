@@ -83,6 +83,7 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
     public PCCCEmulator.EmulationFamily FamilyType => PCCCEmulator.EmulationFamily.SlcMicroLogix;
     public bool WritesModeToStatusFile => true;
     public bool UsesPlc5UploadProtocol => false;
+    public bool NeedsHttpServer        => false;
 
     public byte[] BuildGetStatusPayload(ProcessorMode mode)
     {
@@ -171,6 +172,7 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
     public PCCCEmulator.EmulationFamily FamilyType => PCCCEmulator.EmulationFamily.Ml1400;
     public bool WritesModeToStatusFile => false;
     public bool UsesPlc5UploadProtocol => false;
+    public bool NeedsHttpServer        => true;
 
     public byte[] BuildGetStatusPayload(ProcessorMode mode)
     {
@@ -311,6 +313,7 @@ public sealed class Plc5FamilyProfile : IPlcFamilyProfile
     public PCCCEmulator.EmulationFamily FamilyType => PCCCEmulator.EmulationFamily.Plc5;
     public bool WritesModeToStatusFile => false;
     public bool UsesPlc5UploadProtocol => true;
+    public bool NeedsHttpServer        => false;
 
     /// <summary>
     /// Processor expansion byte selects the PLC-5 model reported in GetStatus.
