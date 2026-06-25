@@ -188,6 +188,8 @@ class Program
         public int    ScanTo            { get; init; } = 31;
         public string? WebUsername      { get; init; } = null;
         public string? WebPassword      { get; init; } = null;
+        /// <summary>HTTP port for ML1400 /filelist.xml. Default 80 (real hardware). Use 8080 for emulator.</summary>
+        public int    Ml1400HttpPort    { get; init; } = 80;
     }
 
     // =========================================================================
@@ -227,6 +229,7 @@ class Program
         int    scanTo             = 31;
         string? webUsername       = null;
         string? webPassword       = null;
+        int     ml1400HttpPort    = 80;
 
         cfg = new Config(); // satisfy out parameter before early returns
 
@@ -250,6 +253,7 @@ class Program
                 case "--host"    when i + 1 < args.Length: remoteHost   = args[++i]; break;
                 case "--web-user"     when i + 1 < args.Length: webUsername  = args[++i]; break;
                 case "--web-password" when i + 1 < args.Length: webPassword  = args[++i]; break;
+                case "--ml1400-http-port" when i + 1 < args.Length: if (int.TryParse(args[++i], out var mhp)) ml1400HttpPort = mhp; break;
                 case "--eip-port" when i + 1 < args.Length: if (int.TryParse(args[++i], out var p)) eipPort   = p; break;
                 case "--csp-port" when i + 1 < args.Length: if (int.TryParse(args[++i], out var c)) cspPort   = c; break;
                 case "--timeout"  when i + 1 < args.Length: if (int.TryParse(args[++i], out var t)) timeoutMs = t; break;
@@ -326,6 +330,7 @@ class Program
             ScanTo             = scanTo,
             WebUsername        = webUsername,
             WebPassword        = webPassword,
+            Ml1400HttpPort     = ml1400HttpPort,
         };
         return true;
     }
@@ -492,8 +497,9 @@ class Program
                     throw new Exception("EIP mode requires --host <IP>");
 
                 pccc = Comm.PCCCComm.ForEip(cfg.RemoteHost, cfg.EipPort, cfg.TimeoutMs, cfg.WebUsername, cfg.WebPassword);
-                pccc.TargetNode = cfg.TargetNode;
-                pccc.MyNode     = cfg.MyNode;
+                pccc.TargetNode     = cfg.TargetNode;
+                pccc.MyNode         = cfg.MyNode;
+                pccc.Ml1400HttpPort = cfg.Ml1400HttpPort;
                 Console.WriteLine($"EIP: Connecting to {cfg.RemoteHost}:{cfg.EipPort} (timeout {cfg.TimeoutMs} ms)");
                 break;
             case "csp":
@@ -1502,6 +1508,9 @@ class Program
 
             try
             {
+                // Exit/quit must work even when disconnected.
+                if (cmd is "exit" or "quit") return;
+
                 // Reconnect first if keepalive declared link down.
                 if (!EnsureConnected(pccc, cfg)) continue;
 
@@ -3048,6 +3057,7 @@ class Program
         Console.WriteLine("  --csp-port <n>               CSPv4 TCP port (default: 2222)");
         Console.WriteLine("  --lsap-control <hex>         LSAP control byte for CSPv4 (default: 00)");
         Console.WriteLine("  --timeout <ms>               Network timeout in ms (default: 5000)");
+        Console.WriteLine("  --ml1400-http-port <n>       HTTP port for ML1400 filelist.xml (default: 80, use 8080 for PCCCEmulator)");
         Console.WriteLine();
         Console.WriteLine("DF1 Serial:");
         Console.WriteLine("  --baud <n>                   Baud rate (default: 19200)");

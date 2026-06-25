@@ -61,6 +61,7 @@ class Program
         int cspPort = 2222;
         bool quietMode = false;
         string family = "slc";
+        int httpPort = 8080;
 
         // Parse positional port argument
         if (args.Length > 0 && !args[0].StartsWith("--"))
@@ -128,6 +129,10 @@ class Program
             {
                 family = args[++i].ToLowerInvariant();
             }
+            else if (a == "--http-port" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[++i], out var p)) httpPort = p;
+            }
             else if (a == "--help" || a == "-h")
             {
                 PrintUsage();
@@ -158,15 +163,12 @@ class Program
             Logger.Always(null, $"CSP mode ignores serial port '{portName}'. Using Ethernet only.");
         }
 
-        PCCCEmulator.EmulationFamily emuFamily = family switch
-        {
-            "plc5"   => PCCCEmulator.EmulationFamily.Plc5,
-            "ml1400" => PCCCEmulator.EmulationFamily.Ml1400,
-            _        => PCCCEmulator.EmulationFamily.SlcMicroLogix
-        };
+        // Resolve via registry — no hardcoded switch needed;
+        // registering a new family in PlcFamilyRegistry is sufficient.
+        IPlcFamilyProfile emuProfile = PlcFamilyRegistry.Resolve(family);
 
         // Create and start emulator
-        using var emulator = new PCCCEmulator(portName, baud, parity, emulatorMode, eipPort, cspPort, emuFamily)
+        using var emulator = new PCCCEmulator(portName, baud, parity, emulatorMode, eipPort, cspPort, emuProfile)
         {
             MyNode = node,
             CheckSum = checksum == "crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc
@@ -187,6 +189,9 @@ class Program
         // Disable logging if quiet mode is enabled
         if (quietMode)
             emulator.SetLoggingEnabled(false);
+
+        if (family == "ml1400")
+            emulator.Ml1400HttpPort = httpPort;
 
         try
         {
@@ -221,7 +226,9 @@ class Program
                 Console.WriteLine($"      Node ID   : {node}");
             }
             
-            Console.WriteLine($"      Family    : {family switch { "plc5" => "PLC-5", "ml1400" => "MicroLogix 1400 (1766-LEC)", _ => "SLC/MicroLogix" }}");
+            Console.WriteLine($"      Family    : {emuProfile.Name}");
+            if (family == "ml1400")
+                Console.WriteLine($"      HTTP Port : {httpPort} (serves /filelist.xml)");
             Console.WriteLine($"      Logging   : {(quietMode ? "Disabled (High Performance)" : "Enabled")}");
             Logger.Always(null, "Press Enter to stop.");
             Console.ReadLine();
@@ -246,14 +253,15 @@ class Program
         Console.WriteLine("  --node <n>                Emulator node ID (default 1)");
         Console.WriteLine("  --checksum <crc|bcc>      Checksum mode (default crc)");
         Console.WriteLine("  --mode <df1|df1slave|uic|eip|csp> Transport mode (default df1)");
-        Console.WriteLine("  --family <slc|plc5|ml1400>       Emulation family (default slc)");
+        Console.WriteLine($"  --family <{PlcFamilyRegistry.OptionList}>  Emulation family (default slc)");
         Console.WriteLine("                                   ml1400: impersonate MicroLogix 1400 (1766-LEC)");
         Console.WriteLine("  --rs485-mode <auto|rts|dtr>      RS-485 direction control (default auto)");
         Console.WriteLine("  --rts-assert-delay <ms>          Delay after enabling driver (default 1)");
         Console.WriteLine("  --rts-deassert-delay <ms>        Delay after last byte before disabling (default 5)");
         Console.WriteLine("  --port <n>                EIP port number (default 44818)");
         Console.WriteLine("  --csp-port <n>            CSP port number (default 2222)");
-        Console.WriteLine("  --quiet, -q               Disable logging for maximum performance");
+        Console.WriteLine("  --http-port <n>           HTTP port for ML1400 filelist.xml (default 80)");
+  Console.WriteLine("  --quiet, -q               Disable logging for maximum performance");
         Console.WriteLine("  --help, -h                Show this help");
         Console.WriteLine();
         Console.WriteLine("Examples:");

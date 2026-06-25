@@ -79,6 +79,13 @@ public class PCCCComm : IDisposable, IHandlerContext
     private readonly string _webUsername = DefaultWebUsername;
     private readonly string _webPassword = DefaultWebPassword;
 
+    /// <summary>
+    /// HTTP port used to fetch /filelist.xml from a MicroLogix 1400.
+    /// Real ML1400 uses port 80 (default). Set to 8080 when connecting
+    /// to the PCCCEmulator which listens on 8080 to avoid requiring admin privileges.
+    /// </summary>
+    public int Ml1400HttpPort { get; set; } = 80;
+
     // ─── Properties (exactly as original) ──────────────────────────────────
     public int MyNode { get; set; }
     public int TargetNode { get; set; }
@@ -630,7 +637,7 @@ public class PCCCComm : IDisposable, IHandlerContext
     /// </summary>
     private DataFileDetails[] GetDataMemoryMl1400ViaHttp(string host)
     {
-        string url = $"http://{host}/filelist.xml";
+        string url = $"http://{host}:{Ml1400HttpPort}/filelist.xml";
 
         // HttpClient is created per-call here because credentials are instance-specific
         // and GetDataMemory() is called infrequently (typically once at startup).
@@ -638,7 +645,13 @@ public class PCCCComm : IDisposable, IHandlerContext
         // HttpClientHandler replacement which is not supported after first use.
         var handler = new HttpClientHandler
         {
-            Credentials = new System.Net.NetworkCredential(_webUsername, _webPassword)
+            Credentials       = new System.Net.NetworkCredential(_webUsername, _webPassword),
+            // PreAuthenticate skips the 401 challenge round-trip — the emulator
+            // does not implement Basic/NTLM auth, so we send credentials upfront.
+            // Real ML1400 also accepts unauthenticated requests on the local network.
+            PreAuthenticate   = true,
+            // AllowAutoRedirect is not needed for this simple endpoint.
+            AllowAutoRedirect = false,
         };
         string xml;
         using (var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) })

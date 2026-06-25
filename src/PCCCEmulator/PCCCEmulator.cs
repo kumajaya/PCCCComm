@@ -80,6 +80,23 @@ using System.Threading.Tasks;
 ///   - Extended element addressing (element >= 255) is decoded correctly
 ///     using 0xFF followed by two-byte value.
 /// </summary>
+/// <summary>Processor operating mode codes used in PCCC GetStatus and SetMode commands.</summary>
+/// <remarks>
+///   Local:  0x11=PROG, 0x1E=RUN
+///   Remote: 0x01=PROG, 0x06=RUN
+///   Test:   0x17=Cont, 0x18=Single, 0x19=Step
+/// </remarks>
+public enum ProcessorMode : byte
+{
+    LocalProg   = 0x11,
+    RemoteProg  = 0x01,
+    LocalRun    = 0x1E,
+    RemoteRun   = 0x06,
+    TestCont    = 0x17,
+    TestSingle  = 0x18,
+    TestStep    = 0x19,
+}
+
 public class PCCCEmulator : IDisposable
 {
     // ─── Core Components ──────────────────────────────────────────────────────
@@ -110,6 +127,7 @@ public class PCCCEmulator : IDisposable
     }
 
     private EmulationFamily _family = EmulationFamily.SlcMicroLogix;
+    private IPlcFamilyProfile _profile = new SlcFamilyProfile();
 
     public EmulationFamily Family
     {
@@ -117,6 +135,7 @@ public class PCCCEmulator : IDisposable
         set
         {
             _family = value;
+            _profile = PlcFamilyRegistry.Resolve(value);
             // Regenerate GetStatus payload cache when family changes
             lock (_cacheLock)
             {
@@ -135,22 +154,8 @@ public class PCCCEmulator : IDisposable
     private byte[] _cachedGetStatusPayload;
     private readonly object _cacheLock = new object();
 
-    // ─── Processor Mode Tracking ──────────────────────────────────────────────
-    // Full processor mode tracking per Publication 1770-6.5.16 Chapter 10.
-    // Mode code is stored in byte 18 of the GetStatus response.
-    //   Local:  0x11=PROG, 0x1E=RUN
-    //   Remote: 0x01=PROG, 0x06=RUN
-    //   Test:   0x17=Cont, 0x18=Single, 0x19=Step
-    private enum ProcessorMode : byte
-    {
-        LocalProg   = 0x11,
-        RemoteProg  = 0x01,
-        LocalRun    = 0x1E,
-        RemoteRun   = 0x06,
-        TestCont    = 0x17,
-        TestSingle  = 0x18,
-        TestStep    = 0x19,
-    }
+    // ProcessorMode is defined as a top-level enum (before this class).
+
 
     // Stored as int so Interlocked operations can be used for thread-safe access.
     private volatile int _processorModeRaw = (int)ProcessorMode.LocalRun;
@@ -267,13 +272,24 @@ public class PCCCEmulator : IDisposable
     /// <param name="eipPort">EIP port number (default 44818, only used for EIP mode)</param>
     /// <param name="cspPort">CSP port number (default 2222, only used for CSP mode)</param>
     /// <exception cref="NotImplementedException">Thrown for DH485 mode (planned for future)</exception>
-    public PCCCEmulator(string portName, int baudRate, Parity parity, 
-                        TransportMode mode = TransportMode.DF1, 
+    public PCCCEmulator(string portName, int baudRate, Parity parity,
+                        TransportMode mode = TransportMode.DF1,
                         int eipPort = 44818, int cspPort = 2222,
                         EmulationFamily family = EmulationFamily.SlcMicroLogix)
+        : this(portName, baudRate, parity, mode, eipPort, cspPort,
+               PlcFamilyRegistry.Resolve(family)) { }
+
+    /// <summary>
+    /// Primary constructor accepting an explicit family profile.
+    /// </summary>
+    public PCCCEmulator(string portName, int baudRate, Parity parity,
+                        TransportMode mode,
+                        int eipPort, int cspPort,
+                        IPlcFamilyProfile profile)
     {
-        _family = family;   // set family before BuildGetStatusPayload is called
-        _memory = new PlcMemory(_family);
+        _profile = profile;
+        _family  = profile.FamilyType;
+        _memory = new PlcMemory(profile);
         _directoryBytes = _memory.GetDirectory();
         Logger.Always(this, $"Directory loaded: {_directoryBytes?.Length ?? 0} bytes");
 
@@ -305,8 +321,17 @@ public class PCCCEmulator : IDisposable
         _timer        = new Timer(_ => UpdateDateTime(), null, Timeout.Infinite, Timeout.Infinite);
         _waveformTimer = new Timer(_ => UpdateWaveform(), null, Timeout.Infinite, Timeout.Infinite);
 
+        // Start HTTP server for ML1400 family (serves /filelist.xml)
+        if (_family == EmulationFamily.Ml1400)
+            _httpServer = new Ml1400HttpServer(_profile.BuildMemoryConfig(), Ml1400HttpPort);
+
         Logger.Always(this, $"PCCC emulator initialized in {mode} mode");
     }
+
+    /// <summary>HTTP port for ML1400 filelist.xml server (default 80).</summary>
+    public int Ml1400HttpPort { get; set; } = 8080;
+
+    private Ml1400HttpServer? _httpServer;
 
     /// <summary>
     /// Convenience constructor for DF1 mode (default transport).
@@ -325,6 +350,7 @@ public class PCCCEmulator : IDisposable
     public void Start()
     {
         _transport?.Start();
+        _httpServer?.Start();
         _timer?.Change(0, 1000);
         _waveformTimer?.Change(0, 500);
         Logger.Always(this, $"PCCC emulator started in {_mode} mode");
@@ -339,6 +365,7 @@ public class PCCCEmulator : IDisposable
         if (Interlocked.CompareExchange(ref _isDisposing, 1, 0) != 0) return;
 
         _transport?.Stop();
+        _httpServer?.Stop();
         _timer?.Change(Timeout.Infinite, Timeout.Infinite);
         _waveformTimer?.Change(Timeout.Infinite, Timeout.Infinite);
 
@@ -350,6 +377,7 @@ public class PCCCEmulator : IDisposable
         Stop();
         _timer?.Dispose();
         _waveformTimer?.Dispose();
+        _httpServer?.Dispose();
         _memory.Dispose();
         // EIPTransport does not implement IDisposable; Stop() above already drains
         // in-flight requests and closes all resources via its StopAsync() path.
@@ -581,7 +609,7 @@ public class PCCCEmulator : IDisposable
             // =================================================================
             case 0x53:  // Upload All Request
             {
-                if (_family == EmulationFamily.Plc5)
+                if (_profile.UsesPlc5UploadProtocol)
                 {
                     // PLC-5 Procedure 2 reply per spec §7-33: 
                     // A(1B) = number of uploadable segments 
@@ -622,7 +650,7 @@ public class PCCCEmulator : IDisposable
 
             case 0x50:  // Download All Request
             {
-                if (_family == EmulationFamily.Plc5)
+                if (_profile.UsesPlc5UploadProtocol)
                 {
                     // PLC-5: empty reply per spec §7-7
                     SendEmptyResponse(src, tns, 0x4F, func, clientContext);
@@ -1756,48 +1784,21 @@ public class PCCCEmulator : IDisposable
     /// </summary>
     private void UpdateProcessorMode()
     {
-        byte mode = (byte)ProcessorModeValue;
-        if (_family == EmulationFamily.SlcMicroLogix)
+        ProcessorMode mode = ProcessorModeValue;
+
+        // Some families (SLC/ML) also write the mode byte to S2:1 in data memory.
+        if (_profile.WritesModeToStatusFile)
         {
             byte[] current = _memory.ReadRaw(0x84, 2, 2, 2, out int status);
             if (status == 0 && current.Length == 2)
             {
-                current[0] = mode;
+                current[0] = (byte)mode;
                 _memory.Write(0x84, 2, 1, 0, 2, current);
             }
         }
-        // For PLC-5, the mode is only stored in the GetStatus payload cache, not in the memory file.
+
         lock (_cacheLock)
-        {
-            if (_family == EmulationFamily.SlcMicroLogix)
-            {
-                _cachedGetStatusPayload[18] = mode;
-            }
-            else if (_family == EmulationFamily.Ml1400)
-            {
-                // ML1400 mode byte is at offset 28 in GetStatus response
-                // Mode values: 0x02 = RemoteRun, 0x00 = RemoteProg
-                _cachedGetStatusPayload[28] = mode switch
-                {
-                    (byte)ProcessorMode.RemoteRun  => 0x02,
-                    (byte)ProcessorMode.LocalRun   => 0x02,
-                    (byte)ProcessorMode.RemoteProg => 0x00,
-                    _ => 0x00
-                };
-            }
-            else
-            {
-                // For PLC-5, we update byte 0 according to the operating status
-                byte operatingStatus = mode switch
-                {
-                    0x1E => 2,  // LocalRun
-                    0x06 => 6,  // RemoteRun
-                    0x01 => 4,  // RemoteProg
-                    _ => 0
-                };
-                _cachedGetStatusPayload[0] = operatingStatus;
-            }
-        }
+            _profile.PatchModeInPayload(_cachedGetStatusPayload, mode);
     }
 
     /// <summary>
@@ -1827,200 +1828,10 @@ public class PCCCEmulator : IDisposable
     }
 
     private byte[] BuildGetStatusPayload()
-    {
-        if (_family == EmulationFamily.Plc5)
-            return BuildPlc5GetStatusPayload();
-        if (_family == EmulationFamily.Ml1400)
-            return BuildMl1400GetStatusPayload();
-            return BuildSlcGetStatusPayload();
-    }
+        => _profile.BuildGetStatusPayload(ProcessorModeValue);
 
-    /// <summary>
-    /// Builds the 24-byte GetStatus payload for the current processor mode.
-    /// Called once at construction and again implicitly via UpdateProcessorMode()
-    /// which patches byte 18 in-place on the cached copy.
-    /// </summary>
-    private byte[] BuildSlcGetStatusPayload()
-    {
-        byte[] payload = new byte[24];
+    // GetStatus payload building and mode patching are delegated to IPlcFamilyProfile.
+    // See PlcFamilyProfiles.cs for SlcFamilyProfile, Ml1400FamilyProfile, Plc5FamilyProfile.
 
-        payload[0] = 0x00;      // Mode/status flags (no edits active)
-        payload[1] = 0xEE;      // Type extender
-        payload[2] = 0x34;      // Extended interface type (DF1 full-duplex)
-        payload[3] = 0x5B;      // Extended processor type (SLC-5/04)
-        payload[4] = 0x32;      // Series/revision
 
-        // Bulletin number "5/04" in ASCII, space-padded to 11 bytes (bytes 5–15)
-        string catalog = "5/04";
-        byte[] catBytes = System.Text.Encoding.ASCII.GetBytes(catalog);
-        Array.Copy(catBytes, 0, payload, 5, catBytes.Length);
-        for (int i = 5 + catBytes.Length; i < 16; i++) payload[i] = 0x20;
-
-        payload[16] = 0x00;     // Major error word (low byte)
-        payload[17] = 0x00;     // Major error word (high byte)
-        payload[18] = (byte)ProcessorModeValue;  // Processor mode code (patched by UpdateProcessorMode)
-        payload[19] = 0x00;     // High byte (fault flags)
-        payload[20] = 0x00;     // Program ID (low byte)
-        payload[21] = 0x00;     // Program ID (high byte)
-        payload[22] = 0x40;     // RAM size in Kbytes — 0x40 = 64 KB (1747-L542)
-        payload[23] = 0x3F;     // Flags (no program owner, directory not corrupted)
-
-        return payload;
-    }
-
-    /// <summary>
-    /// Builds the 29-byte GetStatus payload for MicroLogix 1400 (1766-LEC).
-    ///
-    /// Byte layout derived from real hardware capture (1766-L32BWA Series C FRN 15.0):
-    ///   [0]    = 0x00  mode/status flags
-    ///   [1]    = 0xEE  type extender (SLC/ML family)
-    ///   [2]    = 0x34  extended interface type
-    ///   [3]    = 0x9F  processor type = ML1400
-    ///   [4]    = 0x23  series/revision byte
-    ///   [5-15] = "1766-LEC   " product name, space-padded to 11 bytes
-    ///   [16]   = 0x00  major error word low
-    ///   [17]   = 0x00  major error word high
-    ///   [18]   = 0x26  firmware revision (FRN)
-    ///   [19]   = 0x04  firmware revision minor
-    ///   [20]   = 0x71  flags
-    ///   [21]   = 0x43  flags
-    ///   [22]   = 0x9E  flags
-    ///   [23]   = 0xFC  flags
-    ///   [24-27]= reserved
-    ///   [28]   = mode  processor mode (0x02=RemoteRun, 0x00=RemoteProg)
-    /// </summary>
-    private byte[] BuildMl1400GetStatusPayload()
-    {
-        byte[] payload = new byte[29];
-
-        payload[0]  = 0x00;     // Mode/status flags
-        payload[1]  = 0xEE;     // Type extender (SLC/ML family)
-        payload[2]  = 0x34;     // Extended interface type
-        payload[3]  = 0x9F;     // Processor type = ML1400
-        payload[4]  = 0x23;     // Series/revision byte
-
-        // Product name "1766-LEC" space-padded to 11 bytes (bytes 5–15)
-        string catalog = "1766-LEC";
-        byte[] catBytes = System.Text.Encoding.ASCII.GetBytes(catalog);
-        Array.Copy(catBytes, 0, payload, 5, catBytes.Length);
-        for (int i = 5 + catBytes.Length; i < 16; i++) payload[i] = 0x20;
-
-        payload[16] = 0x00;     // Major error word low
-        payload[17] = 0x00;     // Major error word high
-        payload[18] = 0x26;     // Firmware revision (FRN 15.0 encoded as 0x26=38? empirical)
-        payload[19] = 0x04;     // Firmware revision minor
-        payload[20] = 0x71;     // Flags (empirical from capture)
-        payload[21] = 0x43;     // Flags
-        payload[22] = 0x9E;     // Flags
-        payload[23] = 0xFC;     // Flags
-        payload[24] = 0x00;     // Reserved
-        payload[25] = 0x00;     // Reserved
-        payload[26] = 0x00;     // Reserved
-        payload[27] = 0x00;     // Reserved
-        payload[28] = (byte)ProcessorModeValue switch
-        {
-            (byte)ProcessorMode.RemoteRun  => 0x02,
-            (byte)ProcessorMode.LocalRun   => 0x02,
-            (byte)ProcessorMode.RemoteProg => 0x00,
-            _ => 0x00
-        };
-
-        return payload;
-    }
-
-    /// <summary>
-    /// Gets or sets the processor expansion byte for PLC-5 diagnostic status.
-    /// Default 0x4B (1785-L40E). Other values: 0x4A=1785-L20E, 0x59=1785-L80E, etc.
-    /// </summary>
-    public int Plc5ProcessorExpansionByte { get; set; } = 0x4B;
-
-    private byte[] BuildPlc5GetStatusPayload()
-    {
-        // PLC-5 status layout per 1770-6.5.16 Chapter 10, page 10-22 (36 bytes)
-        byte[] payload = new byte[36];
-
-        // Byte 1 (index 0): operating status (bits 0-2)
-        //   0=PROG, 2=Local Run, 4=Remote PROG, 6=Remote Run
-        byte operatingStatus;
-        switch (ProcessorModeValue)
-        {
-            case ProcessorMode.LocalRun:   operatingStatus = 2; break;
-            case ProcessorMode.RemoteRun:  operatingStatus = 6; break;
-            case ProcessorMode.RemoteProg: operatingStatus = 4; break;
-            default:                       operatingStatus = 0; break;
-        }
-        payload[0] = operatingStatus;
-
-        // Byte 2 (index 1): Processor Type (low nibble 0xB = PLC-5) and Expansion flag (high nibble 0xE)
-        payload[1] = 0xEB;   // 0xE0 | 0x0B
-
-        // Byte 3 (index 2): Processor Expansion Byte (default 1785-L40E)
-        payload[2] = (byte)Plc5ProcessorExpansionByte; // property, default 0x4B
-
-        // Bytes 4-7 (index 3-6): size of user memory in words (32-bit LE, 64K words)
-        payload[3] = 0x00;
-        payload[4] = 0x00;
-        payload[5] = 0x01;
-        payload[6] = 0x00;
-
-        // Byte 8 (index 7): series/revision (bits 0-4 revision, bits 5-7 series)
-        payload[7] = 0x32;
-
-        // Byte 9 (index 8): processor number on DH+ link
-        payload[8] = 0x01;
-
-        // Byte 10 (index 9): I/O address (0xFD = scanner)
-        payload[9] = 0xFD;
-
-        // Byte 11 (index 10): I/O and communication parameters (double density + 115K baud)
-        payload[10] = 0x21;
-
-        // Bytes 12-13 (index 11-12): number of data table files (LE, 32 files)
-        payload[11] = 0x20;
-        payload[12] = 0x00;
-
-        // Bytes 14-15 (index 13-14): number of program type files (LE, 24 files)
-        payload[13] = 0x18;
-        payload[14] = 0x00;
-
-        // Byte 16 (index 15): forcing status
-        payload[15] = 0x00;
-        // Byte 17 (index 16): memory protect indication
-        payload[16] = 0x00;
-        // Byte 18 (index 17): bad RAM indication
-        payload[17] = 0x00;
-        // Byte 19 (index 18): debug mode
-        payload[18] = 0x00;
-
-        // Bytes 20-21 (index 19-20): hold point file (LE)
-        payload[19] = 0x00;
-        payload[20] = 0x00;
-        // Bytes 22-23 (index 21-22): hold point element (LE)
-        payload[21] = 0x00;
-        payload[22] = 0x00;
-
-        // Bytes 24-25 (index 23-24): edit timestamp seconds (LE)
-        payload[23] = 0x00;
-        payload[24] = 0x00;
-        // Bytes 26-27 (index 25-26): edit timestamp minutes (LE)
-        payload[25] = 0x00;
-        payload[26] = 0x00;
-        // Bytes 28-29 (index 27-28): edit timestamp hours (LE)
-        payload[27] = 0x00;
-        payload[28] = 0x00;
-        // Bytes 30-31 (index 29-30): edit timestamp day (LE)
-        payload[29] = 0x00;
-        payload[30] = 0x00;
-        // Bytes 32-33 (index 31-32): edit timestamp month (LE)
-        payload[31] = 0x00;
-        payload[32] = 0x00;
-        // Bytes 34-35 (index 33-34): edit timestamp year (LE)
-        payload[33] = 0x00;
-        payload[34] = 0x00;
-
-        // Byte 36 (index 35): port number this command received on
-        payload[35] = 0x00;
-
-        return payload;
-    }
 }

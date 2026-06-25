@@ -25,6 +25,7 @@
 // but increases memory usage and directory size from 409 to 639 bytes.
 
 using System.Reflection;
+using System.Linq;
 using System.Threading;
 using System.Runtime.CompilerServices;
 
@@ -141,7 +142,9 @@ public class PlcMemory : IDisposable
     private readonly Dictionary<int, int> _flatFileTypeByNumber = new();
     private int _flatTotalBytes;
 
+    // _family retained for WriteStString (string encoding differs for PLC-5)
     private PCCCEmulator.EmulationFamily _family = PCCCEmulator.EmulationFamily.SlcMicroLogix;
+    private IPlcFamilyProfile _profile = new SlcFamilyProfile();
 
     // ─── Constructor ──────────────────────────────────────────────────────────
     /// <summary>
@@ -150,17 +153,25 @@ public class PlcMemory : IDisposable
     /// and merged with the default files.
     /// </summary>
     public PlcMemory(PCCCEmulator.EmulationFamily family = PCCCEmulator.EmulationFamily.SlcMicroLogix)
+        : this(PlcFamilyRegistry.Resolve(family)) { }
+
+    /// <summary>
+    /// Initializes the PLC memory from a family profile.
+    /// This is the primary constructor — all others delegate here.
+    /// </summary>
+    public PlcMemory(IPlcFamilyProfile profile)
     {
-        _family = family;
+        _profile = profile;
+        _family  = profile.FamilyType;
         BuildDirectory();
         BuildDataFiles();
         BuildIoConfig();
         BuildDownloadSeed();
         LoadEmbeddedProgram();
         RebuildFlatMemory();   // ensures flat memory matches all files (including loaded program)
-        
+
         InitializeHotCache();
-        
+
         Logger.Always(this, _programLoaded
             ? "PCCC PLC memory initialized with embedded program."
             : "PCCC PLC memory initialized with default data.");
@@ -214,32 +225,25 @@ public class PlcMemory : IDisposable
     /// </summary>
     private void BuildDirectory()
     {
+        var cfg = _profile.BuildMemoryConfig();
+
 #if INCLUDE_INACTIVE_FILES
-        const int dirSize = 639;           // 79 + (56 × 10) for full 32+24 layout
-        const int numProgramFiles = 24;    // SYS×2 + LAD×22
-        const int numDataFiles = 32;       // 32 data file slots
+        // Full layout: recalculate dirSize to include all files + inactive slots
+        int totalEntries = cfg.NumDataFiles + cfg.NumProgramFiles + 9; // inactive padding
+        int dirSize = 79 + totalEntries * 10;
 #else
-        const int dirSize = 429;           // 79 + (35 × 10) for active-only layout (23 data + 12 prog)
-        const int numProgramFiles = 12;    // SYS×2 + LAD×10
-        const int numDataFiles = 23;       // 23 active data files
+        int dirSize = cfg.DirectorySize;
 #endif
         var dir = new byte[dirSize];
 
-        WriteDirectoryHeader(dir, dirSize, numProgramFiles, numDataFiles);
-        
-        int addr = WriteDataFileEntries(dir, 0);
-        WriteProgramFileEntries(dir, addr);
+        WriteDirectoryHeader(dir, dirSize, cfg.NumProgramFiles, cfg.NumDataFiles);
+
+        var (addr, dataPos) = WriteDataFileEntries(dir, 0, cfg);
+        WriteProgramFileEntries(dir, addr, dataPos);
 
         _files[(DirectoryInternalType, DirectoryInternalNumber)] = dir;
     }
 
-    /// <summary>
-    /// Writes the directory header (bytes 0-78).
-    /// </summary>
-    /// <param name="dir">Directory byte array</param>
-    /// <param name="dirSize">Total directory size in bytes</param>
-    /// <param name="numProgramFiles">Number of program files (including SYS and LAD)</param>
-    /// <param name="numDataFiles">Number of data files (active + inactive)</param>
     private void WriteDirectoryHeader(byte[] dir, int dirSize, int numProgramFiles, int numDataFiles)
     {
         // Directory size at offset 70 (element 0x23 × 2)
@@ -248,109 +252,62 @@ public class PlcMemory : IDisposable
         WriteU16(dir, 52, numDataFiles);
     }
 
-    /// <summary>
-    /// Writes all data file entries to the directory.
-    /// </summary>
-    /// <param name="dir">Directory byte array</param>
-    /// <param name="startAddr">Starting word address for data files</param>
-    /// <returns>The next available word address after all data files</returns>
-    private int WriteDataFileEntries(byte[] dir, int startAddr)
+    private (int addr, int pos) WriteDataFileEntries(byte[] dir, int startAddr, PlcMemoryConfig cfg)
     {
         int addr = startAddr;
-        int pos = 79;
+        int pos  = 79;
 
-        /// <summary>
-        /// Registers a single data file entry in the directory.
-        /// </summary>
-        /// <param name="type">PCCC file type code (e.g., 0x8B for O, 0x8C for I, 0x85 for B)</param>
-        /// <param name="sizeBytes">File size in BYTES (matches PCCC "Byte Size" specification)</param>
-        /// <param name="fileNum">File number (0-255)</param>
-        /// <param name="elemSize">Size of each element in bytes (default 2)</param>
         void Register(byte type, int sizeBytes, byte fileNum, int elemSize = 2)
         {
-            // Store sizeBytes directly in BYTES (per AB Publication 1770-6.5.16 page 7-17)
             dir[pos]     = type;
             dir[pos + 1] = (byte)(sizeBytes & 0xFF);
             dir[pos + 2] = (byte)((sizeBytes >> 8) & 0xFF);
             dir[pos + 3] = fileNum;
-            dir[pos + 4] = 0x00;              // Attribute: normal
-            dir[pos + 5] = (byte)elemSize;    // Element size in bytes
+            dir[pos + 4] = 0x00;
+            dir[pos + 5] = (byte)elemSize;
             dir[pos + 6] = (byte)(addr & 0xFF);
             dir[pos + 7] = (byte)(addr >> 8);
             dir[pos + 8] = 0x00;
             dir[pos + 9] = 0x00;
-            
-            // Record flat memory offset for this data file (byte address)
-            _flatOffsetByFileNumber[fileNum] = addr * 2;
-            _flatFileTypeByNumber[fileNum] = type;
 
-            addr += sizeBytes / 2;            // Address advances in WORDS
+            _flatOffsetByFileNumber[fileNum] = addr * 2;
+            _flatFileTypeByNumber[fileNum]   = type;
+
+            addr += sizeBytes / 2;
             _fileTypeByNumber[fileNum] = type;
             pos += 10;
         }
 
-        // Data files (see class header for detailed table)
-        Register(0x8B,  12,  0);       // O0 — Output image, 6 words
-        Register(0x8C,  42,  1);       // I1 — Input image, 21 words
-        Register(0x84, 166,  2);       // S2 — Status file, 83 words (system memory)
-        Register(0x85,  28,  3);       // B3 — Binary file, 14 words
-        Register(0x86, 468,  4, 6);    // T4 — Timer file, 78 timers × 6 bytes
-        Register(0x87,   6,  5, 6);    // C5 — Counter file, 1 counter × 6 bytes
-        Register(0x88,  12,  6, 6);    // R6 — Control file, 2 controls × 6 bytes
-        Register(0x89, 148,  7);       // N7 — Integer file, 74 words
-        Register(0x8A, 152,  8, 4);    // F8 — Float file, 38 floats × 4 bytes
-        Register(0x85,  20,  9);       // B9 — Binary file, 10 words
-        Register(0x85, 142, 10);       // B10 — Binary file, 71 words
-        Register(0x85,  18, 11);       // B11 — Binary file, 9 words
-        Register(0x85,   2, 12);       // B12 — Binary file, 1 word
-        Register(0x85,   4, 13);       // B13 — Binary file, 2 words
-        Register(0x85,   2, 14);       // B14 — Binary file, 1 word
-        Register(0x85,  82, 15);       // B15 — Binary file, 41 words
-        Register(0x85,  82, 16);       // B16 — Binary file, 41 words
-        Register(0x89,  52, 17);       // N17 — Integer file, 26 words
-        if (_family == PCCCEmulator.EmulationFamily.Plc5)
+        // Write entries in file-number order, inserting empty slots for gaps.
+        // This is required because the directory consumer (library, RSLogix) reads
+        // numDataFiles sequential slots — gaps must be present as zero-size entries.
+        var sorted = cfg.DataFiles.OrderBy(f => f.FileNumber).ToList();
+        int nextExpected = 0;
+        foreach (var f in sorted)
         {
-            Register(0x8D, 880, 18, 88);   // ST18 — String file, 10 strings × 88 bytes/elem
-            Register(0x0C, 100, 19, 4);    // L19 — Long integer file, 25 elements × 4 bytes = 100 bytes
-        }
-        else
-        {
-            Register(0x8D, 840, 18, 84);   // ST18 — String file, 10 strings × 84 bytes/elem
-            Register(0xA4, 400, 19, 40);   // Data Monitor File, 400 bytes, 40 bytes/element
+            // Fill any gap with empty (inactive) entries
+            while (nextExpected < f.FileNumber)
+            {
+                dir[pos + 3] = (byte)nextExpected;  // file number, rest stays zero
+                pos += 10;
+                nextExpected++;
+            }
+            Register(f.FileType, f.SizeBytes, f.FileNumber, f.ElemSize);
+            nextExpected = f.FileNumber + 1;
         }
 
-#if INCLUDE_INACTIVE_FILES
-        // Inactive data files 20-28 (type 0x85 = Binary, size 0)
-        // These occupy directory slots but have no data and do not appear in RSLogix
-        for (int n = 20; n <= 28; n++)
-        {
-            dir[pos]     = 0x85;
-            dir[pos + 1] = 0x00;
-            dir[pos + 2] = 0x00;
-            dir[pos + 3] = (byte)n;
-            // Bytes 4-9 remain zero
-            pos += 10;
-        }
-#endif
-
-        Register(0x85, 52, 29);        // B29 — Binary file, 26 words
-        Register(0x85, 52, 30);        // B30 — Binary file, 26 words
-        Register(0x85, 52, 31);        // B31 — Binary file, 26 words
-
-        return addr;
+        return (addr, pos);
     }
 
-    /// <summary>
-    /// Writes all program file entries (SYS and LAD) to the directory.
-    /// Program files do not consume data address space, so no address is returned.
-    /// </summary>
-    /// <param name="dir">Directory byte array</param>
-    /// <param name="startAddr">Unused - kept for API consistency with WriteDataFileEntries</param>
-    private void WriteProgramFileEntries(byte[] dir, int startAddr)
+    private void WriteProgramFileEntries(byte[] dir, int startAddr, int startPos)
     {
-        int pos = 79 + (_fileTypeByNumber.Count * 10);
+        int pos = startPos;
         // Starting byte offset for program files in flat memory (after all data files)
         int progFlatBase = startAddr * 2;
+        // Maximum program file entries — determined by dirSize allocated in BuildDirectory.
+        // Computed from remaining space in dir after data entries.
+        int maxProgEntries = (dir.Length - pos) / 10;
+        int progEntriesWritten = 0;
 
         // SYS file 0 — System data storage header (2 bytes)
         dir[pos]     = 0x01;
@@ -358,6 +315,7 @@ public class PlcMemory : IDisposable
         dir[pos + 2] = 0x00;
         dir[pos + 3] = 0x00;
         pos += 10;
+        progEntriesWritten++;
         _fileTypeByNumber[0] = 0x01;
         _files[(0x01, 0)] = new byte[2];
         _bytesPerElement[(0x01, 0)] = 0;
@@ -371,6 +329,7 @@ public class PlcMemory : IDisposable
         dir[pos + 2] = 0x00;
         dir[pos + 3] = 0x01;
         pos += 10;
+        progEntriesWritten++;
         _fileTypeByNumber[1] = 0x01;
         _files[(0x01, 1)] = new byte[2];
         _bytesPerElement[(0x01, 1)] = 0;
@@ -420,19 +379,23 @@ public class PlcMemory : IDisposable
         int typeIndex = 0;
         foreach (int n in activeLad)
         {
+            // Stop if no more room in directory for this family
+            if (progEntriesWritten + 2 >= maxProgEntries) break;
+
             int sizeBytes = actualLadSizes[n];
             byte fileType = (byte)(0x20 + typeIndex);
             typeIndex++;
-            
+
             _files[(fileType, n)] = new byte[sizeBytes];
             _bytesPerElement[(fileType, n)] = 0;  // Program files have no element size
             _fileTypeByNumber[n] = fileType;
-            
+
             dir[pos]     = fileType;
             dir[pos + 1] = (byte)(sizeBytes & 0xFF);
             dir[pos + 2] = (byte)((sizeBytes >> 8) & 0xFF);
             dir[pos + 3] = (byte)n;
             pos += 10;
+            progEntriesWritten++;
 
             _flatOffsetByFileNumber[n] = progFlatBase;
             _flatFileTypeByNumber[n] = fileType;
@@ -444,6 +407,8 @@ public class PlcMemory : IDisposable
         _flatTotalBytes = progFlatBase;
     }
 
+
+
     // =========================================================================
     // DATA FILES INITIALIZATION
     // =========================================================================
@@ -454,106 +419,20 @@ public class PlcMemory : IDisposable
     /// </summary>
     private void BuildDataFiles()
     {
-        // O0 — Output image (slot 4: OB16, slot 5: OB16)
-        // 6 words = 12 bytes
-        CreateDataFile(0x8B, 0, 12, 2);
-        
-        // I1 — Input image (slots 1-3: IB16×3, slot 6: NI4)
-        // 21 words = 42 bytes
-        CreateDataFile(0x8C, 1, 42, 2);
-        
-        // S2 — Status (S:0–S:82, system memory)
-        // 83 words = 166 bytes
-        CreateDataFile(0x84, 2, 166, 2);
+        var cfg = _profile.BuildMemoryConfig();
+
+        // Create all data files from the profile config
+        foreach (var f in cfg.DataFiles)
+            CreateDataFile(f.FileType, f.FileNumber, f.SizeBytes, f.ElemSize);
+
+        // Initialize Status file (S2) with default values
         InitializeStatusFile();
-        
-        // B3 — Binary (14 words = 28 bytes)
-        CreateDataFile(0x85, 3, 28, 2);
-        WriteU16(_files[(0x85, 3)], 0, 0xAA55);
-        WriteU16(_files[(0x85, 3)], 2, 0x0FF0);
-        
-        // T4 — Timer (78 timers × 6 bytes = 468 bytes)
-        CreateDataFile(0x86, 4, 468, 6);
-        
-        // C5 — Counter (1 counter × 6 bytes = 6 bytes)
-        CreateDataFile(0x87, 5, 6, 6);
-        
-        // R6 — Control (2 controls × 6 bytes = 12 bytes)
-        CreateDataFile(0x88, 6, 12, 6);
-        
-        // N7 — Integer (74 words = 148 bytes)
-        CreateDataFile(0x89, 7, 148, 2);
-        WriteU16(_files[(0x89, 7)], 0, 123);
-        WriteU16(_files[(0x89, 7)], 2, 456);
-        WriteU16(_files[(0x89, 7)], 4, -789);
-        
-        // F8 — Float (38 floats × 4 bytes = 152 bytes)
-        CreateDataFile(0x8A, 8, 152, 4);
-        Array.Copy(BitConverter.GetBytes(1.23f), 0, _files[(0x8A, 8)], 0, 4);
-        Array.Copy(BitConverter.GetBytes(4.56f), 0, _files[(0x8A, 8)], 4, 4);
-        
-        // Additional data files B9–B16, N17, B29–B31
-        CreateDataFile(0x85,  9,  20, 2);   // B9 — 10 words
-        CreateDataFile(0x85, 10, 142, 2);   // B10 — 71 words
-        CreateDataFile(0x85, 11,  18, 2);   // B11 — 9 words
-        CreateDataFile(0x85, 12,   2, 2);   // B12 — 1 word
-        CreateDataFile(0x85, 13,   4, 2);   // B13 — 2 words
-        CreateDataFile(0x85, 14,   2, 2);   // B14 — 1 word
-        CreateDataFile(0x85, 15,  82, 2);   // B15 — 41 words
-        CreateDataFile(0x85, 16,  82, 2);   // B16 — 41 words
-        CreateDataFile(0x89, 17,  52, 2);   // N17 — 26 words
 
-        // ST18 — String file (10 strings × 84 bytes/elem)
-        // SLC 500 string format per AB Publication 1770-6.5.16:
-        //   Byte 0-1  : length word (little-endian, 0-82)
-        //   Bytes 2-83: character data (ASCII, one char per byte, unused bytes = 0x00)
-        // Note: PCCCComm library packs chars as words (little-endian), so char 0 → byte 2,
-        //       char 1 → byte 3, etc. The length field is bytes 0-1 as a 16-bit word.
-        int stSize;
-        int stElemSize;
-        if (_family == PCCCEmulator.EmulationFamily.Plc5)
-        {
-            stSize = 10 * 88;      // 10 elements × 88 bytes = 880 bytes
-            stElemSize = 88;
-        }
-        else
-        {
-            stSize = 10 * 84;      // 10 elements × 84 bytes = 840 bytes
-            stElemSize = 84;
-        }
-        CreateDataFile(0x8D, 18, stSize, stElemSize);
-        // Seed ST18:0 with a default string "EMULATOR OK" for self-test verification
-        byte[] st18 = _files[(0x8D, 18)];
-        WriteStString(st18, 0, "EMULATOR OK", _family);
-
-        // PLC-5 Long integer file (type 0x0C, 4 bytes per element)
-        // Example: L19 with 25 elements → 100 bytes
-        if (_family == PCCCEmulator.EmulationFamily.Plc5)
-        {
-            CreateDataFile(0x0C, 19, 100, 4);
-            // Optional: fill some elements with sample values
-            byte[] longFile = _files[(0x0C, 19)];
-            BitConverter.GetBytes(123456789).CopyTo(longFile, 0);   // L19:0 = 123456789
-            BitConverter.GetBytes(-987654321).CopyTo(longFile, 4);  // L19:1 = -987654321
-        }
-        else
-        {
-            // Data Monitor File (type 0xA4) – 10 elements of 40 bytes each = 400 bytes
-            CreateDataFile(0xA4, 19, 400, 40);
-            // Fill with sample data (optional)
-            byte[] dmData = _files[(0xA4, 19)];
-            // Fill with number pattern 0..399 for debugging
-            for (int i = 0; i < dmData.Length; i++) dmData[i] = (byte)(i & 0xFF);            
-        }
-        CreateDataFile(0x85, 29,  52, 2);   // B29 — 26 words
-        CreateDataFile(0x85, 30,  52, 2);   // B30 — 26 words
-        CreateDataFile(0x85, 31,  52, 2);   // B31 — 26 words
+        // Seed initial values (sample data, strings, etc.) via the profile
+        _profile.SeedInitialValues(this);
     }
 
-    /// <summary>
-    /// Initializes the status file (S2) with default values.
-    /// Values are based on a real SLC 5/03 upload.
-    /// </summary>
+
     private void InitializeStatusFile()
     {
         ushort[] s2 =
@@ -578,7 +457,10 @@ public class PlcMemory : IDisposable
         };
         
         byte[] statusFile = _files[(0x84, 2)];
-        for (int i = 0; i < s2.Length; i++)
+        // Write only as many words as the buffer can hold —
+        // ML1400 S2 is 66 words (132 bytes) vs SLC 83 words (166 bytes).
+        int wordsToWrite = Math.Min(s2.Length, statusFile.Length / 2);
+        for (int i = 0; i < wordsToWrite; i++)
             WriteU16(statusFile, i * 2, s2[i]);
     }
 
@@ -1309,11 +1191,19 @@ public class PlcMemory : IDisposable
     /// </summary>
     private void LoadEmbeddedProgram()
     {
+        // Embedded program (e.g. DBU550.bin) is SLC-format only.
+        // Skip for non-SLC families to avoid file size mismatches.
+        if (_family != PCCCEmulator.EmulationFamily.SlcMicroLogix)
+        {
+            Logger.Always(this, $"Skipping embedded program for family {_family}.");
+            return;
+        }
+
         var assembly = Assembly.GetExecutingAssembly();
-        
+
         var resourceName = assembly.GetManifestResourceNames()
             .FirstOrDefault(n => n.EndsWith(".bin", StringComparison.OrdinalIgnoreCase));
-        
+
         if (resourceName == null)
         {
             Logger.Always(this, "No embedded program found. Using default data.");
@@ -1408,8 +1298,44 @@ public class PlcMemory : IDisposable
         RebuildFlatMemory();
     }
 
+    // ─── Seed helpers (called by IPlcFamilyProfile.SeedInitialValues) ────────
+
+    /// <summary>Writes a 16-bit value at a byte offset within a data file.</summary>
+    public void WriteU16Direct(int fileType, int fileNum, int byteOffset, ushort value)
+    {
+        if (_files.TryGetValue((fileType, fileNum), out var buf) && byteOffset + 1 < buf.Length)
+        {
+            buf[byteOffset]     = (byte)(value & 0xFF);
+            buf[byteOffset + 1] = (byte)(value >> 8);
+        }
+    }
+
+    /// <summary>Writes a 32-bit float at a byte offset within a data file.</summary>
+    public void WriteFloatDirect(int fileType, int fileNum, int byteOffset, float value)
+    {
+        if (_files.TryGetValue((fileType, fileNum), out var buf) && byteOffset + 3 < buf.Length)
+            Array.Copy(BitConverter.GetBytes(value), 0, buf, byteOffset, 4);
+    }
+
+    /// <summary>Writes a 32-bit signed long at a byte offset within a data file.</summary>
+    public void WriteLongDirect(int fileType, int fileNum, int byteOffset, int value)
+    {
+        if (_files.TryGetValue((fileType, fileNum), out var buf) && byteOffset + 3 < buf.Length)
+            Array.Copy(BitConverter.GetBytes(value), 0, buf, byteOffset, 4);
+    }
+
+    /// <summary>Writes a string into an SLC/PLC-5 ST file element.</summary>
+    public void WriteStStringDirect(int fileType, int fileNum, int elementIndex,
+        string value, PCCCEmulator.EmulationFamily family)
+    {
+        if (_files.TryGetValue((fileType, fileNum), out var buf))
+            WriteStString(buf, elementIndex, value, family);
+    }
+
+    // ─── IDisposable ──────────────────────────────────────────────────────────
     public void Dispose()
     {
         _rwLock?.Dispose();
     }
 }
+
