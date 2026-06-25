@@ -1630,6 +1630,22 @@ public class SlcHandler : IPlcHandler
             int fileNumber = directory[filePosition + 3];
             int fileSizeBytes = directory[filePosition + 1] + directory[filePosition + 2] * 256;
 
+            // Some PLCs and emulators include zero-filled empty slots in the
+            // directory. Attempting to OpenFile on these slots results in
+            // STS 0x50 (Addressing problem). We skip them here.
+            //
+            // Valid ranges per AB 1770-6.5.16:
+            //   - Data files:   0x82–0x9F (SLC/MicroLogix)
+            //   - Program files: 0x20–0x3F (LAD/SYS)
+            bool isValidDataFile = (fileType >= 0x82 && fileType <= 0x9F);
+            bool isValidProgramFile = (fileType >= 0x20 && fileType <= 0x3F);
+            if (!isValidDataFile && !isValidProgramFile)
+            {
+                i++;
+                filePosition += bytesPerEntry;
+                continue;
+            }
+
             // Open the file (program or data) using its number and type
             ushort fileTag = OpenFile(fileNumber, fileType);
             byte[] fileData = fileSizeBytes > 0 ? FileReadWithChunking(fileTag, 0, fileSizeBytes) : Array.Empty<byte>();
