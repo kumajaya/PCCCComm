@@ -140,7 +140,8 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
             new(0x85, 31,  52),       // B31 — 26 words
         };
 
-        return new PlcMemoryConfig(dirSize, numDataFiles, numProgramFiles, files);
+        return new PlcMemoryConfig(dirSize, numDataFiles, numProgramFiles, files,
+            ProgramFiles: System.Array.Empty<ProgramFileSpec>());
     }
 
     public void SeedInitialValues(PlcMemory memory)
@@ -284,7 +285,8 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
 
         // numDataFiles = 219: file numbers 0-218, with gaps filled by WriteDataFileEntries.
         // dirSize = 79 + (219 + 4) × 10 = 2309 bytes
-        return new PlcMemoryConfig(2309, 219, 4, files);
+        return new PlcMemoryConfig(2309, 219, 4, files,
+            ProgramFiles: System.Array.Empty<ProgramFileSpec>());
     }
 
     public void SeedInitialValues(PlcMemory memory)
@@ -340,8 +342,8 @@ public sealed class Plc5FamilyProfile : IPlcFamilyProfile
         p[8]  = 0x01;                           // DH+ node
         p[9]  = 0xFD;                           // I/O address (scanner)
         p[10] = 0x21;                           // I/O & comm params
-        p[11] = 0x20; p[12] = 0x00;            // 32 data files
-        p[13] = 0x18; p[14] = 0x00;            // 24 program files
+        p[11] = 0xC9; p[12] = 0x00;            // 201 data files
+        p[13] = 0x36; p[14] = 0x00;            // 54 program files
         // p[15..34] = zeroes (forcing, hold point, timestamps)
         return p;
     }
@@ -359,57 +361,155 @@ public sealed class Plc5FamilyProfile : IPlcFamilyProfile
 
     public PlcMemoryConfig BuildMemoryConfig()
     {
-        // TODO: replace with real PLC-5 memory layout from hardware.
-        // Currently reuses SLC layout with PLC-5-specific file differences:
-        //   ST18 — 88 bytes/element (vs SLC 84)
-        //   L19  — Long integer file (vs SLC Data Monitor File)
-        // numDataFiles = 32: file numbers 0-31 (slots 20-28 are empty gaps)
-        const int dirSize         = 519;
-        const int numDataFiles    = 32;
-        const int numProgramFiles = 12;
+        // Memory layout from real PLC-5/40E (1785-L40E) hardware.
+        // 64 active data files, 201 total slots (file 0-200).
+        // 40 active program files, 54 total slots (file 0-53).
+        // Total data memory: 5572 words (verified against hardware stats).
+        //
+        // File type codes (PLC-5 / SLC shared):
+        //   0x8B=O  0x8C=I  0x84=S  0x85=B  0x86=T  0x87=C  0x88=R
+        //   0x89=N  0x8A=F  0x93=PD 0x95=BT
+        //
+        // Element sizes:
+        //   B/N/O/I/S = 2 bytes (1 word)
+        //   F         = 4 bytes (2 words)
+        //   T/C/R     = 6 bytes (3 words)
+        //   PD (PID)  = 164 bytes (82 words/loop)
+        //   BT        = 12 bytes (6 words/element, measured from hardware)
+        const int numDataFiles    = 201;  // slots 0-200 (64 active)
+        const int numProgramFiles =  54;  // slots 0-53  (40 active)
+        const int dirSize         = 79 + (numDataFiles + numProgramFiles) * 10;  // = 2629
 
         var files = new List<DataFileSpec>
         {
-            new(0x8B,  0,  12),        // O0
-            new(0x8C,  1,  42),        // I1
-            new(0x84,  2, 166),        // S2
-            new(0x85,  3,  28),        // B3
-            new(0x86,  4, 468, 6),     // T4
-            new(0x87,  5,   6, 6),     // C5
-            new(0x88,  6,  12, 6),     // R6
-            new(0x89,  7, 148),        // N7
-            new(0x8A,  8, 152, 4),     // F8
-            new(0x85,  9,  20),        // B9
-            new(0x85, 10, 142),        // B10
-            new(0x85, 11,  18),        // B11
-            new(0x85, 12,   2),        // B12
-            new(0x85, 13,   4),        // B13
-            new(0x85, 14,   2),        // B14
-            new(0x85, 15,  82),        // B15
-            new(0x85, 16,  82),        // B16
-            new(0x89, 17,  52),        // N17
-            new(0x8D, 18, 880, 88),    // ST18 — PLC-5: 10 strings × 88 bytes
-            new(0x0C, 19, 100,  4),    // L19  — PLC-5: 25 longs × 4 bytes
-            new(0x85, 29,  52),        // B29
-            new(0x85, 30,  52),        // B30
-            new(0x85, 31,  52),        // B31
+            new(0x8B,   0,   256),           // O0   — output image (128 words)
+            new(0x8C,   1,   256),           // I1   — input image  (128 words)
+            new(0x84,   2,   256),           // S2   — status       (128 words)
+            new(0x85,   3,     2),           // B3
+            new(0x86,   4,  1206,   6),      // T4   — 201 timers
+            new(0x87,   5,    48,   6),      // C5   — 8 counters
+            new(0x88,   6,     6,   6),      // R6   — 1 control
+            new(0x89,   7,   610),           // N7   — 305 integers
+            new(0x8A,   8,     4,   4),      // F8
+            new(0x85,   9,    38),           // B9
+            new(0x85,  10,   202),           // B10
+            new(0x85,  11,    28),           // B11
+            new(0x85,  12,     8),           // B12
+            new(0x8A,  13,  1016,   4),      // F13  — 254 floats
+            new(0x8A,  14,  1784,   4),      // F14  — 446 floats
+            new(0x89,  15,    42),           // N15
+            new(0x8A,  16,   216,   4),      // F16
+            new(0x93,  17,  1804, 164),      // PD17 — 11 PID loops (82 words/loop)
+            new(0x95,  19,   192,  12),      // BT19 — 16 block transfers (6 words/elem)
+            new(0x89,  20,   402),           // N20
+            new(0x89,  21,   146),           // N21
+            new(0x8A,  22,    44,   4),      // F22
+            new(0x8A,  23,     4,   4),      // F23
+            new(0x89,  25,     4),           // N25
+            new(0x89,  30,   240),           // N30
+            new(0x89,  31,   250),           // N31
+            new(0x89,  32,   320),           // N32
+            new(0x89,  33,    40),           // N33
+            new(0x89,  93,    80),           // N93  — channel config
+            new(0x89,  94,    88),           // N94  — channel config
+            new(0x89,  99,    80),           // N99
+            new(0x8A, 100,     8,   4),      // F100
+            new(0x85, 102,     2),           // B102
+            new(0x85, 104,  1296),           // B104 — 648 binary words
+            new(0x85, 105,     2),           // B105
+            new(0x85, 107,     8),           // B107
+            new(0x85, 108,     2),           // B108
+            new(0x85, 109,     2),           // B109
+            new(0x85, 110,    24),           // B110
+            new(0x85, 111,     2),           // B111
+            new(0x85, 112,     2),           // B112
+            new(0x85, 113,     2),           // B113
+            new(0x85, 115,     2),           // B115
+            new(0x85, 117,     6),           // B117
+            new(0x85, 122,    40),           // B122
+            new(0x85, 127,     2),           // B127
+            new(0x85, 132,     2),           // B132
+            new(0x85, 134,    26),           // B134
+            new(0x85, 135,     2),           // B135
+            new(0x85, 136,     2),           // B136
+            new(0x85, 137,     4),           // B137
+            new(0x85, 138,     4),           // B138
+            new(0x85, 139,     4),           // B139
+            new(0x85, 140,     2),           // B140
+            new(0x85, 142,     4),           // B142
+            new(0x85, 143,     4),           // B143
+            new(0x85, 144,     4),           // B144
+            new(0x85, 147,     2),           // B147
+            new(0x85, 148,     2),           // B148
+            new(0x85, 149,     2),           // B149
+            new(0x85, 150,     2),           // B150
+            new(0x85, 152,     2),           // B152
+            new(0x85, 153,     2),           // B153
+            new(0x85, 200,     2),           // B200
         };
 
-        return new PlcMemoryConfig(dirSize, numDataFiles, numProgramFiles, files);
+        var progFiles = new List<ProgramFileSpec>
+        {
+            // PLC-5/40E (1785-L40E) program files.
+            // Sizes = PLC binary bytes (RSLogix serialized × 0.696).
+            // Verified: sum ≈ 39080 bytes = 19540 words (RSLogix report).
+            new(0x01,   0,    308),   // SYSTEM
+            new(0x20,   2,    394),   // MAIN
+            new(0x20,   3,   2232),   // FLEX_IO
+            new(0x20,   4,   7842),   // CATOX
+            new(0x20,   5,    476),   // SODA_SCRUB
+            new(0x20,   7,   1838),   // CO2_CTR
+            new(0x20,   8,    592),   // CO2_COMP_A
+            new(0x20,   9,    592),   // CO2_COMP_B
+            new(0x20,  10,   2366),   // DEHYDRATOR
+            new(0x20,  11,     72),   // CARBON_FIL
+            new(0x20,  12,    754),   // REFLEX
+            new(0x20,  13,    710),   // DESTILAT
+            new(0x20,  14,     10),   // REF_CONT
+            new(0x20,  15,    604),   // REF_COMP
+            new(0x20,  16,      2),   // SPARE
+            new(0x20,  17,   1600),   // STOR_CONT
+            new(0x20,  18,     12),   // STORAGE_A
+            new(0x20,  19,     12),   // STORAGE_B
+            new(0x20,  20,     12),   // STORAGE_C
+            new(0x20,  22,    156),   // COOL_WATER
+            new(0x20,  23,    102),   // GAS_ANALYZ
+            new(0x20,  24,      2),   // CALCULAT
+            new(0x20,  31,   2394),   // ASD_GROUPS
+            new(0x20,  32,    666),   // MAIN_ALARM
+            new(0x20,  34,   5282),   // CATOX_AL
+            new(0x20,  35,    252),   // SOD_SCR_AL
+            new(0x20,  36,    612),   // SOD_DOS_AL
+            new(0x20,  37,    912),   // CO2_COMP_AL
+            new(0x20,  38,   1212),   // CO2_A_AL
+            new(0x20,  39,   1212),   // CO2_B_AL
+            new(0x20,  40,    376),   // DEHYD_AL
+            new(0x20,  42,   1080),   // REFLEX_AL
+            new(0x20,  43,   1032),   // DESTIL_AL
+            new(0x20,  44,    844),   // REF_COMP_AL
+            new(0x20,  47,    232),   // TAN_COMP_AL
+            new(0x20,  48,    458),   // TANK_A_AL
+            new(0x20,  49,    458),   // TANK_B_AL
+            new(0x20,  50,    458),   // TANK_C_AL
+            new(0x20,  52,    186),   // COOL_W_AL
+            new(0x20,  53,    730),   // GAS_AN_AL
+        };
+        return new PlcMemoryConfig(dirSize, numDataFiles, numProgramFiles, files,
+            ProgramFiles: progFiles);
     }
 
     public void SeedInitialValues(PlcMemory memory)
     {
+        // B3: binary pattern
         memory.WriteU16Direct(0x85,  3, 0, 0xAA55);
-        memory.WriteU16Direct(0x85,  3, 2, 0x0FF0);
+        // N7: sample integers
         memory.WriteU16Direct(0x89,  7, 0,  123);
         memory.WriteU16Direct(0x89,  7, 2,  456);
         memory.WriteU16Direct(0x89,  7, 4, unchecked((ushort)-789));
+        // F8: sample float
         memory.WriteFloatDirect(0x8A, 8, 0, 1.23f);
-        memory.WriteFloatDirect(0x8A, 8, 4, 4.56f);
-        // L19: sample longs
-        memory.WriteLongDirect(0x0C, 19, 0,  123456789);
-        memory.WriteLongDirect(0x0C, 19, 4, -987654321);
-        memory.WriteStStringDirect(0x8D, 18, 0, "EMULATOR OK", FamilyType);
+        // N20: sample integers
+        memory.WriteU16Direct(0x89, 20, 0, 1000);
+        memory.WriteU16Direct(0x89, 20, 2, 2000);
     }
 }

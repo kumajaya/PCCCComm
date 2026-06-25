@@ -54,16 +54,27 @@ public record DataFileSpec(
 }
 
 /// <summary>
+/// Specifies a single program file entry in a PLC family's program layout.
+/// </summary>
+public record ProgramFileSpec(
+    byte   FileType,    // Program file type code: 0x01=SYS, 0x20+=LAD
+    byte   FileNumber,  // File number (0-255)
+    int    SizeBytes    // Program file size in bytes (PLC binary, not RSLogix serialized)
+);
+
+/// <summary>
 /// Memory layout descriptor passed from IPlcFamilyProfile to PlcMemory.
 /// Replaces all if/switch on EmulationFamily inside PlcMemory.
 /// </summary>
 public record PlcMemoryConfig(
-    int                        DirectorySize,
-    int                        NumDataFiles,
-    int                        NumProgramFiles,
-    IReadOnlyList<DataFileSpec> DataFiles,
+    int                           DirectorySize,
+    int                           NumDataFiles,
+    int                           NumProgramFiles,
+    IReadOnlyList<DataFileSpec>    DataFiles,
+    /// <summary>Program file specs. Empty list = use default SLC-style stubs.</summary>
+    IReadOnlyList<ProgramFileSpec> ProgramFiles,
     /// <summary>Content to seed into the first string element (for self-test).</summary>
-    string                     DefaultStringContent = "EMULATOR OK"
+    string                        DefaultStringContent = "EMULATOR OK"
 );
 
 /// <summary>

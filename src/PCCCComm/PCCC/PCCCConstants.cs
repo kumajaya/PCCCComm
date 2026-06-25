@@ -292,6 +292,7 @@ public static class PCCCConstants
         Message    = 0x92,
         Pid        = 0x93,
         Pls        = 0x94,
+        BlockTransfer = 0x95,   // PLC-5 Block Transfer file
         DataMonitor = 0xA4,   // Data Monitor File type (0xA4)
     }
 
@@ -306,6 +307,7 @@ public static class PCCCConstants
             SlcFileTypeCode.Message => 50,
             SlcFileTypeCode.Pid => 46,
             SlcFileTypeCode.Pls => 12,
+            SlcFileTypeCode.BlockTransfer => 12,
             SlcFileTypeCode.DataMonitor => 40,
             _ => 2
         };
@@ -328,6 +330,7 @@ public static class PCCCConstants
             SlcFileTypeCode.Message => "MG",
             SlcFileTypeCode.Pid => "PD",
             SlcFileTypeCode.Pls => "PLS",
+            SlcFileTypeCode.BlockTransfer => "BT",
             _ => "??"
         };
     }

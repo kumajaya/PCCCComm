@@ -2008,7 +2008,7 @@ class Program
             Console.WriteLine("  Mode     : EMULATOR — full suite");
             Console.WriteLine("  Target   : PCCCEmulator only. NEVER use on a real PLC.");
             Console.WriteLine("  Reads    : O0 I1 S2 B3 T4 C5 R6 N7 F8 ST18 (all file types)");
-        Console.WriteLine("  Writes to: N7:2-9, F8:2-7, B3:1-2, ST18:2-5");
+            Console.WriteLine("  Writes to: N7:2-9, F8:2-7, B3:1-2, ST18:2-5");
             Console.WriteLine("  Also runs: InitializeMemory (clears ALL data files)");
         }
         else
@@ -2104,7 +2104,7 @@ class Program
 
     /// <summary>
     /// Verifies that GetDataMemory() returns a non-null, non-empty array and
-    /// that the mandatory file set (O0, I1, S2, B3, N7, F8, ST18) is present.
+    /// that the mandatory file set (O0, I1, S2, B3, N7, F8) is present.
     ///
     /// GetDataMemory() reads File 0 (the directory file). A failure here
     /// indicates a problem with the directory structure in the emulator or PLC.
@@ -2138,7 +2138,6 @@ class Program
             (3,  "B3"),
             (7,  "N7"),
             (8,  "F8"),
-            (18, "ST18"),
         };
         foreach (var (num, name) in required)
             TestResult($"Directory contains {name} (file {num})",
@@ -2436,7 +2435,7 @@ class Program
     ///     of element 0 without error. A failure here means the file was not
     ///     registered in the emulator directory.
     ///
-    ///   Out-of-range element — reading N7:200 (file has only 74 elements)
+    ///   Out-of-range element — reading N7:400 (file has only 74 elements)
     ///     must throw a PCCCException. The emulator returns STS=0x10 (illegal
     ///     address) and the library wraps it in a PCCCException.
     ///
@@ -2492,11 +2491,11 @@ class Program
         }
 
         // ── Error path: out-of-range and non-existent file ─────────────────
-        // N7 has 74 elements (N7:0–N7:73); N7:200 must fail.
+        // N7 has maximum 305 elements for PLC5 (N7:0–N7:304); N7:400 must fail.
         bool outOfRange = false;
-        try { pccc.ReadAny("N7:200"); }
+        try { pccc.ReadAny("N7:400"); }
         catch { outOfRange = true; }
-        TestResult("Read N7:200 (out of range) throws exception", outOfRange);
+        TestResult("Read N7:400 (out of range) throws exception", outOfRange);
 
         // File 100 does not exist on any standard PLC; the read must fail.
         bool notFound = false;

@@ -301,113 +301,51 @@ public class PlcMemory : IDisposable
 
     private void WriteProgramFileEntries(byte[] dir, int startAddr, int startPos)
     {
-        int pos = startPos;
-        // Starting byte offset for program files in flat memory (after all data files)
+        int pos         = startPos;
         int progFlatBase = startAddr * 2;
-        // Maximum program file entries — determined by dirSize allocated in BuildDirectory.
-        // Computed from remaining space in dir after data entries.
         int maxProgEntries = (dir.Length - pos) / 10;
-        int progEntriesWritten = 0;
+        int written     = 0;
 
-        // SYS file 0 — System data storage header (2 bytes)
-        dir[pos]     = 0x01;
-        dir[pos + 1] = 0x02;   // 2 bytes
-        dir[pos + 2] = 0x00;
-        dir[pos + 3] = 0x00;
-        pos += 10;
-        progEntriesWritten++;
-        _fileTypeByNumber[0] = 0x01;
-        _files[(0x01, 0)] = new byte[2];
-        _bytesPerElement[(0x01, 0)] = 0;
-        _flatOffsetByFileNumber[0] = progFlatBase;
-        _flatFileTypeByNumber[0] = 0x01;
-        progFlatBase += 2;
+        var cfg       = _profile.BuildMemoryConfig();
+        var progFiles = cfg.ProgramFiles;
 
-        // SYS file 1 — Reserved for future use (2 bytes)
-        dir[pos]     = 0x01;
-        dir[pos + 1] = 0x02;   // 2 bytes
-        dir[pos + 2] = 0x00;
-        dir[pos + 3] = 0x01;
-        pos += 10;
-        progEntriesWritten++;
-        _fileTypeByNumber[1] = 0x01;
-        _files[(0x01, 1)] = new byte[2];
-        _bytesPerElement[(0x01, 1)] = 0;
-        _flatOffsetByFileNumber[1] = progFlatBase;
-        _flatFileTypeByNumber[1] = 0x01;
-        progFlatBase += 2;
-
-        // LAD files (active program files)
-        // Sizes from .ACH disassembly (bytes)
-        var actualLadSizes = new Dictionary<int, int>
+        if (progFiles == null || progFiles.Count == 0)
         {
-            {2, 757}, {3, 486}, {5, 972}, {8, 646}, {12, 1440},
-            {15, 824}, {18, 646}, {19, 225}, {22, 903}, {23, 416}
-        };
-        int[] activeLad = { 2, 3, 5, 8, 12, 15, 18, 19, 22, 23 };
-
-#if INCLUDE_INACTIVE_FILES
-        // All LAD files 2-23 (active + inactive)
-        int typeIndex = 0;
-        for (int n = 2; n <= 23; n++)
+            // Default: two SYS stubs (file 0 and 1) only.
+            WriteProgramFileStub(dir, ref pos, ref progFlatBase, 0x01, 0, 2);
+            WriteProgramFileStub(dir, ref pos, ref progFlatBase, 0x01, 1, 2);
+        }
+        else
         {
-            bool active = Array.IndexOf(activeLad, n) >= 0;
-            int sizeBytes = active && actualLadSizes.ContainsKey(n) ? actualLadSizes[n] : 0;
-            byte fileType = (byte)(0x20 + typeIndex);
-            typeIndex++;
-            
-            if (active && sizeBytes > 0)
+            foreach (var pf in progFiles)
             {
-                _files[(fileType, n)] = new byte[sizeBytes];
-                _bytesPerElement[(fileType, n)] = 0;  // Program files have no element size
+                if (written >= maxProgEntries) break;
+                WriteProgramFileStub(dir, ref pos, ref progFlatBase,
+                    pf.FileType, pf.FileNumber, pf.SizeBytes);
+                written++;
             }
-            _fileTypeByNumber[n] = fileType;
-            
-            dir[pos]     = fileType;
-            dir[pos + 1] = (byte)(sizeBytes & 0xFF);
-            dir[pos + 2] = (byte)((sizeBytes >> 8) & 0xFF);
-            dir[pos + 3] = (byte)n;
-            pos += 10;
-
-            // Record flat memory offset for this program file
-            _flatOffsetByFileNumber[n] = progFlatBase;
-            _flatFileTypeByNumber[n] = fileType;
-            progFlatBase += sizeBytes;
         }
-#else
-        // Active LAD files only
-        int typeIndex = 0;
-        foreach (int n in activeLad)
-        {
-            // Stop if no more room in directory for this family
-            if (progEntriesWritten + 2 >= maxProgEntries) break;
 
-            int sizeBytes = actualLadSizes[n];
-            byte fileType = (byte)(0x20 + typeIndex);
-            typeIndex++;
-
-            _files[(fileType, n)] = new byte[sizeBytes];
-            _bytesPerElement[(fileType, n)] = 0;  // Program files have no element size
-            _fileTypeByNumber[n] = fileType;
-
-            dir[pos]     = fileType;
-            dir[pos + 1] = (byte)(sizeBytes & 0xFF);
-            dir[pos + 2] = (byte)((sizeBytes >> 8) & 0xFF);
-            dir[pos + 3] = (byte)n;
-            pos += 10;
-            progEntriesWritten++;
-
-            _flatOffsetByFileNumber[n] = progFlatBase;
-            _flatFileTypeByNumber[n] = fileType;
-            progFlatBase += sizeBytes;
-        }
-#endif
-
-        // Total flat memory size (in bytes) after all data and program files
         _flatTotalBytes = progFlatBase;
     }
 
+    private void WriteProgramFileStub(byte[] dir, ref int pos, ref int progFlatBase,
+        byte fileType, int fileNumber, int sizeBytes)
+    {
+        if (pos + 10 > dir.Length) return;
+        dir[pos]     = fileType;
+        dir[pos + 1] = (byte)(sizeBytes & 0xFF);
+        dir[pos + 2] = (byte)((sizeBytes >> 8) & 0xFF);
+        dir[pos + 3] = (byte)(fileNumber & 0xFF);
+        pos += 10;
 
+        _fileTypeByNumber[fileNumber]       = fileType;
+        _files[(fileType, fileNumber)]      = new byte[sizeBytes > 0 ? sizeBytes : 2];
+        _bytesPerElement[(fileType, fileNumber)] = 0;
+        _flatOffsetByFileNumber[fileNumber] = progFlatBase;
+        _flatFileTypeByNumber[fileNumber]   = fileType;
+        progFlatBase += (sizeBytes > 0 ? sizeBytes : 2);
+    }
 
     // =========================================================================
     // DATA FILES INITIALIZATION
