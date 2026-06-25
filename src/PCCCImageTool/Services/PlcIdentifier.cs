@@ -40,6 +40,8 @@ public static class PlcIdentifier
     {
         try
         {
+            // Single call — reuse the same payload for both family detection
+            // and detail extraction, avoiding a second round-trip to the PLC.
             byte[]? diag = await Task.Run(() => df1.GetDiagnosticStatusRaw());
             if (diag == null || diag.Length < 4)
                 return new PlcInfo(0, $"Identify error", false, "Unknown", string.Empty, 0, 0, "UNKNOWN");
@@ -102,10 +104,10 @@ public static class PlcIdentifier
             byte ramKb = 0;
             string modeStr = "UNKNOWN";
 
-            // Read diagnostic DATA[] once
+            // Extract detail fields from the already-fetched diagnostic payload.
             try
             {
-                byte[]? data = await Task.Run(() => df1.GetDiagnosticStatusRaw());
+                byte[]? data = diag;
                 if (data != null && data.Length >= 16)
                 {
                     // Extract bulletin (bytes 5-15) – same for both families
