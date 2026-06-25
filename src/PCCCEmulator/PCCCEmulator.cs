@@ -1414,6 +1414,39 @@ public class PCCCEmulator : IDisposable
             return;
         }
 
+        // ─── Special case: directory file (fileNum=0, rawFileType=0x24) ──────────
+        // PLC-5 directory is accessed via Word Range Read with logical address
+        // file number 0, type 0x24. Serve directly from cached _directoryBytes.
+        if (fileNumber == 0 && rawFileType == 0x24)
+        {
+            if (_directoryBytes == null)
+            {
+                SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext);
+                return;
+            }
+
+            int byteOff = wordOffset * 2;
+            int byteCnt = sizeWords * 2;
+
+            // Pad directory length to even number of bytes (word-aligned)
+            int paddedLen = (_directoryBytes.Length + 1) & ~1;
+
+            if (byteOff < 0 || byteOff + byteCnt > paddedLen)
+            {
+                SendErrorResponse(src, tns, 0x0F, 0x01, 0x10, clientContext);
+                return;
+            }
+
+            byte[] dirSlice = new byte[byteCnt];
+            int bytesToCopy = Math.Min(byteCnt, _directoryBytes.Length - byteOff);
+            if (bytesToCopy > 0)
+                Array.Copy(_directoryBytes, byteOff, dirSlice, 0, bytesToCopy);
+            // Remaining bytes (if any) are already zero-initialized.
+
+            SendDataResponse(src, tns, 0x4F, dirSlice, clientContext);
+            return;
+        }
+
         // Resolve actual SLC file type from wire information
         int fileType;
         if (isFlatFormat)

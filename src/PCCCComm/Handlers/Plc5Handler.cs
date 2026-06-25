@@ -999,7 +999,89 @@ public class Plc5Handler : IPlcHandler
 
     public int GetSlotCount() => throw new NotSupportedException("I/O config not yet implemented.");
     public IOConfig[] GetIOConfig() => throw new NotSupportedException("I/O config not yet implemented.");
-    public DataFileDetails[] GetDataMemory() => throw new NotSupportedException("Data memory enumeration not yet implemented.");
+    /// <summary>
+    /// Reads the data file directory from PLC-5 using Word Range Read (FNC 0x01).
+    ///
+    /// PLC-5 directory is accessed via flat physical memory addressing.
+    /// Step 1: Read 1 word at flat offset 35 (byte 70) = directory size.
+    /// Step 2: Read entire directory from flat offset 0.
+    /// Step 3: Parse entries at offset 79, 10 bytes each:
+    ///   [fileType(1)] [sizeBytes(2,LE)] [fileNum(1)] [addr(4)] [flags(2)]
+    /// Offset 52-53 = number of data files.
+    ///
+    /// Ref: AB Publication 1770-6.5.16, Chapter 10 (PLC-5 directory layout).
+    ///      Word Range Read: CMD=0x0F, FNC=0x01.
+    /// </summary>
+    public DataFileDetails[] GetDataMemory()
+    {
+        // Logical address for PLC-5 directory: file 0, type 0x24 (directory)
+        // EncodePlc5LogicalAddress(fileNum=0, fileType=0x24, element=0, subElement=0)
+        byte[] dirAddr = EncodePlc5LogicalAddress(0, 0x24, 0, 0, false);
+
+        // Step 1: read 1 word at word offset 35 (byte offset 70) = dirSize field
+        byte[] sizeData = WordRangeRead(dirAddr, 35, 1);
+        if (sizeData == null || sizeData.Length < 2)
+            throw new PCCCException("PLC-5 GetDataMemory: failed to read directory size");
+
+        int dirSize = sizeData[0] | (sizeData[1] << 8);
+        if (dirSize <= 0 || dirSize > 65535)
+            throw new PCCCException($"PLC-5 GetDataMemory: invalid directory size {dirSize}");
+
+        int dirWords = (dirSize + 1) / 2;
+
+        // Step 2: read entire directory with chunking
+        // WordRangeRead max = MaxReadPayloadPlc5 / 2 words per request
+        const int maxWordsPerChunk = PCCCConstants.Df1Limits.MaxReadPayloadPlc5 / 2;  // 118
+        byte[] fzd = new byte[dirWords * 2];
+        int wordsRead = 0;
+        while (wordsRead < dirWords)
+        {
+            int chunk = Math.Min(maxWordsPerChunk, dirWords - wordsRead);
+            byte[] part = WordRangeRead(dirAddr, wordsRead, chunk);
+            if (part == null || part.Length == 0)
+                throw new PCCCException("PLC-5 GetDataMemory: failed to read directory chunk");
+            Array.Copy(part, 0, fzd, wordsRead * 2, part.Length);
+            wordsRead += chunk;
+        }
+        if (fzd.Length < PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault)
+            throw new PCCCException("PLC-5 GetDataMemory: directory too small");
+
+        // Step 3: parse — same layout as SLC default
+        int numberOfDataFiles = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
+                              | (fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] << 8);
+
+        var dataFiles = new System.Collections.Generic.List<DataFileDetails>();
+        int pos       = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault;   // 79
+        const int bpr = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntryDefault; // 10
+        int parsed    = 0;
+
+        while (parsed < numberOfDataFiles && pos + bpr <= fzd.Length)
+        {
+            byte fileTypeByte = fzd[pos];
+            // Valid PLC-5 data file types: 0x82–0x9F
+            if (fileTypeByte > 0x81 && fileTypeByte < 0x9F)
+            {
+                int sizeBytes = fzd[pos + 1] | (fzd[pos + 2] << 8);
+                int fileNumber = fzd[pos + 3];
+                string ftStr = PCCCConstants.SlcFileTypeInfo.GetTypeName(
+                    (PCCCConstants.SlcFileTypeCode)fileTypeByte);
+
+                // Read element size from directory, not from static lookup
+                int bpe = fzd[pos + 5];   // byte offset 5 is elemSize
+                if (bpe == 0) bpe = 2;    // fallback safety
+
+                dataFiles.Add(new DataFileDetails
+                {
+                    FileType = ftStr,
+                    NumberOfElements = bpe > 0 ? sizeBytes / bpe : 0,
+                    FileNumber = fileNumber
+                });
+            }
+            parsed++;
+            pos += bpr;
+        }
+        return dataFiles.ToArray();
+    }
     public DataFileDetails[] GetML1500DataMemory() => throw new NotSupportedException("ML1500 specific method not applicable.");
     public ushort OpenFile(int fileNumber, int fileType) => throw new NotSupportedException("File-based operations not supported.");
     public void CloseFile(ushort tag) => throw new NotSupportedException("File-based operations not supported.");
