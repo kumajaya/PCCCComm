@@ -80,8 +80,6 @@ public static class PCCCConstants
         public const byte SecureAccess = 0x11;
         /// <summary>Release sole access (0x12).</summary>
         public const byte ReleaseAccess = 0x12;
-        /// <summary>Download complete (0x52).</summary>
-        public const byte DownloadComplete = 0x52;
         /// <summary>Upload all request (0x53).</summary>
         public const byte UploadAllRequest = 0x53;
         /// <summary>Upload completed (0x55).</summary>

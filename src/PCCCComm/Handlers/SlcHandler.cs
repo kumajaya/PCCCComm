@@ -1537,7 +1537,7 @@ public class SlcHandler : IPlcHandler
         }
 
         // Step 6: Indicate download complete
-        var completeReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.DownloadComplete, Array.Empty<byte>());
+        var completeReq = new PCCCMessage((byte)TargetNode, (byte)MyNode, PCCCConstants.Cmd.ProtectedWrite, 0, 0, PCCCConstants.Fnc.DownloadCompleted, Array.Empty<byte>());
         var completeReply = _protocol.SendRequest(completeReq, out int completeSts);
         if (completeSts != 0) throw new PCCCException("Failed to Indicate to PLC that Download is complete - " + PCCCErrors.DecodeStatus(completeSts));
 
