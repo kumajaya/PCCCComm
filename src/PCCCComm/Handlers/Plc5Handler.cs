@@ -429,6 +429,9 @@ public class Plc5Handler : IPlcHandler
         if (arrayElements < 0) arrayElements = 0;
 
         int bytesPerElem = PCCCConstants.Df1Limits.Plc5StringElementBytes; // 88 bytes
+        // Override BytesPerElements so ReadRawDataWithChunking aligns chunks
+        // to PLC-5 element boundaries (88 bytes) not SLC ones (84 bytes).
+        p.BytesPerElements = bytesPerElem;
         int numberOfBytes = (arrayElements + 1) * bytesPerElem;
 
         byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytes, out int reply);
@@ -439,13 +442,21 @@ public class Plc5Handler : IPlcHandler
         for (int i = 0; i <= arrayElements; i++)
         {
             int baseOffset = i * bytesPerElem;
+            // Guard: PLC may return fewer bytes than requested (e.g. empty string file).
+            if (baseOffset + PCCCConstants.Df1Limits.BytesPerWord * 2 > returnedData.Length)
+            {
+                result[i] = "";
+                continue;
+            }
             int strLen = BitConverter.ToInt16(returnedData, baseOffset + PCCCConstants.Df1Limits.BytesPerWord);
+            if (strLen < 0) strLen = 0;
             if (strLen > PCCCConstants.Df1Limits.MaxStringLength)
                 strLen = PCCCConstants.Df1Limits.MaxStringLength;
             var sb = new StringBuilder();
             for (int j = 0; j < strLen; j++)
             {
                 int wordOffset = baseOffset + 4 + (j / 2) * PCCCConstants.Df1Limits.BytesPerWord;
+                if (wordOffset + 1 >= returnedData.Length) break;  // truncated response
                 char c = (j % 2 == 0)
                     ? (char)returnedData[wordOffset]        // low byte = even index char
                     : (char)returnedData[wordOffset + 1];   // high byte = odd index char

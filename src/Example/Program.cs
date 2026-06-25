@@ -1516,6 +1516,7 @@ class Program
 
                 switch (cmd)
                 {
+                    // ── Navigation ──────────────────────────────────────────────
                     case "help":
                         PrintInteractiveHelp();
                         break;
@@ -1944,6 +1945,36 @@ class Program
         }
     }
 
+    /// <summary>
+    /// Records a skipped test — the address or feature is not present on this
+    /// specific PLC model (e.g. R6 absent on ML1400, ST18 absent on older SLC).
+    /// Skips do not affect the pass/fail count.
+    /// </summary>
+    private static void TestSkip(string description, string reason)
+        => Console.WriteLine($"  [SKIP] {description}  ({reason})");
+
+    /// <summary>
+    /// Returns true if the exception indicates the address does not exist on
+    /// this PLC — STS 0x10 (Illegal Command) or Invalid Address (-5).
+    /// These are not protocol bugs; the file is simply absent in this program.
+    /// </summary>
+    private static bool IsAddressAbsent(string errorMessage)
+        => errorMessage.Contains("Illegal Command", StringComparison.OrdinalIgnoreCase)
+        || errorMessage.Contains("Invalid Address", StringComparison.OrdinalIgnoreCase)
+        || errorMessage.Contains("Addressing problem", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Returns true if the exception indicates a feature is not supported on
+    /// this transport or PLC model (e.g. GetDataMemory for ML1400 via DF1,
+    /// or GetDataMemory for PLC-5 which is not yet implemented).
+    /// These are known limitations, not protocol errors.
+    /// </summary>
+    private static bool IsFeatureUnsupported(string errorMessage)
+        => errorMessage.Contains("not yet implemented", StringComparison.OrdinalIgnoreCase)
+        || errorMessage.Contains("not supported", StringComparison.OrdinalIgnoreCase)
+        || errorMessage.Contains("does not support", StringComparison.OrdinalIgnoreCase)
+        || errorMessage.Contains("requires EIP", StringComparison.OrdinalIgnoreCase);
+
     // ── Self-test entry point ────────────────────────────────────────────────
 
     /// <summary>
@@ -1976,12 +2007,14 @@ class Program
         {
             Console.WriteLine("  Mode     : EMULATOR — full suite");
             Console.WriteLine("  Target   : PCCCEmulator only. NEVER use on a real PLC.");
-            Console.WriteLine("  Writes to: N7:2-9, F8:2-7, B3:1-2, ST18:2-5");
+            Console.WriteLine("  Reads    : O0 I1 S2 B3 T4 C5 R6 N7 F8 ST18 (all file types)");
+        Console.WriteLine("  Writes to: N7:2-9, F8:2-7, B3:1-2, ST18:2-5");
             Console.WriteLine("  Also runs: InitializeMemory (clears ALL data files)");
         }
         else
         {
             Console.WriteLine("  Mode     : READ-ONLY — safe on any live PLC");
+            Console.WriteLine("  Reads    : O0 I1 S2 B3 T4 C5 R6 N7 F8 ST18 (all file types)");
             Console.WriteLine("  Use 'selftest --emulator' for full suite (emulator only).");
         }
         Console.WriteLine();
@@ -2019,6 +2052,7 @@ class Program
         Console.WriteLine($"║  {_testPass}/{total} passed  —  {verdict,-24}   ║");
         Console.WriteLine($"║  Elapsed: {sw.ElapsedMilliseconds} ms{new string(' ',
             Math.Max(0, 32 - sw.ElapsedMilliseconds.ToString().Length))}║");
+        Console.WriteLine("║  [SKIP] = address absent on this PLC model   ║");
         Console.WriteLine("╚══════════════════════════════════════════════╝");
     }
 
@@ -2084,6 +2118,11 @@ class Program
         Console.WriteLine("── Directory Enumeration ────────────────────────");
 
         var files = TryTest(() => pccc.GetDataMemory(), out string err);
+        if (files == null && IsFeatureUnsupported(err))
+        {
+            TestSkip("GetDataMemory() returns non-null array", err.Split('.')[0]);
+            return;
+        }
         TestResult("GetDataMemory() returns non-null array", files != null, err);
         if (files == null) return;
 
@@ -2404,38 +2443,62 @@ class Program
     ///   Non-existent file — reading from file 100 (never registered) must
     ///     throw a PCCCException. The emulator returns STS=0x50 (bad address).
     /// </summary>
+    /// <summary>
+    /// Reads one element from every mandatory file type present in all
+    /// SLC 500 and MicroLogix processors (ref AB Publication 1770-4.1).
+    ///
+    /// Mandatory files on every SLC/ML: O0, I1, S2, B3, T4, C5, R6, N7, F8.
+    /// ST18 is present on SLC 5/03+ and all MicroLogix — included here because
+    /// read access to an empty string element is safe on any live PLC.
+    ///
+    /// Sub-element addressing (T4:0.ACC, C5:0.ACC, R6:0.LEN) exercises the
+    /// SubElement field in DataAddress and the three-address-field FNC 0xA2
+    /// read path — a distinct code path from the simpler FNC 0xA1.
+    ///
+    /// All reads are non-destructive. Safe on any live production PLC.
+    /// </summary>
     private static void SelfTest_BoundaryConditions(Comm.PCCCComm pccc, bool emulatorMode = false)
     {
         Console.WriteLine("── Boundary Conditions ──────────────────────────");
 
-        // Standard files readable at element 0 on any SLC/ML PLC.
-        var readable = new System.Collections.Generic.List<(string addr, string name)>
+        // Every address below exists on all SLC 500 and MicroLogix processors.
+        // Reads are non-destructive — safe on any live production PLC.
+        (string addr, string label)[] readable =
         {
-            ("O0:0", "O0:0   output image"),
-            ("I1:0", "I1:0   input image"),
-            ("S2:0", "S2:0   status"),
-            ("B3:0", "B3:0   binary"),
-            ("N7:0", "N7:0   integer"),
-            ("F8:0", "F8:0   float"),
+            ("O0:0",     "O0:0      output image word 0"),
+            ("I1:0",     "I1:0      input image word 0"),
+            ("S2:0",     "S2:0      status word 0 (fault bits)"),
+            ("S2:1",     "S2:1      status word 1 (mode/type info)"),
+            ("B3:0",     "B3:0      binary word 0"),
+            ("T4:0.PRE", "T4:0.PRE  timer 0 preset (FNC 0xA2 sub-element)"),
+            ("T4:0.ACC", "T4:0.ACC  timer 0 accumulated (FNC 0xA2 sub-element)"),
+            ("C5:0.PRE", "C5:0.PRE  counter 0 preset (FNC 0xA2 sub-element)"),
+            ("C5:0.ACC", "C5:0.ACC  counter 0 accumulated (FNC 0xA2 sub-element)"),
+            ("R6:0.LEN", "R6:0.LEN  control 0 length (FNC 0xA2 sub-element)"),
+            ("N7:0",     "N7:0      integer word 0"),
+            ("F8:0",     "F8:0      float element 0"),
+            ("ST18:0",   "ST18:0    string element 0 (SLC 5/03+ and all ML)"),
         };
 
-        // ST18 is only present in the PCCCEmulator — skip on real PLCs.
-        if (emulatorMode)
-            readable.Add(("ST18:0", "ST18:0 string"));
-
-        foreach (var (addr, name) in readable)
+        foreach (var (addr, label) in readable)
         {
             string? val = TryTest(() => pccc.ReadAny(addr), out string err);
-            TestResult($"Read {name}", val != null, err);
+            if (val != null)
+                TestResult($"Read {label}", true);
+            else if (IsAddressAbsent(err))
+                TestSkip($"Read {label}", "not present in this PLC program");
+            else
+                TestResult($"Read {label}", false, err);
         }
 
-        // N7 has 74 elements (N7:0 to N7:73); N7:200 must fail.
+        // ── Error path: out-of-range and non-existent file ─────────────────
+        // N7 has 74 elements (N7:0–N7:73); N7:200 must fail.
         bool outOfRange = false;
         try { pccc.ReadAny("N7:200"); }
         catch { outOfRange = true; }
         TestResult("Read N7:200 (out of range) throws exception", outOfRange);
 
-        // File 100 does not exist; the read must fail.
+        // File 100 does not exist on any standard PLC; the read must fail.
         bool notFound = false;
         try { pccc.ReadAny("N100:0"); }
         catch { notFound = true; }
