@@ -37,15 +37,15 @@ The table below follows the naming and grouping conventions of the official AB s
 | 22 | Modify PLC‑2 Compatibility File | 0x0F | 0x5E | ❌ | |
 | 23 | Open File | 0x0F | 0x81 | ✅ | |
 | 24 | Physical Read (PLC‑2/1774‑PLC) | 0x04 | – | ❌ | Legacy |
-| 25 | Physical Read (PLC‑3/5) | 0x0F | 0x17 | ❌ | Legacy |
-| 26 | Physical Write | 0x0F | 0x08 / 0x18 | ❌ | Legacy |
+| 25 | Physical Read (PLC‑3/5) | 0x0F | 0x17 | ✅ | PLC‑5 upload |
+| 26 | Physical Write | 0x0F | 0x08 / 0x18 | ✅ | PLC‑5 download |
 | 27 | Protected Bit Write | 0x02 | – | ❌ | Legacy |
 | 28 | Protected Typed File Read | 0x0F | 0xA7 | ✅ | Same as File Read |
 | 29 | Protected Typed File Write | 0x0F | 0xAF | ✅ | Same as File Write |
 | 30 | Protected Typed Logical Read (3 Address Fields) | 0x0F | 0xA2 | ✅ | |
 | 31 | Protected Typed Logical Write (3 Address Fields) | 0x0F | 0xAA | ✅ | |
 | 32 | Protected Write | 0x00 | – | ❌ | Legacy |
-| 33 | Read Bytes Physical | 0x0F | 0x17 | ❌ | Legacy |
+| 33 | Read Bytes Physical | 0x0F | 0x17 | ✅ | PLC‑5 upload (see #25) |
 | 34 | Read Diagnostic Counters | 0x06 | 0x01 | ✅ | |
 | 35 | Read Link Parameters | 0x06 | 0x09 | ✅ | |
 | 36 | Read‑Modify‑Write | 0x0F | 0x26 | ⚠️ | SLC only; PLC‑5 requires logical binary addressing |
@@ -72,13 +72,15 @@ The table below follows the naming and grouping conventions of the official AB s
 | 57 | Upload | 0x0F | 0x06 | ❌ | |
 | 58 | Word Range Read (Read Block) | 0x0F | 0x01 | ✅ | PLC‑5 only, logical binary addressing |
 | 59 | Word Range Write (Write Block) | 0x0F | 0x00 | ✅ | PLC‑5 only, logical binary addressing |
-| 60 | Write Bytes Physical (Physical Write) | 0x0F | 0x18 | ❌ | Legacy |
+| 60 | Write Bytes Physical (Physical Write) | 0x0F | 0x18 | ✅ | PLC‑5 download (see #26) |
 
 > **Notes:**  
 > - Commands marked with ✅ are fully implemented, tested, and ready for use.  
 > - Commands marked with ⚠️ have limitations or are implemented via workarounds (see details below).  
 > - Commands marked with ❌ are either planned for future releases or are specific to legacy PLC families (PLC‑2, 1774‑PLC, early PLC‑3) which are not the primary target of PCCCComm.  
 > - All read/write operations for **SLC 500, MicroLogix, and PLC‑5** are supported. For PLC‑5, data access uses **Typed Read (0x68)** and **Typed Write (0x67)** with logical binary addressing.  
+> - `GetDataMemory()` is implemented for both SLC (via FNC 0x94) and PLC‑5 (via WordRangeRead FNC 0x01 with chunking).  
+> - PLC‑5 upload/download uses `ReadBytesPhysical` / `WriteBytesPhysical` (FNC 0x17/0x18) with physical addresses from `UploadAllRequest` reply.  
 > - The “Legacy” note indicates commands that are rarely used in modern applications and may be added upon request.
 
 ---
@@ -159,6 +161,24 @@ PCCC> wordwrite N 7 0 0 1122 3344 5566
 Wrote 3 word(s) successfully.
 ```
 
+### Bulk Upload/Download (PLC‑5)
+
+PLC‑5 uses physical memory transfer (per AB 1770‑6.5.16 §12-5 Procedure 2):
+
+| Method | CMD | FNC | Description |
+|--------|-----|-----|-------------|
+| `UploadAllRequest()` | 0x0F | 0x53 | Enter upload mode, get segment addresses |
+| `ReadBytesPhysical()` | 0x0F | 0x17 | Read 128‑byte chunks from physical address |
+| `UploadCompleted()` | 0x0F | 0x55 | Exit upload mode |
+| `DownloadAllRequest()` | 0x0F | 0x50 | Enter download mode |
+| `WriteBytesPhysical()` | 0x0F | 0x18 | Write 128‑byte chunks to physical address |
+| `DownloadCompleted()` | 0x0F | 0x52 | Exit download mode |
+| `UploadProgramData()` | – | – | High‑level bulk upload (stores `PhysicalAddress` per segment) |
+| `DownloadProgramData()` | – | – | High‑level bulk download (uses stored `PhysicalAddress`) |
+
+> Per spec §12-5: physical addresses from upload **must** be stored and reused for download.
+> `PLCFileDetails.PhysicalAddress` carries `segStart` from `UploadAllRequest` reply.
+
 ### File‑Based Upload/Download (SLC 5/03+ and ML1100/1200/1500)
 
 | Method | CMD | FNC | Description |
@@ -189,10 +209,8 @@ Wrote 3 word(s) successfully.
 
 | Method | CMD | FNC | Description |
 |--------|-----|-----|-------------|
-| `GetDataMemory()` | 0x0F | 0x94 | Returns list of data files (SLC 5/03+ only) |
+| `GetDataMemory()` | 0x0F | 0x01 / 0x94 | Returns list of data files (SLC 5/03+ via 0x94; PLC‑5 via WordRangeRead 0x01) |
 | `GetML1500DataMemory()` | 0x0F | 0x94 | ML1500‑specific data file list |
-
-> For PLC‑5, `GetDataMemory()` is not yet implemented.
 
 ### Diagnostics & Testing
 

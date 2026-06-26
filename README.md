@@ -8,7 +8,7 @@
 The suite includes:
 
 - **PCCCComm** – A reusable communication library (supports DF1, EtherNet/IP, and CSPv4)
-- **PCCCEmulator** – Standalone PLC emulator (SLC 5/03 with DF1, EtherNet/IP, and CSPv4)
+- **PCCCEmulator** – Standalone PLC emulator (SLC 5/04 or PLC‑5/40E with DF1, EtherNet/IP, and CSPv4)
 - **Example** – Client example with interactive CLI
 - **PCCCImageTool** – Desktop GUI for upload/download/compare PLC images
 
@@ -37,6 +37,7 @@ PCCCComm/
     │   ├── Handlers/               # PLC family protocol handlers
     │   │   ├── IHandlerContext.cs
     │   │   ├── IPlcHandler.cs
+    │   │   ├── Plc5Handler.cs
     │   │   └── SlcHandler.cs
     │   ├── PCCC/                   # PCCC core (messages, constants, parser)
     │   │   ├── PCCCConstants.cs
@@ -68,21 +69,21 @@ PCCCComm/
 - Read/write any data type: integers, floats, bits, strings, timers, counters
 - Switch processor between RUN and PROGRAM modes
 - Auto‑detect DF1 communication settings (`DetectCommSettings()`)
-- Retrieve data file directory (`GetDataMemory()`)
-- Upload/download complete program files (SLC style)
-- Support for SLC 5/03, MicroLogix 1500, and many other PCCC‑compatible PLCs
+- Retrieve data file directory (`GetDataMemory()`) for SLC and PLC‑5
+- Upload/download complete program files (SLC file‑based and PLC‑5 bulk physical transfer)
+- Support for SLC 5/01–5/05, MicroLogix 1000/1100/1200/1500, PLC‑5/40E, and other PCCC‑compatible PLCs
 
 ### PCCCEmulator (Standalone Tool)
-- Emulates an SLC 5/03 (processor type `0x49`) with DF1, EIP, and CSPv4 interfaces
+- Emulates an SLC 5/04 (default) or PLC‑5/40E (`--family plc5`) with DF1, EIP, and CSPv4 interfaces
 - **Validated against RSLinx with OPC access support** (detects PLC-5/40E or SLC-5/05) — consistent across all transports
 - **DF1 half‑duplex slave** emulation for RS‑485 multi‑drop networks
 - Loads real PLC program from embedded .bin resource (converted from APS .ACH archive)
 - Full DF1 link layer: ACK/NAK, ENQ, checksum, and half‑duplex polling support
 - Full EtherNet/IP server: TCP port 44818, UDP broadcast ListIdentity, Forward Open/Close, Connected/Unconnected Send
 - Full CSPv4 server: TCP port 2222, connection registration, PCCC submode
-- In‑memory file system with pre‑defined data files (O0, I1, S2, B3, N7, F8, T4, C5, R6, and additional files up to file 31)
-- Responds to Get Status (CMD 0x06 FNC 0x03) with realistic 24‑byte payload
-- Handles Protected Typed Logical Read/Write (0xA1, 0xA2, 0xAA, 0xAB)
+- Real memory layout from hardware: SLC (32 data files), PLC‑5/40E (64 data files, 201 slots, 5572 words)
+- Responds to Get Status (CMD 0x06 FNC 0x03) with realistic 24‑byte payload per family
+- Handles Protected Typed Logical Read/Write (SLC) and Typed Read/Write (PLC‑5)
 - Configurable node ID, checksum, baud rate, parity, RS‑485 direction control via command line
 - Console hex logging for debugging
 
@@ -98,9 +99,9 @@ PCCCComm/
 - Upload entire PLC program to a binary file
 - Download previously saved program back to the PLC
 - Compares a backup file against current PLC program
-- Supports SLC 5/01‑5/05 and MicroLogix 1000/1500
+- Supports SLC 5/01–5/05, MicroLogix 1000/1500, and PLC‑5 (bulk physical transfer)
 - Automatic PLC detection and descriptive filename generation
-- Progress indication during transfer
+- Progress indication during transfer (bytes‑based for PLC‑5 bulk, file‑based for SLC)
 
 ---
 

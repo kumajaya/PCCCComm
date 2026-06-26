@@ -15,7 +15,7 @@ Cross‑platform desktop GUI (Avalonia UI) that uploads the complete program fro
 - **Upload** – reads all program and data files, saves to a compact binary file (`.bin`) with a descriptive name.
 - **Download** – restores a previously uploaded program to the same PLC family.
 - **Compare** – compares a backup file against current PLC program, shows mismatches in file structure and CRC32 data.
-- **Supports** SLC 5/01, 5/02, 5/03, 5/04, 5/05 and MicroLogix 1000/1500.
+- **Supports** SLC 5/01–5/05, MicroLogix 1000/1500, and PLC‑5 (bulk physical transfer).
 - **Graphical COM port selection** – baud rate, parity, and node address configurable.
 - **DF1 half‑duplex master** support for RS‑485 multi‑drop networks (selectable in transport dropdown).
 - **RS‑485 direction control** (Auto / RTS / DTR) and echo suppression configurable in GUI.
@@ -150,6 +150,27 @@ The generated `.bin` file contains a raw PCCC memory snapshot with a comprehensi
 | 7      | Series/revision (byte)                        |
 | 8      | RAM size in KB (byte)                         |
 | 9      | Family tag (8 bytes, ASCII, e.g. "SLC    ")   |
+
+**Per‑file record (version 1):**
+
+| Field | Size | Description |
+|-------|------|-------------|
+| FileNumber | 4 bytes | File index |
+| FileType | 4 bytes | File type code (0x20 = LAD, 0x01 = SYS) |
+| NumberOfBytes | 4 bytes | File size in bytes |
+| DataLength | 4 bytes | Actual data length |
+| Data | DataLength bytes | Raw program binary |
+
+**Per‑file record (version 2, adds `PhysicalAddress`):**
+
+| Field | Size | Description |
+|-------|------|-------------|
+| FileNumber | 4 bytes | File index (= segment index for PLC‑5) |
+| FileType | 4 bytes | File type code |
+| NumberOfBytes | 4 bytes | File size in bytes |
+| PhysicalAddress | 4 bytes | PLC‑5 physical start address (0 for SLC) |
+| DataLength | 4 bytes | Actual data length |
+| Data | DataLength bytes | Raw program binary |
 | 17     | Bulletin length (int32)                       |
 | 21     | Bulletin string (UTF‑8, e.g. "5/03")          |
 | 21+len | Timestamp (int64, UTC binary)                 |
@@ -182,7 +203,7 @@ The resulting `.bin` file can be downloaded to a real PLC or the PCCCEmulator.
 | Issue | Likely solution |
 |-------|------------------|
 | **Not connected** after click | Check cable, baud rate, parity, and target node ID. Ensure the PLC is in REM position (for SLC 5/03/04). |
-| **Upload/Download buttons disabled** | PLC type is not supported (e.g. PLC‑5) or identification failed. |
+| **Upload/Download buttons disabled** | PLC type not supported or identification failed. MicroLogix 1400 upload/download via PCCC is not supported. |
 | **Invalid Address** during download | The selected binary file does not match the target PLC memory layout (different processor family). |
 | **Dialog hangs / no reaction** | Run from a terminal to see debug output; ensure the main window is not hidden. |
 | **PLC stopped working after download** | You downloaded a program file that is not compatible with your PLC. Restore the original backup using RSLogix or this tool if a correct backup exists. |

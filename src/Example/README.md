@@ -24,7 +24,7 @@ four supported transports: DF1 full‑duplex, DF1 half‑duplex master (RS‑485
 | **Diagnostics** | Processor type, run mode, data file directory |
 | **Node management** | Target node verification on startup, runtime node switching (`settarget`), RS‑485 node scanner (`scannodes`) |
 | **Monitoring** | Live address watch with delta detection (`watch`) |
-| **Testing** | Exhaustive self‑test suite (`selftest`) — 54 pass/fail test cases across 11 groups |
+| **Testing** | Exhaustive self‑test suite (`selftest`) — 26 cases (SLC/ML) or 24 cases (PLC‑5) across multiple groups |
 | **Stress test** | Continuous read loop with throughput and error rate statistics |
 | **Raw protocol** | Send arbitrary PCCC PDUs via `sendhex` (hex byte input) |
 
@@ -289,7 +289,7 @@ Address format examples: `N7:0`, `F8:5`, `B3:0`, `B3:0/3` (bit), `ST18:0`, `O0:0
 
 | Command | Description |
 |---------|-------------|
-| `selftest` | Run exhaustive 54‑case self‑test suite (see below) |
+| `selftest` | Run self‑test suite — 26 cases (SLC/ML) or 24 cases (PLC‑5), see below |
 | `stats` | Show cumulative communication statistics |
 | `resetstats` | Reset statistics counters |
 | `exit` / `quit` | Leave interactive mode |
@@ -406,7 +406,7 @@ change to the library or emulator.
 | # | Group | What is tested |
 |---|-------|---------------|
 | 1 | Processor Info | `GetProcessorType()`, `GetRunMode()` |
-| 2 | Directory Enumeration | `GetDataMemory()`, mandatory file presence (O0, I1, S2, B3, N7, F8, ST18) |
+| 2 | Directory Enumeration | `GetDataMemory()`, mandatory file presence (O0, I1, S2, B3, N7, F8); ST18 checked for SLC/ML only |
 | 3 | Integer Read/Write | N7 round‑trips: positive, zero, negative, int16 min/max |
 | 4 | Float Read/Write | F8 round‑trips: pi, zero, negative, large, near‑min, negative zero |
 | 5 | Bit Read/Write | B3 via FNC=0xAB: set pattern, clear bit, all‑bits‑set |

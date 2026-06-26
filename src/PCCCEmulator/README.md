@@ -19,7 +19,8 @@ Lightweight, standalone DF1 RS-232, EtherNet/IP (EIP), and CSPv4 (Client Server 
 - Console logging of RX/TX hex for debugging
 - Independent – no external dependencies except `System.IO.Ports`
 - **Loads real SLC-5/04 program** from embedded .bin resource (converted from APS .ACH archive)
-- Contains 21 data files + 10 LAD files – bit‑exact copy of original PLC memory
+- SLC mode: 21 data files + 10 LAD files from real hardware (bit‑exact copy)
+- PLC‑5 mode: 64 data files (201 slots, 5572 words) from real PLC‑5/40E hardware
 
 ## Requirements
 - .NET 8 SDK or later
@@ -291,7 +292,7 @@ dotnet run --project ../Example/Example.csproj -- COM1 --mode df1master --target
 
 ## Emulated Memory Layout
 
-The emulator simulates an SLC-5/04 configuration (default) with the following data files and program files. **When running in PLC‑5 mode, the same memory layout is used** (file types are compatible), allowing read/write access to N, B, F, T, C, ST, L files. The only difference is the GetStatus response and the command set (Typed Read/Write instead of Protected Typed Logical).
+The emulator simulates an SLC-5/04 configuration (default) with the following data files and program files. **PLC‑5 mode uses real memory layout from PLC‑5/40E hardware**: 64 active data files, 201 total slots (file numbers 0–200), 5572 words total. Command set uses Typed Read/Write (FNC 0x68/0x67) with logical binary addressing instead of Protected Typed Logical.
 
 ### Data Files
 
@@ -546,6 +547,7 @@ classDiagram
 | **pycomm3 / libplctag connection timeout (EIP)** | Verify `--mode eip` is active. Check firewall allows TCP 44818. |
 | **Half‑duplex communication fails** | Ensure client uses `--mode df1master` and emulator uses `--mode df1slave` with same node ID. For virtual serial loops, enable `--echo-suppression`. |
 | **PLC‑5 mode not detected** | Verify emulator is started with `--family plc5`. Check client's `GetProcessorFamily()` returns `Plc5`. Look for `type extender 0xBE` in GetStatus response (hex dump). |
+| **GetDataMemory fails in PLC‑5 mode** | PLC‑5 uses WordRangeRead (FNC 0x01) for directory access. Ensure library version supports PLC‑5 `GetDataMemory()`. |
 | **Typed Read/Write fails in PLC‑5 mode** | Ensure client uses `Plc5Handler` (auto-selected by `GetProcessorFamily`). The emulator handles `FNC 0x68` and `0x67` with logical binary address decoding. Check logs for `func=0x68` or `func=0x67`. |
 | **RSLinx cannot find device via CSPv4** | Ensure the emulator is started with `--mode csp`. Check TCP port 2222 is not blocked by firewall. Use the "AB Ethernet" driver in RSLinx (not EtherNet/IP). |
 
