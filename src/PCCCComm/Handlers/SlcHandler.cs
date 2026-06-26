@@ -922,7 +922,14 @@ public class SlcHandler : IPlcHandler
             stElement[0] = (byte)(len & 0xFF);
             stElement[1] = (byte)((len >> 8) & 0xFF);
             for (int i = 0; i < len; i++)
-                stElement[2 + i] = (byte)dataToWrite[i];
+            {
+                int wordOffset = i / 2;
+                int byteOffset = 2 + wordOffset * 2;
+                if (i % 2 == 0)
+                    stElement[byteOffset + 1] = (byte)dataToWrite[i]; // even → high byte
+                else
+                    stElement[byteOffset] = (byte)dataToWrite[i];     // odd  → low byte
+            }
             return WriteRawDataWithChunking(p, stElement);
         }
         else

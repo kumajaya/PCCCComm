@@ -2417,13 +2417,14 @@ class Program
     ///
     /// SLC 500 string format (AB Publication 1770-6.5.16, Chapter 7):
     ///   Bytes 0-1  : length word, little-endian, value 0-82
-    ///   Bytes 2-83 : character data, one ASCII byte per byte, unused = 0x00
+    ///   Bytes 2-83 : character data, word-packed (even index → high byte,
+    ///                odd index → low byte), unused bytes = 0x00
     ///
     /// Each ST element is 84 bytes (1 length word + 82 characters).
     ///
     /// PCCCComm write path:
     ///   WriteData(addr, string) encodes the string into the 84-byte element
-    ///   layout and issues FNC=0xAA with 84 bytes of data.
+    ///   layout (word-packed) and issues FNC=0xAA with 84 bytes of data.
     ///
     /// PCCCComm read path:
     ///   ReadAny(addr) for an ST file reads 84 bytes and reconstructs the

@@ -986,7 +986,8 @@ public class PlcMemory : IDisposable
         }
         else
         {
-            // SLC format: 84 bytes, length word at offset, then sequential chars
+            // SLC format: 84 bytes, length word at offset, then word-packed chars
+            // Encoding: even index → high byte, odd index → low byte (matches ReadAnyString)
             const int elemSize = 84;
             const int maxChars = 82;
             int offset = elementIndex * elemSize;
@@ -996,7 +997,13 @@ public class PlcMemory : IDisposable
             buf[offset] = (byte)(len & 0xFF);
             buf[offset + 1] = (byte)((len >> 8) & 0xFF);
             for (int i = 0; i < len; i++)
-                buf[offset + 2 + i] = (byte)value[i];
+            {
+                int wordOffset = offset + 2 + (i / 2) * 2;
+                if (i % 2 == 0)
+                    buf[wordOffset + 1] = (byte)value[i]; // even → high byte
+                else
+                    buf[wordOffset] = (byte)value[i];     // odd  → low byte
+            }
             // remaining already zero
         }
     }
