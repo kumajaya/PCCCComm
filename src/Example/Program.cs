@@ -1546,14 +1546,6 @@ class Program
                         HandleWrite(pccc, parts);
                         break;
 
-                    // writestring <address> <text...>
-                    // Writes a string to an ST file address.
-                    // Text may contain spaces; everything after the address is joined.
-                    // Example: writestring ST18:0 Hello World
-                    case "writestring":
-                        HandleWriteString(pccc, parts);
-                        break;
-
                     // sendhex <DST> <CMD> <FNC> [data bytes...]
                     // Sends a raw PCCC PDU. All values are hexadecimal.
                     // SRC, STS, and TNS are filled in automatically by the library.
@@ -1726,47 +1718,94 @@ class Program
     /// <summary>
     /// Handles the "write" interactive command.
     /// Usage: write &lt;address&gt; &lt;value&gt; [value2 ...]
+    /// Supports all file types:
+    ///   - Integer files (N, B, T.ACC, C.ACC, etc.) → WriteData(string, int[])
+    ///   - Float files (F) → WriteData(string, float[])
+    ///   - Long files (L) → WriteData(string, int[]) (int is 32‑bit)
+    ///   - String files (ST) → WriteData(string, string) (all remaining args joined)
+    ///   - Other types (O, I, S, R, MG, PD, PLS, etc.) → WriteData(string, int[])
     /// </summary>
     private static void HandleWrite(Comm.PCCCComm pccc, string[] parts)
     {
         if (parts.Length < 3)
         {
             Console.WriteLine("Usage: write <address> <value> [value2 ...]");
-            Console.WriteLine("  Example: write N7:0 100 200 300");
+            Console.WriteLine("  Examples:");
+            Console.WriteLine("    write N7:0 100 200 300");
+            Console.WriteLine("    write F8:0 3.14 2.718");
+            Console.WriteLine("    write L9:0 123456789");
+            Console.WriteLine("    write ST18:0 Hello World");
+            Console.WriteLine("    write T4:0.ACC 50");
             return;
         }
-        string addr   = parts[1];
-        var    values = new List<int>();
 
-        for (int i = 2; i < parts.Length; i++)
-        {
-            if (!int.TryParse(parts[i], out int v))
-            {
-                Console.WriteLine($"Invalid integer value: '{parts[i]}'");
-                return;
-            }
-            values.Add(v);
-        }
-        pccc.WriteData(addr, values.Count, values.ToArray());
-        Console.WriteLine("Write successful.");
-    }
-
-    /// <summary>
-    /// Handles the "writestring" interactive command.
-    /// Usage: writestring &lt;address&gt; &lt;text...&gt;
-    /// </summary>
-    private static void HandleWriteString(Comm.PCCCComm pccc, string[] parts)
-    {
-        if (parts.Length < 3)
-        {
-            Console.WriteLine("Usage: writestring <address> <text>");
-            Console.WriteLine("  Example: writestring ST18:0 Hello World");
-            return;
-        }
         string addr = parts[1];
-        string text = string.Join(" ", parts, 2, parts.Length - 2);
-        pccc.WriteData(addr, text);
-        Console.WriteLine("String write successful.");
+
+        // Parse address using the library's built-in parser
+        var parsed = Comm.Pccc.PCCCParser.Parse(addr);
+        if (parsed.FileType == 0)
+        {
+            Console.WriteLine($"Invalid address: '{addr}'");
+            return;
+        }
+
+        // Determine file type from the parsed code
+        var fileType = (Comm.Pccc.PCCCConstants.SlcFileTypeCode)parsed.FileType;
+
+        // ── String file (ST) ──────────────────────────────────────────────────
+        if (fileType == Comm.Pccc.PCCCConstants.SlcFileTypeCode.String)
+        {
+            // Join all remaining arguments as the string to write
+            string text = string.Join(" ", parts.Skip(2));
+            pccc.WriteData(addr, text);
+            Console.WriteLine("String write successful.");
+            return;
+        }
+
+        // ── Float file (F) ────────────────────────────────────────────────────
+        if (fileType == Comm.Pccc.PCCCConstants.SlcFileTypeCode.Float)
+        {
+            var floatValues = new List<float>();
+            for (int i = 2; i < parts.Length; i++)
+            {
+                // Try float first, then integer as fallback
+                if (float.TryParse(parts[i],
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out float f))
+                {
+                    floatValues.Add(f);
+                }
+                else if (int.TryParse(parts[i], out int intVal))
+                {
+                    floatValues.Add((float)intVal);
+                }
+                else
+                {
+                    Console.WriteLine($"Invalid numeric value for float file: '{parts[i]}'");
+                    return;
+                }
+            }
+            pccc.WriteData(addr, floatValues.Count, floatValues.ToArray());
+            Console.WriteLine("Float write successful.");
+            return;
+        }
+
+        // ── All other numeric types (N, B, L, T, C, R, O, I, S, MG, PD, PLS, etc.) ──
+        {
+            var intValues = new List<int>();
+            for (int i = 2; i < parts.Length; i++)
+            {
+                if (!int.TryParse(parts[i], out int v))
+                {
+                    Console.WriteLine($"Invalid integer value: '{parts[i]}'");
+                    return;
+                }
+                intValues.Add(v);
+            }
+            pccc.WriteData(addr, intValues.Count, intValues.ToArray());
+            Console.WriteLine("Write successful.");
+        }
     }
 
     /// <summary>
@@ -3157,10 +3196,10 @@ class Program
         Console.WriteLine("Data access:");
         Console.WriteLine("  read <addr> [count]            Read one or more elements");
         Console.WriteLine("                                 Example: read N7:0  /  read F8:0 5");
-        Console.WriteLine("  write <addr> <val> [val...]    Write integer value(s) to address");
-        Console.WriteLine("                                 Example: write N7:0 100");
-        Console.WriteLine("  writestring <addr> <text>      Write ASCII string to ST file");
-        Console.WriteLine("                                 Example: writestring ST21:0 Hello");
+        Console.WriteLine("  write <addr> <val> [val...]    Write values to address (auto-detects type)");
+        Console.WriteLine("                                 Examples: write N7:0 100");
+        Console.WriteLine("                                           write F8:0 3.14");
+        Console.WriteLine("                                           write ST18:0 Hello World");
         Console.WriteLine("  datamem                        List all data files configured in PLC");
         Console.WriteLine("  watch <addr> [interval_ms]     Monitor address, print on change");
         Console.WriteLine("                                 (default interval: 500 ms, any key to stop)");
