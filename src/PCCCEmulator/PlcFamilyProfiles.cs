@@ -108,10 +108,9 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
     public PlcMemoryConfig BuildMemoryConfig()
     {
         // numDataFiles = 32: file numbers 0-31 (slots 20-28 are empty/inactive gaps)
-        // dirSize = 79 + (32+12)×10 = 519 bytes
-        const int dirSize        = 519;
-        const int numDataFiles   = 32;
-        const int numProgramFiles = 12;
+        const int numDataFiles    = 32;
+        const int numProgramFiles = 24;  // slots 0-23 (12 active), from hardware
+        const int dirSize         = 79 + (numDataFiles + numProgramFiles) * 10;  // = 639
 
         var files = new List<DataFileSpec>
         {
@@ -140,8 +139,25 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
             new(0x85, 31,  52),       // B31 — 26 words
         };
 
+        // SLC 5/04 program files from real hardware.
+        // File numbers non-sequential; gaps = unused slots.
+        var progFiles = new List<ProgramFileSpec>
+        {
+            new(0x01,  0,    2),  // SYS — system file
+            new(0x01,  1,    2),  // SYS — reserved
+            new(0x20,  2,  591),  // LAD2  — 23 rungs
+            new(0x20,  3,  394),  // LAD3  — 13 rungs
+            new(0x20,  5,  797),  // LAD5  — 24 rungs
+            new(0x20,  8,  774),  // LAD8  — 26 rungs
+            new(0x20, 12, 1248),  // LAD12 — 16 rungs
+            new(0x20, 15,  650),  // LAD15 — 22 rungs
+            new(0x20, 18,  524),  // LAD18 — 18 rungs
+            new(0x20, 19,  147),  // LAD19 —  6 rungs
+            new(0x20, 22,  805),  // LAD22 — 14 rungs
+            new(0x20, 23,  358),  // LAD23 —  9 rungs
+        };
         return new PlcMemoryConfig(dirSize, numDataFiles, numProgramFiles, files,
-            ProgramFiles: System.Array.Empty<ProgramFileSpec>());
+            ProgramFiles: progFiles);
     }
 
     public void SeedInitialValues(PlcMemory memory)
@@ -285,8 +301,16 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
 
         // numDataFiles = 219: file numbers 0-218, with gaps filled by WriteDataFileEntries.
         // dirSize = 79 + (219 + 4) × 10 = 2309 bytes
+        // ML1400 program files: file 0=SYS, files 2-3=LAD.
+        var progFiles = new List<ProgramFileSpec>
+        {
+            new(0x01,  0,  442),  // SYS — system file
+            new(0x01,  1,    2),  // SYS — reserved
+            new(0x20,  2,  100),  // LAD2
+            new(0x20,  3,  100),  // LAD3
+        };
         return new PlcMemoryConfig(2309, 219, 4, files,
-            ProgramFiles: System.Array.Empty<ProgramFileSpec>());
+            ProgramFiles: progFiles);
     }
 
     public void SeedInitialValues(PlcMemory memory)
