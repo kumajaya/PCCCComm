@@ -194,7 +194,7 @@ namespace PCCCComm.Pccc
                 if (addr.Element >= 255) bodySize += 2;
                 if (addr.SubElement >= 255) bodySize += 2;
 
-                byte[] body = new byte[bodySize + 1];
+                byte[] body = new byte[bodySize];
                 int idx = 0;
 
                 body[idx++] = (byte)bytesToWrite;
