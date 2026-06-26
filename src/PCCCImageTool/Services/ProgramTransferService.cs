@@ -60,7 +60,9 @@ public class ProgramTransferService
                     : (double)completedFiles / totalFiles * 100.0;
                 
                 _progressPercent?.Report(Math.Min(pct, 95.0));
-                _progressMessage?.Report($"Uploading {completedFiles} of {totalFiles} files ({transferredBytes}/{totalBytes} bytes)…");
+                _progressMessage?.Report(totalFiles <= 1
+                    ? $"Uploading {transferredBytes}/{totalBytes} bytes…"
+                    : $"Uploading {completedFiles} of {totalFiles} files ({transferredBytes}/{totalBytes} bytes)…");
             };
 
             _df1.FileProgress += progressHandler;
@@ -83,7 +85,9 @@ public class ProgramTransferService
                     SaveToFile(filePath, files);
 
                 _progressPercent?.Report(100);
-                _progressMessage?.Report($"Upload complete – {files.Count} program file(s), {totalBytes} bytes.");
+                _progressMessage?.Report(files.Count == 1
+                    ? $"Upload complete – {totalBytes} bytes."
+                    : $"Upload complete – {files.Count} program file(s), {totalBytes} bytes.");
             }
             finally
             {
@@ -122,7 +126,9 @@ public class ProgramTransferService
                     : (double)e.FilesCompleted / e.TotalFiles * 100.0;
                 
                 _progressPercent?.Report(pct);
-                _progressMessage?.Report($"Downloading {e.FilesCompleted} of {e.TotalFiles} files ({e.TotalBytesTransferred}/{e.GrandTotalBytes} bytes)…");
+                _progressMessage?.Report(e.TotalFiles <= 1
+                    ? $"Downloading {e.TotalBytesTransferred}/{e.GrandTotalBytes} bytes…"
+                    : $"Downloading {e.FilesCompleted} of {e.TotalFiles} files ({e.TotalBytesTransferred}/{e.GrandTotalBytes} bytes)…");
             };
 
             _df1.FileProgress += progressHandler;
@@ -132,7 +138,9 @@ public class ProgramTransferService
                 _df1.DownloadProgramData(files);
 
                 _progressPercent?.Report(100);
-                _progressMessage?.Report($"Download complete – {files.Count} file(s), {totalBytes} bytes.");
+                _progressMessage?.Report(files.Count == 1
+                    ? $"Download complete – {totalBytes} bytes."
+                    : $"Download complete – {files.Count} file(s), {totalBytes} bytes.");
             }
             finally
             {
@@ -307,7 +315,9 @@ public class ProgramTransferService
                     : (double)completedFiles / totalFiles * 100.0;
                 
                 _progressPercent?.Report(pct);
-                _progressMessage?.Report($"Reading PLC files: {completedFiles} of {totalFiles} ({transferredBytes}/{totalBytes} bytes)…");
+                _progressMessage?.Report(totalFiles <= 1
+                    ? $"Reading PLC program: {transferredBytes}/{totalBytes} bytes…"
+                    : $"Reading PLC files: {completedFiles} of {totalFiles} ({transferredBytes}/{totalBytes} bytes)…");
             };
 
             _df1.FileProgress += progressHandler;
@@ -374,7 +384,9 @@ public class ProgramTransferService
                 }
 
                 _progressPercent?.Report(100);
-                _progressMessage?.Report($"Compare complete – {fileFiles.Count} files in backup, {plcFiles.Count} files in PLC.");
+                _progressMessage?.Report(plcFiles.Count == 1
+                    ? $"Compare complete – {totalBytes} bytes."
+                    : $"Compare complete – {fileFiles.Count} files in backup, {plcFiles.Count} files in PLC.");
 
                 return results
                     .OrderBy(r => r.FileType == 0 ? 0 : 1)

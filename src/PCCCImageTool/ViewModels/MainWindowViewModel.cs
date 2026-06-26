@@ -27,10 +27,11 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
     private readonly IDialogService _dialogService;
     private bool _disposed;
 
-    // Log buffer – capped at MaxLogLines
+    // Log buffer – accumulates all log lines during an operation.
+    // UI is updated only when FlushLogToUI() is called (after operation completes).
     private readonly StringBuilder _logBuffer = new();
     private int _logLineCount;
-    private const int MaxLogLines = 500;
+    private const int MaxLogLines = 10000; // Large buffer to avoid trimming during fast operations
 
     // ─── Backing fields ───────────────────────────────────────────────────────
     private bool    _isBusy;
@@ -64,12 +65,6 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
     private int _rtsAssertDelay = 1;
     private int _rtsDeassertDelay = 5;
     public List<string> Rs485Modes { get; } = new() { "Auto", "Rts", "Dtr" };
-
-    // ─── Log throttling fields ──────────────────────────────────────────────
-    private readonly StringBuilder _pendingLogBatch = new();
-    private readonly object _logBatchLock = new();
-    private DateTime _lastLogFlush = DateTime.MinValue;
-    private const int LogFlushIntervalMs = 50;  // Max 20 updates per second
 
     // ─── Observable collections ───────────────────────────────────────────────
     public ObservableCollection<string> AvailablePorts { get; } = new();
@@ -223,7 +218,7 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
 
     /// <summary>
     /// Append-only log string bound to a read-only TextBox.
-    /// Raises PropertyChanged on every append so the view can scroll to end.
+    /// Updated only when FlushLogToUI() is called to avoid UI lag during fast operations.
     /// </summary>
     public string LogText
     {
@@ -274,79 +269,59 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
     }
 
     // ─── Logging ─────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Appends a line to the internal log buffer. Does NOT update UI immediately.
+    /// Call FlushLogToUI() to push accumulated logs to the UI.
+    /// </summary>
     private void AppendLog(string line)
     {
-        lock (_logBatchLock)
+        lock (_logBuffer)
         {
-            _pendingLogBatch.AppendLine($"{DateTime.Now:HH:mm:ss.fff}  {line}");
-        }
-        
-        // Throttle: flush only if enough time has passed or batch is getting large
-        if ((DateTime.Now - _lastLogFlush).TotalMilliseconds >= LogFlushIntervalMs || 
-            _pendingLogBatch.Length > 2000)
-        {
-            FlushPendingLogs();
-        }
-    }
-
-    private void ClearLog()
-    {
-        // Flush any pending logs first
-        FlushPendingLogs();
-        
-        _logBuffer.Clear();
-        _logLineCount = 0;
-        LogText = string.Empty;
-        
-        lock (_logBatchLock)
-        {
-            _pendingLogBatch.Clear();
-        }
-    }
-
-    private void FlushPendingLogs()
-    {
-        string batch;
-        lock (_logBatchLock)
-        {
-            if (_pendingLogBatch.Length == 0) return;
-            batch = _pendingLogBatch.ToString();
-            _pendingLogBatch.Clear();
-        }
-        
-        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-        {
-            _logBuffer.Append(batch);
-            _logLineCount += batch.Count(c => c == '\n');
+            _logBuffer.AppendLine($"{DateTime.Now:HH:mm:ss.fff}  {line}");
+            _logLineCount++;
             
-            // Trim if exceeding max lines
+            // Trim only if exceeding max lines (safety net)
             while (_logLineCount > MaxLogLines)
             {
-                string current = _logBuffer.ToString();
-                int idx = current.IndexOf('\n');
+                int idx = _logBuffer.ToString().IndexOf('\n');
                 if (idx >= 0)
                     _logBuffer.Remove(0, idx + 1);
                 else
                     _logBuffer.Clear();
                 _logLineCount--;
             }
-            
-            LogText = _logBuffer.ToString();
-            _lastLogFlush = DateTime.Now;
-        });
+        }
     }
 
     /// <summary>
-    /// Waits for all pending UI thread operations (including log updates) to complete.
-    /// Call this before showing dialogs to ensure logs are fully rendered.
+    /// Clears the log buffer and the UI log text immediately.
     /// </summary>
-    private async Task FlushLogsAsync()
+    private void ClearLog()
     {
-        // Flush any pending log batches
-        FlushPendingLogs();
-        
-        // Wait for UI thread to process all queued operations
-        await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() => { });
+        lock (_logBuffer)
+        {
+            _logBuffer.Clear();
+            _logLineCount = 0;
+        }
+        LogText = string.Empty;
+    }
+
+    /// <summary>
+    /// Flushes accumulated logs from the buffer to the UI TextBox.
+    /// Called after a long operation completes.
+    /// </summary>
+    private void FlushLogToUI()
+    {
+        string currentLog;
+        lock (_logBuffer)
+        {
+            currentLog = _logBuffer.ToString();
+        }
+        // Update UI on the dispatcher thread
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            LogText = currentLog;
+        });
     }
 
     // ─── About ───────────────────────────────────────────────────────────────
@@ -521,6 +496,8 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         finally
         {
             IsBusy = false;
+            // After connection attempt, flush logs to UI
+            FlushLogToUI();
         }
     }
 
@@ -532,6 +509,7 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         IsConnected     = false;
         StatusText      = "Disconnected";
         AppendLog("Disconnected.");
+        FlushLogToUI();
     }
 
     /// <summary>
@@ -615,7 +593,6 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         await Task.Run(() => _df1.SetProgramMode());
         AppendLog("PLC switched to PROGRAM mode.");
         await RefreshPlcStatusAsync();  // StatusText now shows PROGRAM
-        await FlushLogsAsync();
 
         int targetProc = _currentPlcInfo.ProcessorType;
         string targetBulletin = _currentPlcInfo.Bulletin;
@@ -648,7 +625,7 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         Func<IProgress<string>, IProgress<double>, CancellationToken, Task> work,
         string operationName)
     {
-        // Clear log before starting new transfer to avoid UI lag from accumulated lines
+        // Clear log before starting new transfer
         ClearLog();
 
         IsBusy          = true;
@@ -664,7 +641,7 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
         var progressMsg = new Progress<string>(msg =>
         {
             ProgressMessage = msg;
-            AppendLog(msg);
+            AppendLog(msg); // Still append to buffer, but no UI flush until done
         });
         var progressPct = new Progress<double>(pct => ProgressValue = pct);
 
@@ -673,11 +650,13 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
             await work(progressMsg, progressPct, _cts.Token);
             AppendLog($"--- {operationName} complete ---");
             await RefreshPlcStatusAsync();
-            await FlushLogsAsync();  // Ensure all logs are rendered
             
+            // Flush all accumulated logs to UI at once
+            FlushLogToUI();
+            await Task.Delay(50);  // Give UI a moment to render
+
             if (operationName == "Download")
             {
-                await FlushLogsAsync();  // Extra flush before confirmation dialog
                 bool switchToRun = await _dialogService.ShowConfirmAsync(
                     "Download Complete",
                     "Download finished successfully.\n\nSwitch to RUN mode now?");
@@ -701,20 +680,25 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
                 }
             }
             
-            await FlushLogsAsync();  // Flush before success dialog
+            // Flush any logs generated after download mode decision
+            FlushLogToUI();
+            await Task.Delay(50);
+            
             await _dialogService.ShowMessageAsync($"{operationName} Complete",
                 $"{operationName} finished successfully.");
         }
         catch (OperationCanceledException)
         {
             AppendLog($"--- {operationName} cancelled ---");
-            await FlushLogsAsync();
+            FlushLogToUI();
+            await Task.Delay(50);
             await _dialogService.ShowMessageAsync("Cancelled", $"{operationName} was cancelled.");
         }
         catch (Exception ex)
         {
             AppendLog($"ERROR: {ex.Message}");
-            await FlushLogsAsync();
+            FlushLogToUI();
+            await Task.Delay(50);
             await _dialogService.ShowMessageAsync($"{operationName} Error", ex.Message);
         }
         finally
