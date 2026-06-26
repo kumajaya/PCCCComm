@@ -901,10 +901,11 @@ public class Plc5Handler : IPlcHandler
 
                 files.Add(new PLCFileDetails
                 {
-                    FileNumber    = filesCompleted,
-                    FileType      = 0x00,
-                    NumberOfBytes = (int)ms.Length,
-                    Data          = ms.ToArray()
+                    FileNumber      = filesCompleted,
+                    FileType        = 0x00,
+                    NumberOfBytes   = (int)ms.Length,
+                    Data            = ms.ToArray(),
+                    PhysicalAddress = segStart,   // per spec §12-5: store physical address
                 });
                 filesCompleted++;
             }
@@ -948,10 +949,9 @@ public class Plc5Handler : IPlcHandler
                 if (file.Data == null || file.Data.Length == 0) continue;
 
                 int totalBytes = file.Data.Length;
-                // NOTE: physBase=0 valid only for single-segment emulator.
-                // For real PLC-5 with multiple segments, store segStart per file during upload
-                // (e.g., as file.FileNumber * segmentSize or via a separate metadata field).
-                int physBase = 0x0000; // default; could be stored in file.FileNumber
+                // Per spec §12-5 Procedure 2: use the physical address stored during upload.
+                // UploadProgramData stores segStart in PLCFileDetails.PhysicalAddress.
+                int physBase = file.PhysicalAddress;
 
                 int offset = 0;
 

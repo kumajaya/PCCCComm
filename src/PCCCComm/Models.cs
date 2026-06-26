@@ -73,4 +73,14 @@ public class PLCFileDetails
     public int FileNumber { get; set; }
     public int NumberOfBytes { get; set; }
     public byte[] Data { get; set; } = Array.Empty<byte>();
+
+    /// <summary>
+    /// Physical start address of this memory segment in PLC memory.
+    /// Populated from UploadAllRequest reply (segStart field).
+    /// Per AB Publication 1770-6.5.16 §12-5, Procedure 2:
+    ///   "you must also store the physical addresses from where
+    ///    the memory information came" to perform the download procedure.
+    /// Used by DownloadProgramData as the base address for WriteBytesPhysical.
+    /// </summary>
+    public int PhysicalAddress { get; set; } = 0;
 }

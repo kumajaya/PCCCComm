@@ -156,7 +156,7 @@ public class ProgramTransferService
         using (var bw = new BinaryWriter(ms, System.Text.Encoding.UTF8, leaveOpen: true))
         {
             bw.Write((ushort)0xDF1A);                 // magic
-            bw.Write((byte)1);                        // version (current = 1)
+            bw.Write((byte)2);                        // version (current = 2, adds PhysicalAddress per segment)
             bw.Write(processorType);                  // int32
             bw.Write(seriesRev);                      // byte
             bw.Write(ramKb);                          // byte
@@ -173,6 +173,7 @@ public class ProgramTransferService
                 bw.Write(file.FileNumber);
                 bw.Write(file.FileType);
                 bw.Write(file.NumberOfBytes);
+                bw.Write(file.PhysicalAddress);  // per spec §12-5: physical address
                 bw.Write(file.Data.Length);
                 bw.Write(file.Data);
             }
@@ -210,7 +211,8 @@ public class ProgramTransferService
         if (magic != 0xDF1A) throw new InvalidDataException("Not a PCCCImageTool file (magic mismatch)");
 
         byte version = br.ReadByte();
-        if (version != 1) throw new InvalidDataException($"Unsupported file version: {version} (expected 1)");
+        if (version != 1 && version != 2)
+            throw new InvalidDataException($"Unsupported file version: {version} (expected 1 or 2)");
 
         int procType = br.ReadInt32();
         byte series = br.ReadByte();
@@ -231,7 +233,10 @@ public class ProgramTransferService
             {
                 FileNumber    = br.ReadInt32(),
                 FileType      = br.ReadInt32(),
-                NumberOfBytes = br.ReadInt32()
+                NumberOfBytes = br.ReadInt32(),
+                // Version 2+: physical address per spec §12-5
+                // Version 1: no PhysicalAddress field, defaults to 0
+                PhysicalAddress = version >= 2 ? br.ReadInt32() : 0,
             };
             int dataLen = br.ReadInt32();
             if (dataLen < 0 || dataLen > 1_000_000)
