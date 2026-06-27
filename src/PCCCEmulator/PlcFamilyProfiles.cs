@@ -174,6 +174,22 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
         memory.WriteFloatDirect(0x8A, 8, 4, 4.56f);
         // ST18:0 — default string
         memory.WriteStStringDirect(0x8D, 18, 0, "EMULATOR OK", FamilyType);
+
+        // S2: Status file — static fields only (dynamic fields updated by UpdateDateTime/scan timers)
+        // Derived from real SLC 5/03 hardware project report scaled to SLC 5/04.
+        // Field definitions per AB RSLogix 500 Address/Symbol Database.
+        memory.WriteU16Direct(0x84, 2, 15*2, 0x4B01); // S2:15 — Node=1 / Baud=19200 (0x4B)
+        // Processor identification — SLC 5/04 (1747-L541E), derived from 5/03 (1747-L531E) pattern
+        memory.WriteU16Direct(0x84, 2, 57*2, 401);     // S2:57 — OS Catalog Number (OS401, cf. OS302 on 5/03)
+        memory.WriteU16Direct(0x84, 2, 58*2, 401);     // S2:58 — mirrors S2:57 per hardware pattern
+        memory.WriteU16Direct(0x84, 2, 59*2, 10);      // S2:59 — OS FRN
+        memory.WriteU16Direct(0x84, 2, 60*2, 541);     // S2:60 — Processor Catalog (1747-L541E, cf. L531E on 5/03)
+        memory.WriteU16Direct(0x84, 2, 61*2, 4);       // S2:61 — Processor Series
+        memory.WriteU16Direct(0x84, 2, 62*2, 8);       // S2:62 — Processor FRN
+        memory.WriteU16Direct(0x84, 2, 63*2, 1);       // S2:63 — User Program Type
+        memory.WriteU16Direct(0x84, 2, 64*2, 95);      // S2:64 — User Program Functional Index
+        memory.WriteU16Direct(0x84, 2, 65*2, 16);      // S2:65 — User RAM Size (16K words for 5/04)
+        memory.WriteU16Direct(0x84, 2, 66*2, 480);     // S2:66 — Flash EEPROM Size
     }
 }
 
@@ -193,7 +209,9 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
 
     public byte[] BuildGetStatusPayload(ProcessorMode mode)
     {
-        byte[] p = new byte[29];
+        // Layout verified byte-by-byte against real 1766-L32BWA hardware
+        // via sendhex 01 06 03 capture (25-byte payload, June 2026).
+        byte[] p = new byte[25];
         p[0]  = 0x00;
         p[1]  = 0xEE;                           // type extender (SLC/ML family)
         p[2]  = 0x34;                           // extended interface type
@@ -201,17 +219,16 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
         p[4]  = 0x23;                           // series/revision
         PayloadHelper.WriteCatalog(p, "1766-LEC");
         p[16] = 0x00; p[17] = 0x00;
-        p[18] = 0x26;                           // FRN 15.0
+        p[18] = 0x3E;                           // FRN internal code (verified: 0x3E, not 0x26)
         p[19] = 0x04;
         p[20] = 0x71; p[21] = 0x43;
         p[22] = 0x9E; p[23] = 0xFC;
-        // p[24..27] = reserved = 0x00
-        p[28] = ModeToMl1400Byte(mode);
+        p[24] = ModeToMl1400Byte(mode);         // mode byte at offset 24 (verified from hardware)
         return p;
     }
 
     public void PatchModeInPayload(byte[] payload, ProcessorMode mode)
-        => payload[28] = ModeToMl1400Byte(mode);
+        => payload[24] = ModeToMl1400Byte(mode); // offset 24 (verified from hardware)
 
     private static byte ModeToMl1400Byte(ProcessorMode mode) => mode switch
     {
@@ -322,6 +339,19 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
         memory.WriteFloatDirect(0x8A,  8, 4, 4.56f);
         memory.WriteFloatDirect(0x8A, 18, 0, 1.23f);
         memory.WriteStStringDirect(0x8D, 21, 0, "EMULATOR OK", FamilyType);
+
+        // S2: Status file — static fields only (RTC updated by UpdateDateTime every second)
+        // All values verified byte-by-byte against real 1766-L32BWA hardware (June 2026).
+        // Field definitions per AB 1766-RM001 MicroLogix 1400 Reference Manual.
+        memory.WriteU16Direct(0x84, 2,  1*2, 0x043E); // S2:1  — FRN word (major=0x3E, minor=0x04)
+        memory.WriteU16Direct(0x84, 2, 57*2, 1400);   // S2:57 — Model display (informational, not processor type)
+        memory.WriteU16Direct(0x84, 2, 58*2, 1);       // S2:58 — Series
+        memory.WriteU16Direct(0x84, 2, 59*2, 15);      // S2:59 — FRN display (15)
+        memory.WriteU16Direct(0x84, 2, 60*2, 0x4345); // S2:60 — Catalog suffix "CE" (ASCII)
+        memory.WriteU16Direct(0x84, 2, 61*2, 1);       // S2:61
+        memory.WriteU16Direct(0x84, 2, 62*2, 3);       // S2:62 — Sub-revision
+        memory.WriteU16Direct(0x84, 2, 63*2, unchecked((ushort)-28408)); // S2:63 — Serial# low
+        memory.WriteU16Direct(0x84, 2, 64*2, 1334);    // S2:64 — Serial# high
     }
 }
 
@@ -535,5 +565,17 @@ public sealed class Plc5FamilyProfile : IPlcFamilyProfile
         // N20: sample integers
         memory.WriteU16Direct(0x89, 20, 0, 1000);
         memory.WriteU16Direct(0x89, 20, 2, 2000);
+
+        // S2: Status file — static fields only (RTC S2:18-23 updated by UpdateDateTime every second)
+        // Values from real PLC-5/40E (1785-L40E Series E Rev B) RSLogix 5 project report.
+        // Note: PLC-5 S2 layout differs from SLC/ML — S:57 is Processor Checksum, not OS catalog!
+        // Field definitions per AB 1785-6.5.12 PLC-5 Family Programmable Controllers Status File.
+        memory.WriteU16Direct(0x84, 2,  9*2, 43);      // S2:9  — Max overall scan time (ms)
+        memory.WriteU16Direct(0x84, 2,  8*2, 21);      // S2:8  — Last overall scan time (ms)
+        memory.WriteU16Direct(0x84, 2, 28*2, 500);     // S2:28 — Watchdog setpoint (×1ms)
+        memory.WriteU16Direct(0x84, 2, 57*2, 0x6C3B); // S2:57 — Processor checksum (NOT OS catalog!)
+        memory.WriteU16Direct(0x84, 2, 80*2, 2);       // S2:80 — MCP A program file = LAD2 (MAIN)
+        memory.WriteU16Direct(0x84, 2, 82*2, 43);      // S2:82 — MCP A max scan time (ms)
+        memory.WriteU16Direct(0x84, 2, 81*2, 21);      // S2:81 — MCP A last scan time (ms)
     }
 }

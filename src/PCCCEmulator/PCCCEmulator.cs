@@ -1795,8 +1795,27 @@ public class PCCCEmulator : IDisposable
 
     // ─── Timers ──────────────────────────────────────────────────────────────
     /// <summary>
-    /// Updates S2 date/time registers (S2:37–S2:42) every second.
+    /// Updates S2 date/time registers every second.
     /// Only advances when processor is in RUN mode.
+    ///
+    /// RTC layout differs per family:
+    ///
+    ///   SLC (SlcMicroLogix):
+    ///     RTC stored in S2:37–S2:42.
+    ///     S2:37=Year S2:38=Month S2:39=Day S2:40=Hour S2:41=Min S2:42=Sec
+    ///     Per AB 1747-RM001 / RSLogix 500 Address/Symbol Database.
+    ///
+    ///   ML1400 (Ml1400):
+    ///     RTC is stored in a dedicated Function File (RTC:0), NOT in S2.
+    ///     The RTC Function File is NOT accessible via standard PCCC FNC 0xA1/0xA2
+    ///     (both return STS=0x10 Illegal Command, confirmed on real 1766-L32BWA hardware).
+    ///     It does NOT appear in the PCCC data file directory (datamem shows no RTC entry).
+    ///     Therefore no S2 update is needed — this case is intentionally a no-op.
+    ///
+    ///   PLC-5 (Plc5):
+    ///     RTC stored in S2:18–S2:23.
+    ///     S2:18=Year S2:19=Month S2:20=Day S2:21=Hour S2:22=Min S2:23=Sec
+    ///     Per AB 1785-6.5.12 / RSLogix 5 Project Report (S:20-18 Date, S:21-23 Time).
     /// </summary>
     private void UpdateDateTime()
     {
@@ -1804,12 +1823,32 @@ public class PCCCEmulator : IDisposable
         if (!IsRunMode) return;
         var now = DateTime.Now;
 
-        _memory.Write(0x84, 2, 37, 0, 2, BitConverter.GetBytes((short)now.Year));
-        _memory.Write(0x84, 2, 38, 0, 2, BitConverter.GetBytes((short)now.Month));
-        _memory.Write(0x84, 2, 39, 0, 2, BitConverter.GetBytes((short)now.Day));
-        _memory.Write(0x84, 2, 40, 0, 2, BitConverter.GetBytes((short)now.Hour));
-        _memory.Write(0x84, 2, 41, 0, 2, BitConverter.GetBytes((short)now.Minute));
-        _memory.Write(0x84, 2, 42, 0, 2, BitConverter.GetBytes((short)now.Second));
+        switch (_profile.FamilyType)
+        {
+            case EmulationFamily.Plc5:
+                // PLC-5: RTC at S2:18–S2:23
+                _memory.Write(0x84, 2, 18, 0, 2, BitConverter.GetBytes((short)now.Year));
+                _memory.Write(0x84, 2, 19, 0, 2, BitConverter.GetBytes((short)now.Month));
+                _memory.Write(0x84, 2, 20, 0, 2, BitConverter.GetBytes((short)now.Day));
+                _memory.Write(0x84, 2, 21, 0, 2, BitConverter.GetBytes((short)now.Hour));
+                _memory.Write(0x84, 2, 22, 0, 2, BitConverter.GetBytes((short)now.Minute));
+                _memory.Write(0x84, 2, 23, 0, 2, BitConverter.GetBytes((short)now.Second));
+                break;
+
+            case EmulationFamily.Ml1400:
+                // ML1400: RTC Function File not accessible via PCCC — no-op.
+                break;
+
+            default:
+                // SLC / MicroLogix: RTC at S2:37–S2:42
+                _memory.Write(0x84, 2, 37, 0, 2, BitConverter.GetBytes((short)now.Year));
+                _memory.Write(0x84, 2, 38, 0, 2, BitConverter.GetBytes((short)now.Month));
+                _memory.Write(0x84, 2, 39, 0, 2, BitConverter.GetBytes((short)now.Day));
+                _memory.Write(0x84, 2, 40, 0, 2, BitConverter.GetBytes((short)now.Hour));
+                _memory.Write(0x84, 2, 41, 0, 2, BitConverter.GetBytes((short)now.Minute));
+                _memory.Write(0x84, 2, 42, 0, 2, BitConverter.GetBytes((short)now.Second));
+                break;
+        }
     }
 
     /// <summary>
