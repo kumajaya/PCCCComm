@@ -49,10 +49,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
 
@@ -122,7 +122,7 @@ jobs:
           ls -lh "$zip_name"
 
       - name: Upload artifact (zip)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.project.base_output }}-${{ matrix.runtime }}
           path: ${{ github.workspace }}/${{ matrix.project.base_output }}-${{ matrix.runtime }}.zip
@@ -133,10 +133,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
 
@@ -157,7 +157,7 @@ jobs:
           ls -lh PCCCComm-lib.zip
 
       - name: Upload library artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: PCCCComm-lib
           path: ${{ github.workspace }}/PCCCComm-lib.zip
@@ -172,7 +172,7 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: ./artifacts
 
@@ -191,7 +191,7 @@ jobs:
           fi
 
       - name: Create GitHub Release and upload assets
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ github.event.inputs.release_name || steps.tag.outputs.tag }}
