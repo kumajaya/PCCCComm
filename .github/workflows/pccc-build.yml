@@ -128,8 +128,43 @@ jobs:
           path: ${{ github.workspace }}/${{ matrix.project.base_output }}-${{ matrix.runtime }}.zip
           if-no-files-found: error
 
+  build-library:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore PCCCComm.sln
+
+      - name: Build PCCCComm library (Release)
+        run: |
+          dotnet build src/PCCCComm/PCCCComm.csproj \
+            --configuration Release \
+            --no-restore \
+            -o ./publish/PCCCComm/lib
+
+      - name: Zip library output
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          zip -r PCCCComm-lib.zip ./publish/PCCCComm/lib/
+          ls -lh PCCCComm-lib.zip
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCCCComm-lib
+          path: ${{ github.workspace }}/PCCCComm-lib.zip
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, build-library]
     runs-on: ubuntu-latest
     permissions:
       contents: write
