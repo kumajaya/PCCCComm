@@ -71,7 +71,16 @@ public class SlcHandler : IPlcHandler
         // during long upload/download operations.
         _context.CancellationToken.ThrowIfCancellationRequested();
 
-        // Raise event only if progress changed by at least 5% or file completed
+        // When TotalFiles is known, raise every file completion — file count is the
+        // natural progress unit for ML1400 where byte totals span unknown-size phases.
+        // When GrandTotalBytes is unknown (=0), also raise every event without throttling.
+        // Otherwise throttle to every 5% change to avoid flooding callers.
+        if (e.TotalFiles > 0 || e.GrandTotalBytes == 0)
+        {
+            _context.RaiseFileProgress(e);
+            return;
+        }
+
         int percent = (int)((double)e.TotalBytesTransferred / e.GrandTotalBytes * 100);
         if (percent != _lastFileProgressPercent && (percent % 5 == 0 || percent == 100))
         {
@@ -956,7 +965,11 @@ public class SlcHandler : IPlcHandler
     public DataFileDetails[] GetDataMemory()
     {
         if (IsMicroLogix1400)
-            throw new NotSupportedException("GetDataMemory is not supported for MicroLogix 1400.");
+        {
+            // Use file list from context (loaded by PCCCComm)
+            var list = _context.GetMl1400FileList();
+            return list ?? Array.Empty<DataFileDetails>();
+        }
 
         if (SupportsFileBasedTransfer())
             return GetDataMemoryFileBased();
@@ -995,6 +1008,64 @@ public class SlcHandler : IPlcHandler
             if (fzd[filePosition] > 0x81 && fzd[filePosition] < 0x95) { list.Add(df); idx++; }
             filePosition += 10;
         }
+        return list.ToArray();
+    }
+
+    /// <summary>
+    /// Enumerates data files on MicroLogix 1400 by probing all file numbers 0..255
+    /// for each known file type. Uses chunked element counting for speed.
+    /// </summary>
+    private DataFileDetails[] GetDataMemoryMl1400()
+    {
+        var list = new List<DataFileDetails>();
+
+        foreach (PCCCConstants.SlcFileTypeCode fileType in Enum.GetValues(typeof(PCCCConstants.SlcFileTypeCode)))
+        {
+            int bytesPerElement = PCCCConstants.SlcFileTypeInfo.GetBytesPerElement(fileType);
+            int fileTypeCode = (int)fileType;
+
+            // Only file 0 for O and I
+            int maxFileNumber = (fileTypeCode == 0x82 || fileTypeCode == 0x83) ? 0 : 255;
+
+            for (int fileNumber = 0; fileNumber <= maxFileNumber; fileNumber++)
+            {
+                var addr = new DataAddress
+                {
+                    FileNumber = fileNumber,
+                    FileType = fileTypeCode
+                };
+
+                // Probe: read first element
+                byte[] probe = ReadRawDataWithChunking(ref addr, bytesPerElement, out int probeSts);
+                if (probeSts != 0 || probe == null || probe.Length < bytesPerElement)
+                    continue; // File doesn't exist — continue to next number
+
+                // File exists — count elements in chunks (16 elements at a time)
+                int elementCount = 0;
+                const int chunkElements = 16;
+                while (true)
+                {
+                    int chunkBytes = chunkElements * bytesPerElement;
+                    addr.Element = elementCount;
+                    byte[] chunk = ReadRawDataWithChunking(ref addr, chunkBytes, out int sts);
+                    if (sts != 0) break;
+                    elementCount += chunk.Length / bytesPerElement;
+                    if (elementCount > 1000) break; // safety limit
+                }
+
+                if (elementCount > 0)
+                {
+                    string typeName = PCCCConstants.SlcFileTypeInfo.GetTypeName(fileType);
+                    list.Add(new DataFileDetails
+                    {
+                        FileNumber = fileNumber,
+                        FileType = typeName,
+                        NumberOfElements = elementCount
+                    });
+                }
+            }
+        }
+
         return list.ToArray();
     }
 
@@ -1284,7 +1355,7 @@ public class SlcHandler : IPlcHandler
     public Collection<PLCFileDetails> UploadProgramData()
     {
         if (IsMicroLogix1400)
-            throw new NotSupportedException("Upload/Download is not supported for MicroLogix 1400.");
+            return UploadProgramDataMl1400();
 
         DisableEventFlag = true;
         try
@@ -1307,7 +1378,10 @@ public class SlcHandler : IPlcHandler
     public void DownloadProgramData(Collection<PLCFileDetails> plcFiles)
     {
         if (IsMicroLogix1400)
-            throw new NotSupportedException("Upload/Download is not supported for MicroLogix 1400.");
+        {
+            DownloadProgramDataMl1400(plcFiles);
+            return;
+        }
 
         DisableEventFlag = true;
         try
@@ -1772,6 +1846,459 @@ public class SlcHandler : IPlcHandler
         ReturnEditResource();
     }
 
+    // ─── ML1400 Upload & Download ────────────────────────────────────────────
+
+    private const int FileTypeLadder       = 0x03;
+    private const int FileTypeProgramDir   = 0x24;
+    private const int FileTypeSystemConfig = 0x22;
+    private const int FileTypeMetadata     = 0x00;
+    private const int FileTypeSysHeader    = 0x64;
+
+    private long _ml1400UploadBytesTransferred;
+    private int _ml1400UploadFilesCompleted;
+
+    /// <summary>
+    /// Uploads ML1400 program. Uses file list from context (filelist.xml or default).
+    /// Reads exact byte counts per file — does not read beyond the mapped size.
+    /// </summary>
+    private Collection<PLCFileDetails> UploadProgramDataMl1400()
+    {
+        var progressFiles = new List<PLCFileDetails>();
+        _lastFileProgressPercent = -1;
+        _ml1400UploadBytesTransferred = 0;
+        _ml1400UploadFilesCompleted = 0;
+
+        // ── Pre-compute totals for progress ──────────────────────────────────
+        // GrandTotalBytes from data files (known size). TotalFiles covers all phases
+        // so the progress bar moves smoothly from the start.
+        // Phase counts: 1 (ft=0x63) + 1 (LAD) + 1 (ProgramDir) + 49 (SYS fn=2..50) + 24 (system files).
+        DataFileDetails[] fileList = _context.GetMl1400FileList() ?? Array.Empty<DataFileDetails>();
+        int dataFileCount = 0;
+        long grandTotalBytes = 0;
+        foreach (var fi in fileList)
+        {
+            int ftc = SlcFileTypeStringToCode(fi.FileType);
+            if (ftc == 0) continue;
+            grandTotalBytes += fi.NumberOfElements * PCCCConstants.SlcFileTypeInfo.GetBytesPerElement((PCCCConstants.SlcFileTypeCode)ftc);
+            dataFileCount++;
+        }
+        int totalFiles = 1 + 1 + 1 + 49 + 24 + dataFileCount;
+
+        // ── Phases 1–4: Handshake, LAD, Program Directory, SYS Config ──────
+        GetProcessorType();
+        DoHandshakeReads();
+        ReadAndAdd(progressFiles, 0x63, 0, 4, totalFiles: totalFiles, grandTotalBytes: grandTotalBytes);
+        ReadChunkedSubElement(progressFiles, FileTypeLadder, 0, totalFiles, grandTotalBytes);
+        ReadAndAdd(progressFiles, FileTypeProgramDir, 0, 64, totalFiles: totalFiles, grandTotalBytes: grandTotalBytes);
+        for (int fn = 2; fn <= 50; fn++)
+            ReadChunkedSubElement(progressFiles, FileTypeSystemConfig, fn, totalFiles, grandTotalBytes);
+
+        // ── Phase 5: Read system files (ft=0x4x and others) ────────
+        // These files are not in filelist.xml but are present on all ML1400 units.
+        // ReadChunkedSubElement reads until EOF so no element count needed.
+        // Order matches upload capture.
+        int[] systemFts = { 0x47, 0x49, 0x47, 0x4D, 0x60, 0x69, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x6C,
+                            0xA1, 0xA2, 0xE0, 0xED, 0xEE, 0xE2, 0xE3, 0xEC, 0x48, 0x4A, 0x48 };
+        int[] systemFns = {    0,    1,    2,    3,    0,    1,    2,    3,    4,    5,    6,    7,    8,
+                               0,    1,    0,    1,    2,    3,    4,    5,    2,    1,    0 };
+        for (int h = 0; h < systemFts.Length; h++)
+            ReadChunkedSubElement(progressFiles, systemFts[h], systemFns[h], totalFiles, grandTotalBytes);
+
+        // ── Phase 6: Get file list ────────────────────────────────────────────
+        // (file list already loaded above for progress calculation)
+
+        // ── Phase 7: Read each data file exactly per mapping ─────────────────
+        foreach (var fileInfo in fileList)
+        {
+            int fileTypeCode = SlcFileTypeStringToCode(fileInfo.FileType);
+            if (fileTypeCode == 0) continue;
+
+            int bytesPerElement = PCCCConstants.SlcFileTypeInfo.GetBytesPerElement((PCCCConstants.SlcFileTypeCode)fileTypeCode);
+            int totalBytes = fileInfo.NumberOfElements * bytesPerElement;
+
+            var addr = new DataAddress
+            {
+                FileType = (byte)fileTypeCode,
+                FileNumber = fileInfo.FileNumber,
+                Element = 0,
+                SubElement = 0
+            };
+
+            byte[] data = ReadRawDataWithChunking(ref addr, totalBytes, out int sts);
+            if (sts != 0 || data == null || data.Length == 0)
+                continue;
+
+            progressFiles.Add(new PLCFileDetails
+            {
+                FileNumber = fileInfo.FileNumber,
+                FileType = fileTypeCode,
+                Data = data,
+                NumberOfBytes = data.Length
+            });
+
+            _ml1400UploadBytesTransferred += data.Length;
+            _ml1400UploadFilesCompleted++;
+            OnFileProgress(new PCCCComm.FileProgressEventArgs
+            {
+                FileNumber = fileInfo.FileNumber,
+                FileType = fileTypeCode,
+                FileSizeBytes = totalBytes,
+                FilesCompleted = _ml1400UploadFilesCompleted,
+                TotalFiles = totalFiles,
+                TotalBytesTransferred = _ml1400UploadBytesTransferred,
+                GrandTotalBytes = grandTotalBytes
+            });
+        }
+
+        // ── Build result ──────────────────────────────────────────────────────
+        var result = new Collection<PLCFileDetails>();
+        foreach (var pf in progressFiles)
+        {
+            pf.NumberOfBytes = pf.Data?.Length ?? 0;
+            result.Add(pf);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Reads a file in 80-byte chunks (sub+=40) until EOF. Used for LAD, SYS Config.
+    /// </summary>
+    private void ReadChunkedSubElement(List<PLCFileDetails> list, int fileType, int fileNumber,
+        int totalFiles = 0, long grandTotalBytes = 0)
+    {
+        var data = new List<byte>();
+        int sub = 0;
+        while (true)
+        {
+            var addr = new DataAddress
+            {
+                FileType = (byte)fileType,
+                FileNumber = fileNumber,
+                Element = 0,
+                SubElement = sub
+            };
+            byte[] chunk = ReadRawDataWithChunking(ref addr, 0x50, out int sts);
+            if (sts != 0 || chunk == null || chunk.Length == 0) break;
+            data.AddRange(chunk);
+            sub += 40;
+        }
+        if (data.Count == 0) return;
+
+        var fullData = data.ToArray();
+        list.Add(new PLCFileDetails
+        {
+            FileNumber = fileNumber,
+            FileType = fileType,
+            Data = fullData,
+            NumberOfBytes = fullData.Length
+        });
+        _ml1400UploadBytesTransferred += fullData.Length;
+        _ml1400UploadFilesCompleted++;
+        OnFileProgress(new PCCCComm.FileProgressEventArgs
+        {
+            FileNumber = fileNumber,
+            FileType = fileType,
+            FileSizeBytes = fullData.Length,
+            FilesCompleted = _ml1400UploadFilesCompleted,
+            TotalFiles = totalFiles,
+            TotalBytesTransferred = _ml1400UploadBytesTransferred,
+            GrandTotalBytes = grandTotalBytes
+        });
+    }
+
+    /// <summary>Reads fixed-size file and adds to list.</summary>
+    private void ReadAndAdd(List<PLCFileDetails> list, int fileType, int fileNumber,
+        int byteCount, int element = 0, int subElement = 0,
+        int totalFiles = 0, long grandTotalBytes = 0)
+    {
+        var addr = new DataAddress
+        {
+            FileType = (byte)fileType,
+            FileNumber = fileNumber,
+            Element = element,
+            SubElement = subElement
+        };
+        byte[] data = ReadRawDataWithChunking(ref addr, byteCount, out int sts);
+        if (sts != 0 || data == null || data.Length == 0) return;
+
+        list.Add(new PLCFileDetails
+        {
+            FileNumber = fileNumber,
+            FileType = fileType,
+            Data = data,
+            NumberOfBytes = data.Length
+        });
+        _ml1400UploadBytesTransferred += data.Length;
+        _ml1400UploadFilesCompleted++;
+        OnFileProgress(new PCCCComm.FileProgressEventArgs
+        {
+            FileNumber = fileNumber,
+            FileType = fileType,
+            FileSizeBytes = data.Length,
+            FilesCompleted = _ml1400UploadFilesCompleted,
+            TotalFiles = totalFiles,
+            TotalBytesTransferred = _ml1400UploadBytesTransferred,
+            GrandTotalBytes = grandTotalBytes
+        });
+    }
+
+    private static int SlcFileTypeStringToCode(string typeName)
+    {
+        return typeName switch
+        {
+            "O"  => 0x82, "I"  => 0x83, "S"  => 0x84, "B"  => 0x85,
+            "T"  => 0x86, "C"  => 0x87, "R"  => 0x88, "N"  => 0x89,
+            "F"  => 0x8A, "ST" => 0x8D, "L"  => 0x91, "MG" => 0x92,
+            "PD" => 0x93, "PLS"=> 0x94, "A"  => 0x8E,
+            _    => 0
+        };
+    }
+
+    /// <summary>Full handshake probes (9 reads).</summary>
+    private void DoHandshakeReads()
+    {
+        var a = new DataAddress { FileType = FileTypeMetadata, FileNumber = 0, Element = 0 };
+        ReadRawDataWithChunking(ref a, 44, out _);
+        a = new DataAddress { FileType = 0x63, FileNumber = 0, Element = 0 };
+        ReadRawDataWithChunking(ref a, 4, out _);
+        a = new DataAddress { FileType = FileTypeMetadata, FileNumber = 0, Element = 11 };
+        ReadRawDataWithChunking(ref a, 20, out _);
+        a = new DataAddress { FileType = FileTypeLadder, FileNumber = 0, Element = 21 };
+        ReadRawDataWithChunking(ref a, 10, out _);
+        a = new DataAddress { FileType = FileTypeSysHeader, FileNumber = 0, Element = 0 };
+        ReadRawDataWithChunking(ref a, 24, out _);
+        a = new DataAddress { FileType = FileTypeMetadata, FileNumber = 0, Element = 9 };
+        ReadRawDataWithChunking(ref a, 4, out _);
+    }
+
+    /// <summary>Writes LAD data: first 78 bytes at el=0, then el=39 sub=0,40,80,...</summary>
+    private void WriteLadderData(byte[] ladData)
+    {
+        if (ladData == null || ladData.Length == 0) return;
+        int first = Math.Min(78, ladData.Length);
+        byte[] firstChunk = new byte[first];
+        Array.Copy(ladData, 0, firstChunk, 0, first);
+        WriteRawFixed(FileTypeLadder, 0, firstChunk, element: 0);
+        int pos = first, sub = 0;
+        while (pos < ladData.Length)
+        {
+            int chunk = Math.Min(80, ladData.Length - pos);
+            byte[] chunkData = new byte[chunk];
+            Array.Copy(ladData, pos, chunkData, 0, chunk);
+            WriteRawFixed(FileTypeLadder, 0, chunkData, element: 39, subElement: sub);
+            pos += chunk;
+            sub += 40;
+        }
+    }
+
+    /// <summary>Reads I/O config files for verification after DownloadCompleted (REQ 1465–1473).</summary>
+    private void ReadIoConfigForVerify()
+    {
+        var a = new DataAddress { FileType = 0x47, FileNumber = 0, Element = 0, SubElement = 0 };
+        ReadRawDataWithChunking(ref a, 80, out _);
+        a.SubElement = 40; ReadRawDataWithChunking(ref a, 8, out _);
+        a = new DataAddress { FileType = 0x49, FileNumber = 1, Element = 0 };
+        foreach (var (sub, bc) in new[] { (0, 80), (40, 80), (80, 80), (120, 24) })
+        { a.SubElement = sub; ReadRawDataWithChunking(ref a, bc, out _); }
+        a = new DataAddress { FileType = 0x47, FileNumber = 2, Element = 0, SubElement = 0 };
+        ReadRawDataWithChunking(ref a, 80, out _);
+        a.SubElement = 40; ReadRawDataWithChunking(ref a, 8, out _);
+        a = new DataAddress { FileType = 0x48, FileNumber = 0, Element = 4, SubElement = 0 };
+        ReadRawDataWithChunking(ref a, 2, out _);
+    }
+
+    /// <summary>Writes a fixed-size raw block (no chunking).</summary>
+    private void WriteRawFixed(int fileType, int fileNumber, byte[] data, int element = 0, int subElement = 0)
+    {
+        if (data == null || data.Length == 0) return;
+        var addr = new DataAddress
+        {
+            FileType = (byte)fileType,
+            FileNumber = fileNumber,
+            Element = element,
+            SubElement = subElement,
+            BitNumber = -1
+        };
+        WriteRawDataWithChunking(addr, data);
+    }
+
+    /// <summary>Writes a whole file as one block (for small files like Program Directory).</summary>
+    private void WriteRawFile(Dictionary<(int, int), byte[]> fileMap, int fileType, int fileNumber,
+        ref long bytesTransferred, ref int filesCompleted, long totalBytes, int totalFiles)
+    {
+        if (!fileMap.TryGetValue((fileType, fileNumber), out byte[] data) || data.Length == 0) return;
+        var addr = new DataAddress { FileType = (byte)fileType, FileNumber = fileNumber, BitNumber = -1 };
+        if (WriteRawDataWithChunking(addr, data) != 0) return;
+        bytesTransferred += data.Length;
+        filesCompleted++;
+        OnFileProgress(new PCCCComm.FileProgressEventArgs
+        {
+            FileNumber = fileNumber,
+            FileType = fileType,
+            FileSizeBytes = data.Length,
+            FilesCompleted = filesCompleted,
+            TotalFiles = totalFiles,
+            TotalBytesTransferred = bytesTransferred,
+            GrandTotalBytes = totalBytes
+        });
+    }
+
+    /// <summary>
+    /// Writes a file using element addressing (not sub-element). Writes in chunks of up to 16 elements.
+    /// Ensures proper alignment for Timer (6 bytes), Long (4 bytes), etc.
+    /// </summary>
+    /// <summary>
+    /// Writes a file from fileMap using sub-element addressing (el=0, sub advances per chunk).
+    /// All ML1400 file types use el=0 with sub-element byte addressing — verified from capture.
+    /// </summary>
+    private void WriteFileByElement(Dictionary<(int, int), byte[]> fileMap, int fileType, int fileNumber,
+        ref long bytesTransferred, ref int filesCompleted, long totalBytes, int totalFiles)
+    {
+        if (!fileMap.TryGetValue((fileType, fileNumber), out byte[] data) || data.Length == 0)
+            return;
+
+        var addr = new DataAddress
+        {
+            FileType = (byte)fileType,
+            FileNumber = fileNumber,
+            Element = 0,
+            SubElement = 0,
+            BitNumber = -1
+        };
+        WriteRawDataWithChunking(addr, data);
+
+        bytesTransferred += data.Length;
+        filesCompleted++;
+        OnFileProgress(new PCCCComm.FileProgressEventArgs
+        {
+            FileNumber = fileNumber,
+            FileType = fileType,
+            FileSizeBytes = data.Length,
+            FilesCompleted = filesCompleted,
+            TotalFiles = totalFiles,
+            TotalBytesTransferred = bytesTransferred,
+            GrandTotalBytes = totalBytes
+        });
+    }
+
+    /// <summary>
+    /// Downloads program to ML1400. Sequence verified from RSLogix 500 v12 capture.
+    /// Exact order is critical.
+    /// </summary>
+    private void DownloadProgramDataMl1400(Collection<PLCFileDetails> plcFiles)
+    {
+        if (plcFiles == null || plcFiles.Count == 0)
+            throw new ArgumentException("No data to download.", nameof(plcFiles));
+
+        DisableEventFlag = true;
+        _lastFileProgressPercent = -1;
+        long totalBytes = plcFiles.Sum(f => f.Data?.Length ?? 0);
+        long bytesTransferred = 0;
+        int filesCompleted = 0;
+        int totalFiles = plcFiles.Count;
+
+        try
+        {
+            var fileMap = new Dictionary<(int, int), byte[]>();
+            foreach (var f in plcFiles)
+                fileMap[(f.FileType, f.FileNumber)] = f.Data ?? Array.Empty<byte>();
+
+            // ── Phase 1: Handshake probes (short) ──────────────────────────
+            GetProcessorType();
+            DoHandshakeReads();
+
+            // ── Phase 2: Init download, get edit resource, set program mode ─
+            GetProcessorType();
+
+            byte[] cmd1 = new byte[12] { 0xAA, 0x06, 0x00, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            if (fileMap.TryGetValue((0x63, 0), out var p) && p.Length >= 4)
+                Array.Copy(p, 0, cmd1, 6, 4);
+            else
+            {
+                cmd1[6] = 0x08; cmd1[7] = 0x91; cmd1[8] = 0x00; cmd1[9] = 0x00;
+            }
+            cmd1[10] = 0x68;  // trailing bytes observed in captures — purpose unknown
+            cmd1[11] = 0x9C;  // (not processor type; present regardless of ML1400 variant)
+            ExecuteCommandList(new byte[][] { cmd1, new byte[] { 0x56 } });
+            GetEditResource();
+            SetProgramMode();
+
+            // ── Phase 3: Write LAD size header (2 bytes at el=40) ──────────
+            if (fileMap.TryGetValue((FileTypeLadder, 0), out byte[] ladData) && ladData.Length >= 82)
+            {
+                byte[] header = new byte[2];
+                Array.Copy(ladData, 80, header, 0, 2);
+                WriteRawFixed(FileTypeLadder, 0, header, element: 40);
+            }
+
+            // ── Phase 4: Write LAD body ─────────────────────────────────────
+            if (fileMap.TryGetValue((FileTypeLadder, 0), out ladData) && ladData.Length > 0)
+                WriteLadderData(ladData);
+
+            // ── Phase 5: Program Directory (64 bytes) ──────────────────────
+            WriteRawFile(fileMap, FileTypeProgramDir, 0, ref bytesTransferred, ref filesCompleted, totalBytes, totalFiles);
+
+            // ── Phase 6: SYS Config (ft=0x22, fn=2..50) ────────────────────
+            for (int fn = 2; fn <= 50; fn++)
+                WriteFileByElement(fileMap, FileTypeSystemConfig, fn, ref bytesTransferred, ref filesCompleted, totalBytes, totalFiles);
+
+            // ── Phase 7: Write all data files from fileMap in upload order ──
+            // All files backed up during upload are written here, in the same order
+            // they were uploaded. Capture shows system files (ft=0x4x, 0x6x, 0xEx)
+            // are written BEFORE DnldComplete alongside regular data files.
+            // Only ft=0x63 (ExecCmdList only) and ft=0x48/0x4A (read-verify only) are skipped.
+            foreach (var pf in plcFiles)
+            {
+                int ft = pf.FileType;
+                if (ft == 0x63) continue;               // written via ExecCmdList in Phase 2
+                if (ft == 0x48 || ft == 0x4A) continue; // read-verify only, never written
+                if (ft == FileTypeLadder && pf.FileNumber == 0) continue;
+                if (ft == FileTypeProgramDir && pf.FileNumber == 0) continue;
+                if (ft == FileTypeSystemConfig && pf.FileNumber >= 2 && pf.FileNumber <= 50) continue;
+                WriteFileByElement(fileMap, ft, pf.FileNumber, ref bytesTransferred, ref filesCompleted, totalBytes, totalFiles);
+            }
+
+            // ── Phase 8: DownloadCompleted ─────────────────────────────────
+            DownloadCompleted();
+
+            // ── Phase 9: Read I/O config for verification (REQ 1464–1473) ──
+            GetProcessorType();
+            ReadIoConfigForVerify();
+
+            // ── Phase 10: Poll DiagStatus (11 times) ──────────────────────
+            GetProcessorType();
+            for (int i = 0; i < 10; i++) { Thread.Sleep(1000); GetProcessorType(); }
+
+            // ── Phase 11: Re-write I/O config (REQ 1485–1494) ───────────
+            // These files were backed up during upload (ReadChunkedSubElement reads all
+            // file types including system files). Exact order from capture.
+            foreach (var ioKey in new[] { (0x47, 0), (0x47, 2), (0x4D, 3), (0x49, 1) })
+                WriteFileByElement(fileMap, ioKey.Item1, ioKey.Item2, ref bytesTransferred, ref filesCompleted, totalBytes, totalFiles);
+
+            // ── Phase 12: Apply port configuration ────────────────────────
+            ApplyPortConfiguration();
+
+            // ── Phase 13: DiagStatus ───────────────────────────────────────
+            GetProcessorType();
+
+            // ── Phase 14: Return edit resource ────────────────────────────
+            ReturnEditResource();
+
+            // ── Phase 15: Verify port config (read ft=0x4A fn=1 el=4) ─────
+            { var a = new DataAddress { FileType = 0x4A, FileNumber = 1, Element = 4 }; ReadRawDataWithChunking(ref a, 4, out _); }
+
+            // ── Phase 16: Final DiagStatus ─────────────────────────────────
+            GetProcessorType();
+
+            // ── Phase 17: Full handshake reads (verification) ─────────────
+            DoHandshakeReads();
+        }
+        finally
+        {
+            DisableEventFlag = false;
+        }
+    }
+
     // ─── File chunking helpers for file-based transfer ────────────────────
 
     private byte[] FileReadWithChunking(ushort tag, int byteOffset, int totalBytes)
@@ -1854,6 +2381,9 @@ public class SlcHandler : IPlcHandler
 
     public void DownloadCompleted()
         => _protocol.DownloadCompleted((byte)MyNode, (byte)TargetNode);
+
+    public void ExecuteCommandList(byte[][] commands)
+        => _protocol.ExecuteCommandList(commands, (byte)MyNode, (byte)TargetNode);
 
     public void ApplyPortConfiguration()
         => _protocol.ApplyPortConfiguration((byte)MyNode, (byte)TargetNode);

@@ -141,6 +141,7 @@ public interface IPlcHandler
     void UploadCompleted();
     void DownloadAllRequest();
     void DownloadCompleted();
+    void ExecuteCommandList(byte[][] commands);
 
     // Configuration
     void ApplyPortConfiguration();

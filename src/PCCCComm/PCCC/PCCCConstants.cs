@@ -86,6 +86,8 @@ public static class PCCCConstants
         public const byte UploadCompleted = 0x55;
         /// <summary>Download completed (0x52). Sent after all files written.</summary>
         public const byte DownloadCompleted = 0x52;
+        /// <summary>Execute Command List (0x88) — wraps multiple commands into one request.</summary>
+        public const byte ExecuteCommandList = 0x88;
 
         // --- Forces & Outputs -----------------------------------------------
         /// <summary>Disable forces (0x41).</summary>

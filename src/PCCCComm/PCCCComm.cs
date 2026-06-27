@@ -86,6 +86,10 @@ public class PCCCComm : IDisposable, IHandlerContext
     /// </summary>
     public int Ml1400HttpPort { get; set; } = 80;
 
+    private DataFileDetails[]? _ml1400FileList;
+    public string? Ml1400FileListPath { get; set; }
+    DataFileDetails[]? IHandlerContext.GetMl1400FileList() => _ml1400FileList;
+
     // ─── Properties (exactly as original) ──────────────────────────────────
     public int MyNode { get; set; }
     public int TargetNode { get; set; }
@@ -585,115 +589,19 @@ public class PCCCComm : IDisposable, IHandlerContext
 
     /// <summary>
     /// Returns a list of data files present in the processor.
-    ///
-    /// For MicroLogix 1400 (processor type 0x9F), the standard PCCC GetDataMemory
-    /// command (FNC 0x26) is not supported. Instead, the file directory is retrieved
-    /// from the built-in web server via HTTP GET to /filelist.xml.
-    ///
-    /// This requires EIP transport — ML1400 does not support CSPv4, and DF1 serial
-    /// transport has no network path to the web server.
-    ///
-    /// All ML1400 variants include an embedded web server accessible on the same
-    /// IP address used for EIP communication (port 80).
-    /// Reference: Rockwell Automation Publication 1766-UM002 (Embedded Web Server).
+    /// For MicroLogix 1400, the file list is loaded from filelist.xml (local file, HTTP, or default)
+    /// during OpenComms() and cached. For other processors, delegates to the protocol handler.
     /// </summary>
     public DataFileDetails[] GetDataMemory()
     {
         EnsureHandler();
 
+        // ML1400 uses pre-loaded file list (from filelist.xml)
         if (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1400)
-        {
-            if (_networkType == NetworkTransportType.EIP && _remoteHost != null)
-                return GetDataMemoryMl1400ViaHttp(_remoteHost);
+            return _ml1400FileList ?? Array.Empty<DataFileDetails>();
 
-            throw new NotSupportedException(
-                "GetDataMemory for MicroLogix 1400 requires EIP transport. " +
-                "The file directory is retrieved from the built-in web server " +
-                "(http://<host>/filelist.xml) which is only reachable via EIP. " +
-                "DF1 serial transport does not support GetDataMemory for ML1400.");
-        }
-
+        // Other processors: use handler (SLC/PLC-5 directory parsing)
         return _handler!.GetDataMemory();
-    }
-
-    /// <summary>
-    /// Retrieves the ML1400 data file directory from the built-in web server.
-    ///
-    /// Fetches http://{host}/filelist.xml and parses the XML into DataFileDetails[].
-    ///
-    /// XML structure (one &lt;CD&gt; element per data file):
-    ///   T2 = FileType code, decimal representation of SlcFileTypeCode byte value
-    ///        e.g. 137 = 0x89 = Integer (N), 138 = 0x8A = Float (F), 145 = 0x91 = Long (L)
-    ///   T3 = FileNumber (actual file number, not sequential index — may have gaps)
-    ///   T4 = NumberOfElements
-    ///   T5 = Access group (0 = Administrator; reserved, not used by PCCCComm)
-    ///
-    /// Example entry:
-    ///   &lt;CD&gt;&lt;T2&gt;137&lt;/T2&gt;&lt;T3&gt;7&lt;/T3&gt;&lt;T4&gt;17&lt;/T4&gt;&lt;T5&gt;0&lt;/T5&gt;&lt;/CD&gt;
-    ///   → FileNumber=7, FileType="N" (Integer), NumberOfElements=17  (N7[17])
-    ///
-    /// Verified on: MicroLogix 1400 1766-LEC/C via EIP (192.168.1.80).
-    /// Reference: Empirical — filelist.xml loaded by newdata.htm (web server UI).
-    /// </summary>
-    private DataFileDetails[] GetDataMemoryMl1400ViaHttp(string host)
-    {
-        string url = $"http://{host}:{Ml1400HttpPort}/filelist.xml";
-
-        // HttpClient is created per-call here because credentials are instance-specific
-        // and GetDataMemory() is called infrequently (typically once at startup).
-        // Using a static HttpClient with per-call credentials would require
-        // HttpClientHandler replacement which is not supported after first use.
-        var handler = new HttpClientHandler
-        {
-            Credentials       = new System.Net.NetworkCredential(_webUsername, _webPassword),
-            // PreAuthenticate skips the 401 challenge round-trip — the emulator
-            // does not implement Basic/NTLM auth, so we send credentials upfront.
-            // Real ML1400 also accepts unauthenticated requests on the local network.
-            PreAuthenticate   = true,
-            // AllowAutoRedirect is not needed for this simple endpoint.
-            AllowAutoRedirect = false,
-        };
-        string xml;
-        using (var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) })
-            xml = client.GetStringAsync(url).GetAwaiter().GetResult();
-
-        var doc = new XmlDocument();
-        doc.LoadXml(xml);
-
-        var result = new List<DataFileDetails>();
-
-        XmlNodeList? nodes = doc.SelectNodes("/C/CD");
-        if (nodes == null)
-            return result.ToArray();
-
-        foreach (XmlNode cd in nodes)
-        {
-            if (!byte.TryParse(cd["T2"]?.InnerText, out byte typeCode)) continue;
-            if (!int.TryParse(cd["T3"]?.InnerText,  out int fileNum))   continue;
-            if (!int.TryParse(cd["T4"]?.InnerText,  out int elemCount)) continue;
-
-            var ftEnum = (PCCCConstants.SlcFileTypeCode)typeCode;
-            string ftStr = PCCCConstants.SlcFileTypeInfo.GetTypeName(ftEnum);
-
-            // Skip unrecognised file types
-            if (ftStr == "??") continue;
-
-            result.Add(new DataFileDetails
-            {
-                FileNumber       = fileNum,
-                FileType         = ftStr,
-                NumberOfElements = elemCount,
-            });
-        }
-
-        return result.ToArray();
-    }
-
-    /// <summary>Returns data file information specific to MicroLogix 1500.</summary>
-    public DataFileDetails[] GetML1500DataMemory()
-    {
-        EnsureHandler();
-        return _handler!.GetML1500DataMemory();
     }
 
     /// <summary>Word Range Read for PLC-5 (FNC=0x01).</summary>
@@ -732,6 +640,8 @@ public class PCCCComm : IDisposable, IHandlerContext
             if (!_currentTransport.IsOpen)
                 _currentTransport.Open();
             EnsureProtocol();
+            EnsureHandler();
+            LoadMl1400FileListIfNeeded();
             return 0;
         }
 
@@ -750,6 +660,8 @@ public class PCCCComm : IDisposable, IHandlerContext
                 AttachTransportEvents();
                 transport.Open();
                 EnsureProtocol();
+                EnsureHandler();
+                LoadMl1400FileListIfNeeded();
                 return 0;
             }
             catch (Exception ex)
@@ -785,6 +697,8 @@ public class PCCCComm : IDisposable, IHandlerContext
             AttachTransportEvents();
             transport.Open();
             EnsureProtocol();
+            EnsureHandler();
+            LoadMl1400FileListIfNeeded();
             return 0;
         }
         catch (Exception ex)
@@ -807,6 +721,23 @@ public class PCCCComm : IDisposable, IHandlerContext
         _handler = null; // handler also depends on protocol and transport
         // _processorFamily and _processorType are NOT reset —
         // The hardware is unchanged, so re-detection is not required upon reconnection.
+    }
+
+    private bool IsMicroLogix1400 => _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1400;
+
+    private void LoadMl1400FileListIfNeeded()
+    {
+        if (!IsMicroLogix1400) return;
+        
+        string? localPath = Ml1400FileListPath;
+        string? remoteHost = _networkType == NetworkTransportType.EIP ? _remoteHost : null;
+        _ml1400FileList = Ml1400FileList.GetFileList(
+            localPath,
+            remoteHost,
+            Ml1400HttpPort,
+            _webUsername,
+            _webPassword
+        );
     }
 
     public int DetectCommSettings()

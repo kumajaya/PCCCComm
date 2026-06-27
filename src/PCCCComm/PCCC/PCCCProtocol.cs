@@ -310,6 +310,15 @@ namespace PCCCComm.Pccc
                 throw new PCCCException($"DownloadCompleted failed: {PCCCErrors.DecodeStatus(sts)}");
         }
 
+        public void ExecuteCommandList(byte[][] commands, byte myNode, byte targetNode)
+        {
+            var req = PCCCMessage.CreateExecuteCommandListRequest(commands, 0, myNode, targetNode);
+            var reply = SendRequest(req, out int sts);
+            if (sts != Sts.Success)
+                throw new PCCCException($"ExecuteCommandList failed: {PCCCErrors.DecodeStatus(sts)}");
+            // Response data may contain per‑command status; usually not needed.
+        }
+
         public void GetEditResource(byte myNode, byte targetNode)
         {
             var req = PCCCMessage.CreateGetEditResourceRequest(0, myNode, targetNode);

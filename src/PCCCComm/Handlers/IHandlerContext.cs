@@ -50,4 +50,6 @@ public interface IHandlerContext
     /// at each per-file checkpoint during transfer.
     /// </summary>
     CancellationToken CancellationToken { get; }
+
+    DataFileDetails[]? GetMl1400FileList();
 }

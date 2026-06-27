@@ -1093,6 +1093,7 @@ public class Plc5Handler : IPlcHandler
     public void UploadCompleted() => throw new NotSupportedException("Use UploadProgramData().");
     public void DownloadAllRequest() => throw new NotSupportedException("Use DownloadProgramData().");
     public void DownloadCompleted() => throw new NotSupportedException("Use DownloadProgramData().");
+    public void ExecuteCommandList(byte[][] commands) => throw new NotSupportedException("SLC specific method not applicable.");
     public void ApplyPortConfiguration() => throw new NotSupportedException("Port config not yet implemented.");
     public void InitializeMemory() => throw new NotSupportedException("Initialize memory not yet implemented.");
     public byte[] ReadDiagnosticCounters() => throw new NotSupportedException("Diagnostic counters not yet implemented.");

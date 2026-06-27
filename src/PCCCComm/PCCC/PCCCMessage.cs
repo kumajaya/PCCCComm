@@ -416,6 +416,28 @@ namespace PCCCComm.Pccc
                 PCCCConstants.Fnc.DownloadCompleted, Array.Empty<byte>());
         }
 
+        /// <summary>Creates a Protected Write request with FNC 0x88 (Execute Command List).</summary>
+        public static PCCCMessage CreateExecuteCommandListRequest(byte[][] commands, ushort tns, byte myNode, byte targetNode)
+        {
+            // Format: [num_commands] [len_cmd1] [cmd1] [len_cmd2] [cmd2] ...
+            int totalLen = 1; // jumlah perintah
+            foreach (var cmd in commands)
+                totalLen += 1 + cmd.Length; // len byte + data
+
+            byte[] data = new byte[totalLen];
+            data[0] = (byte)commands.Length;
+            int offset = 1;
+            foreach (var cmd in commands)
+            {
+                data[offset++] = (byte)cmd.Length;
+                Array.Copy(cmd, 0, data, offset, cmd.Length);
+                offset += cmd.Length;
+            }
+
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.ExecuteCommandList, data);
+        }
+
         /// <summary>Creates a Get Edit Resource request (0x0F/0x11).</summary>
         public static PCCCMessage CreateGetEditResourceRequest(ushort tns, byte myNode, byte targetNode)
         {
