@@ -210,7 +210,13 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
     public byte[] BuildGetStatusPayload(ProcessorMode mode)
     {
         // Layout verified byte-by-byte against real 1766-L32BWA hardware
-        // via sendhex 01 06 03 capture (25-byte payload, June 2026).
+        // via sendhex 01 06 03 across all four modes (June 2026):
+        //   Local RUN     → payload[18] = 0x3E (0011 1110, bit0=0 → RUN,  bit4=1 → Local)
+        //   Remote RUN    → payload[18] = 0x26 (0010 0110, bit0=0 → RUN,  bit4=0 → Remote)
+        //   Local PROG    → payload[18] = 0x31 (0011 0001, bit0=1 → PROG, bit4=1 → Local)
+        //   Remote PROG   → payload[18] = 0x21 (0010 0001, bit0=1 → PROG, bit4=0 → Remote)
+        // GetRunMode reads payload[ModeCode=18] and checks (byte & 0x01)==0 → RUN.
+        // payload[24] = 0x01 in all modes (constant, not a mode indicator).
         byte[] p = new byte[25];
         p[0]  = 0x00;
         p[1]  = 0xEE;                           // type extender (SLC/ML family)
@@ -219,23 +225,27 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
         p[4]  = 0x23;                           // series/revision
         PayloadHelper.WriteCatalog(p, "1766-LEC");
         p[16] = 0x00; p[17] = 0x00;
-        p[18] = 0x3E;                           // FRN internal code (verified: 0x3E, not 0x26)
+        p[18] = ModeToMl1400Byte(mode);         // mode byte — verified from hardware
         p[19] = 0x04;
         p[20] = 0x71; p[21] = 0x43;
         p[22] = 0x9E; p[23] = 0xFC;
-        p[24] = ModeToMl1400Byte(mode);         // mode byte at offset 24 (verified from hardware)
+        p[24] = 0x01;                           // constant in all modes (verified from hardware)
         return p;
     }
 
     public void PatchModeInPayload(byte[] payload, ProcessorMode mode)
-        => payload[24] = ModeToMl1400Byte(mode); // offset 24 (verified from hardware)
+        => payload[18] = ModeToMl1400Byte(mode); // offset 18 (read by GetRunMode)
 
     private static byte ModeToMl1400Byte(ProcessorMode mode) => mode switch
     {
-        ProcessorMode.RemoteRun  => 0x02,
-        ProcessorMode.LocalRun   => 0x02,
-        ProcessorMode.RemoteProg => 0x00,
-        _ => 0x00
+        // Values verified against real 1766-L32BWA via sendhex 01 06 03 in all four modes:
+        //   bit 0: 0 = RUN, 1 = PROGRAM
+        //   bit 4: 1 = Local, 0 = Remote
+        ProcessorMode.LocalRun   => 0x3E,  // 0011 1110 — verified from hardware
+        ProcessorMode.RemoteRun  => 0x26,  // 0010 0110 — verified from hardware
+        ProcessorMode.LocalProg  => 0x31,  // 0011 0001 — verified from hardware
+        ProcessorMode.RemoteProg => 0x21,  // 0010 0001 — verified from hardware
+        _ => 0x21                           // default to RemoteProg (safe)
     };
 
     public PlcMemoryConfig BuildMemoryConfig()

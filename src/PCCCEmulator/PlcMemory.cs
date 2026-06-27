@@ -185,6 +185,14 @@ public class PlcMemory : IDisposable
     /// </summary>
     private void InitializeHotCache()
     {
+        _rwLock.EnterWriteLock();
+        try   { InitializeHotCacheLocked(); }
+        finally { _rwLock.ExitWriteLock(); }
+    }
+
+    /// <summary>Must be called while _rwLock write lock is already held.</summary>
+    private void InitializeHotCacheLocked()
+    {
         foreach (int fileNum in _hotFileNumbers)
         {
             if (_fileTypeByNumber.TryGetValue(fileNum, out int fileType))
@@ -455,6 +463,14 @@ public class PlcMemory : IDisposable
     /// and after ResetToDefault.
     /// </summary>
     private void RebuildFlatMemory()
+    {
+        _rwLock.EnterWriteLock();
+        try   { RebuildFlatMemoryLocked(); }
+        finally { _rwLock.ExitWriteLock(); }
+    }
+
+    /// <summary>Must be called while _rwLock write lock is already held.</summary>
+    private void RebuildFlatMemoryLocked()
     {
         if (_flatTotalBytes == 0)
         {
@@ -827,6 +843,8 @@ public class PlcMemory : IDisposable
     /// <summary>
     /// Resets all data files to their default values (as after construction).
     /// Used by Initialize Memory command (0x0F/0x57).
+    /// Writes seed values only if the target buffer has enough space, avoiding
+    /// IndexOutOfRange exceptions on PLC-5 where some files are smaller than SLC defaults.
     /// </summary>
     public void ResetToDefault()
     {
@@ -836,55 +854,58 @@ public class PlcMemory : IDisposable
             // O0: 12 bytes → all zero
             var o0 = Lookup(0x8B, 0);
             if (o0 != null) Array.Clear(o0, 0, o0.Length);
-            
+
             // I1: 42 bytes → all zero
             var i1 = Lookup(0x8C, 1);
             if (i1 != null) Array.Clear(i1, 0, i1.Length);
-            
-            // S2: 166 bytes → re-initialise with known values
+
+            // S2: re-initialise with known values (the method handles the actual size)
             var s2 = Lookup(0x84, 2);
-            if (s2 != null) InitializeStatusFile();
-            
-            // B3: 28 bytes → reset to AA55, 0FF0 pattern
+            if (s2 != null) InitializeStatusFile(); // safe — writes only up to buffer length
+
+            // B3: reset to AA55, 0FF0 pattern — but only if buffer is large enough.
+            // PLC-5 B3 may be only 2 bytes (1 word), so we guard each write.
             var b3 = Lookup(0x85, 3);
             if (b3 != null)
             {
                 Array.Clear(b3, 0, b3.Length);
-                WriteU16(b3, 0, 0xAA55);
-                WriteU16(b3, 2, 0x0FF0);
+                WriteU16IfSpace(b3, 0, 0xAA55);
+                WriteU16IfSpace(b3, 2, 0x0FF0);
             }
-            
-            // T4: 468 bytes → all zero
+
+            // T4: 468 bytes (SLC) or 6 bytes (PLC-5 if minimal) → all zero
             var t4 = Lookup(0x86, 4);
             if (t4 != null) Array.Clear(t4, 0, t4.Length);
-            
+
             // C5: 6 bytes → all zero
             var c5 = Lookup(0x87, 5);
             if (c5 != null) Array.Clear(c5, 0, c5.Length);
-            
+
             // R6: 12 bytes → all zero
             var r6 = Lookup(0x88, 6);
             if (r6 != null) Array.Clear(r6, 0, r6.Length);
-            
-            // N7: 148 bytes → reset to 123, 456, -789 pattern
+
+            // N7: reset to 123, 456, -789 pattern — with guard for each write.
+            // PLC-5 N7 has 610 bytes, but we keep the guard for safety.
             var n7 = Lookup(0x89, 7);
             if (n7 != null)
             {
                 Array.Clear(n7, 0, n7.Length);
-                WriteU16(n7, 0, 123);
-                WriteU16(n7, 2, 456);
-                WriteU16(n7, 4, -789);
+                WriteU16IfSpace(n7, 0, 123);
+                WriteU16IfSpace(n7, 2, 456);
+                WriteU16IfSpace(n7, 4, -789);
             }
-            
-            // F8: 152 bytes → reset to 1.23, 4.56 pattern
+
+            // F8: reset to 1.23, 4.56 pattern — guard each write.
+            // PLC-5 F8 may be only 4 bytes (1 float), so only first float is written.
             var f8 = Lookup(0x8A, 8);
             if (f8 != null)
             {
                 Array.Clear(f8, 0, f8.Length);
-                Array.Copy(BitConverter.GetBytes(1.23f), 0, f8, 0, 4);
-                Array.Copy(BitConverter.GetBytes(4.56f), 0, f8, 4, 4);
+                WriteFloatIfSpace(f8, 0, 1.23f);
+                WriteFloatIfSpace(f8, 4, 4.56f);
             }
-            
+
             // B9..B16, N17, B29..B31 → all zero
             for (int n = 9; n <= 16; n++)
             {
@@ -893,46 +914,85 @@ public class PlcMemory : IDisposable
             }
             var n17 = Lookup(0x89, 17);
             if (n17 != null) Array.Clear(n17, 0, n17.Length);
-            
-            // ST18:10 elements → reinitialize with "EMULATOR OK" at element 0, others empty
+
+            // ST18: reinitialize with "EMULATOR OK" at element 0, others empty.
+            // WriteStString handles both SLC and PLC-5 formats based on _family.
             var st18 = Lookup(0x8D, 18);
             if (st18 != null)
             {
                 Array.Clear(st18, 0, st18.Length);
                 WriteStString(st18, 0, "EMULATOR OK", _family);
             }
-            
+
+            // B29..B31 zero
             for (int n = 29; n <= 31; n++)
             {
                 var b = Lookup(0x85, n);
                 if (b != null) Array.Clear(b, 0, b.Length);
             }
-            
-            // I/O config (file 0x60, 0) and download seed (0x63, 0) reset to default
+
+            // I/O config (file 0x60, 0) — default slot configuration
             var io = Lookup(0x60, 0);
             if (io != null)
             {
                 Array.Clear(io, 0, io.Length);
-                io[0] = 8;
-                io[1 * 6 + 4] = 2;
-                io[2 * 6 + 4] = 2;
-                io[3 * 6 + 4] = 2;
-                io[4 * 6 + 6] = 2;
-                io[5 * 6 + 6] = 2;
-                io[6 * 6 + 4] = 8;
+                // Only write if buffer is large enough (SLC 64 bytes, PLC-5 may differ)
+                if (io.Length >= 10)
+                {
+                    io[0] = 8;  // slot count
+                    // Slot 1: 1746-IB16 (2 input bytes)
+                    if (1 * 6 + 4 < io.Length) io[1 * 6 + 4] = 2;
+                    // Slot 2: 1746-IB16
+                    if (2 * 6 + 4 < io.Length) io[2 * 6 + 4] = 2;
+                    // Slot 3: 1746-IB16
+                    if (3 * 6 + 4 < io.Length) io[3 * 6 + 4] = 2;
+                    // Slot 4: 1746-OB16 (2 output bytes)
+                    if (4 * 6 + 6 < io.Length) io[4 * 6 + 6] = 2;
+                    // Slot 5: 1746-OB16
+                    if (5 * 6 + 6 < io.Length) io[5 * 6 + 6] = 2;
+                    // Slot 6: 1746-NI4 (8 input bytes)
+                    if (6 * 6 + 4 < io.Length) io[6 * 6 + 4] = 8;
+                }
             }
-            
+
+            // Download seed (file 0x63, 0) — 4 bytes zero
             var seed = Lookup(0x63, 0);
             if (seed != null) Array.Clear(seed, 0, seed.Length);
+
+            // Rebuild flat memory and hot cache inside the write lock so concurrent
+            // Read/Write calls never see a partially-reset or inconsistent state.
+            RebuildFlatMemoryLocked();
+            InitializeHotCacheLocked();
         }
         finally
         {
             _rwLock.ExitWriteLock();
         }
 
-        RebuildFlatMemory();
-        InitializeHotCache();
         Logger.Always(this, "Memory reset to default by Initialize Memory command.");
+    }
+
+    /// <summary>
+    /// Writes a 16-bit value to the buffer at the specified offset if the buffer
+    /// has enough space. Silently does nothing if the offset is out of range.
+    /// </summary>
+    private static void WriteU16IfSpace(byte[] buf, int offset, int value)
+    {
+        if (buf != null && offset + 1 < buf.Length)
+        {
+            buf[offset] = (byte)(value & 0xFF);
+            buf[offset + 1] = (byte)((value >> 8) & 0xFF);
+        }
+    }
+
+    /// <summary>
+    /// Copies a 32-bit float to the buffer at the specified offset if the buffer
+    /// has enough space. Silently does nothing if the offset + 4 exceeds the buffer.
+    /// </summary>
+    private static void WriteFloatIfSpace(byte[] buf, int offset, float value)
+    {
+        if (buf != null && offset + 4 <= buf.Length)
+            Array.Copy(BitConverter.GetBytes(value), 0, buf, offset, 4);
     }
 
     /// <summary>
@@ -1093,7 +1153,7 @@ public class PlcMemory : IDisposable
         int t = fileType & 0x7F;  // Mask out attribute bit (bit 7)
         if (_files.TryGetValue((t, fileNumber), out d)) return d;
         if (_files.TryGetValue((t | 0x80, fileNumber), out d)) return d;
-        return null;
+        return null;  // No debug log to avoid noise
     }
 
     /// <summary>

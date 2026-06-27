@@ -580,15 +580,18 @@ public class PCCCEmulator : IDisposable
 
             // Change processor mode (FNC=0x3A for MicroLogix 1000)
             // Request data[0] carries the requested mode code:
-            //   0x01 = RemoteProg, 0x02 = RemoteRun
+            //   0x00 = LocalProg  (ML1400 SetProgramMode, confirmed on real 1766-L32BWA)
+            //   0x01 = RemoteProg (ML1100/1200)
+            //   0x02 = RemoteRun  (all MicroLogix SetRunMode)
             case 0x3A:
                 if (data != null && data.Length > 0)
                 {
                     byte requestedMode = data[0];
                     ProcessorModeValue = requestedMode switch
                     {
-                        0x01 => ProcessorMode.RemoteProg,
-                        0x02 => ProcessorMode.RemoteRun,
+                        0x00 => ProcessorMode.LocalProg,   // ML1400 SetProgramMode
+                        0x01 => ProcessorMode.RemoteProg,  // ML1100/1200 SetProgramMode
+                        0x02 => ProcessorMode.RemoteRun,   // all ML SetRunMode
                         _    => ProcessorModeValue
                     };
                     UpdateProcessorMode();
@@ -834,9 +837,15 @@ public class PCCCEmulator : IDisposable
                 break;
 
             // ─── Initialize Memory (0x0F/0x57) ────────────────────────────────────
+            // Send ACK response BEFORE resetting memory. ResetToDefault() is a
+            // blocking operation that can take tens of milliseconds on large memory
+            // configurations (e.g. PLC-5/40E with 64 data files). If the response
+            // is sent after the reset, DF1 clients may timeout waiting for the ACK
+            // and report status -20 (no response). Real PLCs also ACK the command
+            // immediately before executing the reset.
             case 0x57:
-                _memory.ResetToDefault();
                 SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                _memory.ResetToDefault();
                 break;
 
             // ─── Read-Modify-Write (0x0F/0x26) ────────────────────────────────────
