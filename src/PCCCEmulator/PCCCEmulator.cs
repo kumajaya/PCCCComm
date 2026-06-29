@@ -603,8 +603,11 @@ public class PCCCEmulator : IDisposable
             case 0x11:  // Get Edit Resource
             case 0x12:  // Return Edit Resource
             case 0x29:  // Unrecognized (sent by RSLinx during auto-configure)
-            case 0x88:  // Execute Command List (download initialization)
                 SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                break;
+
+            case 0x88:  // Execute Command List (download initialization)
+                SendDataResponse(src, tns, 0x4F, new byte[] { 0x02, 0x01, 0x00, 0x01, 0x00 }, clientContext);
                 break;
 
             // =================================================================
@@ -1040,9 +1043,25 @@ public class PCCCEmulator : IDisposable
         int fileSize = _memory.GetFileSize(fileType, fileNumber);
         if (fileSize == 0)
         {
-            // File not found
-            SendErrorResponse(src, tns, 0x0F, func, 0x50, clientContext);
-            return;
+            // For ML1400, system files (ft outside standard data range 0x82–0x9F)
+            // are written verbatim from upload backup. They are not pre-registered
+            // in BuildMemoryConfig. Auto-create them on first write so the download
+            // does not fail with STS=0x50 (file not found).
+            if (_family == EmulationFamily.Ml1400 && IsMl1400SystemFileType(fileType))
+            {
+                // File does not exist yet — bpe unknown, default to 2 (word-addressed).
+                // EnsureFileWritable sets bpe=2 on creation; outer bpe re-reads after.
+                int byteOff = element * 2 + subElement * 2;
+                _memory.EnsureFileWritable(fileType, fileNumber, byteOff, bytesToWrite);
+                fileSize = _memory.GetFileSize(fileType, fileNumber);
+            }
+
+            if (fileSize == 0)
+            {
+                // File not found
+                SendErrorResponse(src, tns, 0x0F, func, 0x50, clientContext);
+                return;
+            }
         }
 
         int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
@@ -1050,9 +1069,21 @@ public class PCCCEmulator : IDisposable
         
         if (byteOffset < 0 || byteOffset + bytesToWrite > fileSize)
         {
-            // Write operation would exceed file bounds
-            SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext);
-            return;
+            // For ML1400 system files, grow the buffer if the incoming write exceeds
+            // current size (chunked writes may arrive in increasing offset order).
+            if (_family == EmulationFamily.Ml1400 && IsMl1400SystemFileType(fileType)
+                && byteOffset >= 0)
+            {
+                _memory.EnsureFileWritable(fileType, fileNumber, byteOffset, bytesToWrite);
+                fileSize = _memory.GetFileSize(fileType, fileNumber);
+            }
+
+            if (byteOffset < 0 || byteOffset + bytesToWrite > fileSize)
+            {
+                // Write operation would exceed file bounds
+                SendErrorResponse(src, tns, 0x0F, func, 0x10, clientContext);
+                return;
+            }
         }
 
         // Bit-masked write (0xAB)
@@ -1915,5 +1946,23 @@ public class PCCCEmulator : IDisposable
     // GetStatus payload building and mode patching are delegated to IPlcFamilyProfile.
     // See PlcFamilyProfiles.cs for SlcFamilyProfile, Ml1400FamilyProfile, Plc5FamilyProfile.
 
-
+    /// <summary>
+    /// Returns true for ML1400 file types that are NOT standard data-table files
+    /// (0x82–0x9F) and therefore not pre-registered in BuildMemoryConfig.
+    /// These system/I-O-config/channel-config files are written verbatim from the
+    /// backup taken during upload and must be auto-created on first write.
+    ///
+    /// Excluded from auto-create:
+    ///   0x48, 0x4A — read-verify only, DownloadProgramDataMl1400 never writes them.
+    ///   0x82–0x9F  — standard data files, always pre-registered.
+    /// </summary>
+    private static bool IsMl1400SystemFileType(int fileType)
+    {
+        // Standard data files — always pre-registered, never need auto-create
+        if (fileType >= 0x82 && fileType <= 0x9F) return false;
+        // Read-verify only files — never written during download
+        if (fileType == 0x48 || fileType == 0x4A) return false;
+        // Everything else is a system/config file that may need auto-create
+        return true;
+    }
 }

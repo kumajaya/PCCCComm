@@ -12,6 +12,8 @@ public static class FileTypeHelper
     {
         return fileType switch
         {
+            0x82 => "O (Output)",
+            0x83 => "I (Input)",
             0x84 => "S (Status)",
             0x85 => "B (Binary)",
             0x86 => "T (Timer)",

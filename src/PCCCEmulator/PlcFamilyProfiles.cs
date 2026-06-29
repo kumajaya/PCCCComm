@@ -114,9 +114,9 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
 
         var files = new List<DataFileSpec>
         {
-            new(0x8B,  0,  12),       // O0  — 6 words
-            new(0x8C,  1,  42),       // I1  — 21 words
-            new(0x84,  2, 166),       // S2  — 83 words
+            new(0x82,  0,  12),       // O0  — 6 words
+            new(0x83,  1,  42),       // I1  — 21 words
+            new(0x84,  2, 328),       // S2  — 164 words
             new(0x85,  3,  28),       // B3  — 14 words
             new(0x86,  4, 468, 6),    // T4  — 78 timers
             new(0x87,  5,   6, 6),    // C5  — 1 counter
@@ -255,8 +255,8 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
         var files = new List<DataFileSpec>
         {
             // Files 0-17 (from filelist.xml)
-            new(0x8B,   0,   18),        // O0   — 9 words
-            new(0x8C,   1,   82),        // I1   — 41 words
+            new(0x82,   0,   18),        // O0   — 9 words
+            new(0x83,   1,   82),        // I1   — 41 words
             new(0x84,   2,  132),        // S2   — 66 words
             new(0x85,   3,   18),        // B3   — 9 words
             new(0x86,   4,  456, 6),     // T4   — 76 timers
@@ -331,12 +331,13 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
         // ML1400 program files: file 0=SYS, files 2-3=LAD.
         var progFiles = new List<ProgramFileSpec>
         {
-            new(0x01,  0,  442),  // SYS — system file
-            new(0x01,  1,    2),  // SYS — reserved
-            new(0x20,  2,  100),  // LAD2
-            new(0x20,  3,  100),  // LAD3
+            new(0x01,  0,  442),  // SYS0 — system file (442 bytes)
+            new(0x01,  1,    2),  // SYS1 — reserved
         };
-        return new PlcMemoryConfig(2309, 219, 4, files,
+        // numProgramFiles = 51: slots 0-50 (SYS0, SYS1, LAD2..LAD50).
+        // fn=38 absent but slot still counts toward directory size.
+        // dirSize = 79 + (219 + 51) × 10 = 2779
+        return new PlcMemoryConfig(2779, 219, 51, files,
             ProgramFiles: progFiles);
     }
 
@@ -349,6 +350,94 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
         memory.WriteFloatDirect(0x8A,  8, 4, 4.56f);
         memory.WriteFloatDirect(0x8A, 18, 0, 1.23f);
         memory.WriteStStringDirect(0x8D, 21, 0, "EMULATOR OK", FamilyType);
+
+        // ── Program slot directory (fileType=0x00, fileNum=0, 44 bytes) ─────────
+        // Accessed via FNC 0xA2 fileType=0x00 fileNum=0 by RSLogix during connection.
+        // Verified byte-by-byte from real 1766-L32BWA via:
+        //   sendhex 01 0F A2 2C 00 00 00 00  → RX: 55 4E 54 49 54 4C 45 44 ...
+        // Not registered in directory (not a standard data file) — created directly.
+        // Note: owner/confirm fields (offset 22..41) are left zero so that
+        // getpass/getmaster return empty on the emulator (no password protection).
+        memory.CreateAndInitRawFile(0x00, 0, new byte[]
+        {
+            // [0..17] Program name "UNTITLED" (18 bytes, null-padded)
+            0x55, 0x4E, 0x54, 0x49, 0x54, 0x4C, 0x45, 0x44,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // [18..19] word[9] = 0x003F (slot attributes)
+            0x3F, 0x00,
+            // [20..21] word[10] = 0x0536 = 1334 (serial# high, matches S2:64)
+            0x36, 0x05,
+            // [22..41] owner + confirm — zeroed (no password on emulator)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // [42..43] tail = 0x4371
+            0x71, 0x43,
+        });
+
+        // ── SYS data file (fileType=0x63, fileNum=0) ────────────────────────────
+        // Value 0x9108 is seeded directly in BuildDownloadSeed() to ensure it is
+        // set before SeedInitialValues runs. No action needed here.
+
+        // ── Program header file (fileType=0x03, fileNum=0, 3022 bytes) ─────────
+        // RSLogix reads this file in 80-byte chunks (sub+=40) until STS=0x10 (EOF).
+        // Critical checks:
+        //   el=21 bc=10  → bytes [42..51]  — must return OK
+        //   el=52 bc=2   → bytes [104..105] = 0xCE 0x0B (checksum, RSLogix validates)
+        //   el=0  sub=40 bc=80 → bytes [80..159] — must succeed (file > 159 bytes)
+        // File size = 3022 bytes (last_sub=1480 × 2 + last_bc=62) matching real
+        // 1766-L32BWA ladder file size from Upload.pcapng. Bytes 116..3021 are zero
+        // (emulator has no real ladder content — RSLogix reads zeros, stops at EOF).
+        // setpass/setmaster write to el=11 (byte 22) and el=16 (byte 32) — within
+        // slot directory area, password fields remain zeroed.
+        {
+            var file03 = new byte[3022];
+            // Slot directory (bytes 0..43)
+            byte[] slotDir03 =
+            {
+                // [0..17] "UNTITLED" null-padded
+                0x55, 0x4E, 0x54, 0x49, 0x54, 0x4C, 0x45, 0x44,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x3F, 0x00,  // [18..19] word[9] = 0x003F
+                0x36, 0x05,  // [20..21] word[10] = 0x0536
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // [22..31] owner
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // [32..41] confirm
+                0x71, 0x43,  // [42..43] checksum = 0x4371
+            };
+            Array.Copy(slotDir03, 0, file03, 0, slotDir03.Length);
+            // Program header (bytes 44..115) — verified from real 1766-L32BWA
+            byte[] progHdr =
+            {
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x71, 0x43, 0x01, 0x00, 0x33, 0x00, 0x04, 0x00,
+                0x09, 0x00, 0xDB, 0x00, 0x02, 0x00, 0x00, 0x00, 0x06, 0x00, 0x66, 0x4E, 0x00, 0x00, 0x70, 0x4E,
+                0x00, 0x00, 0x6E, 0x50, 0x00, 0x00, 0x96, 0x50, 0x00, 0x00, 0xF0, 0x50, 0x00, 0x00, 0x7E, 0x59,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x92, 0x59, 0x00, 0x00, 0x00, 0x03, 0xCE, 0x0B, 0x00, 0x4E,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x24, 0x40, 0x00,
+            };
+            Array.Copy(progHdr, 0, file03, 44, progHdr.Length);
+            memory.CreateAndInitRawFile(0x00, 0, file03);
+            memory.AliasRawFile(0x00, 0, 0x03, 0);
+        }
+
+        // ── SYS header file (fileType=0x64, fileNum=0, 24 bytes) ────────────────
+        // Accessed via FNC 0xA2 fileType=0x64 fileNum=0 by RSLogix during upload.
+        // Verified from real 1766-L32BWA via capture (Upload.pcapng REQ 4):
+        //   sendhex response: 78 05 01 00 0f 00 01 91 00 00 45 43 01 00 03 00
+        //                     00 00 00 00 00 06 9e 00
+        // Without this file emulator returns STS=0x50 and RSLogix aborts upload.
+        memory.CreateAndInitRawFile(0x64, 0, new byte[]
+        {
+            0x78, 0x05, 0x01, 0x00, 0x0F, 0x00, 0x01, 0x91,
+            0x00, 0x00, 0x45, 0x43, 0x01, 0x00, 0x03, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x9E, 0x00,
+        });
+
+        // ── Program Directory (fileType=0x24, fileNum=0, 64 bytes) ──────────────
+        // Accessed via FNC 0xA2 fileType=0x24 fileNum=0 by RSLogix during upload
+        // (immediately after ladder read completes).
+        // Content is zeroed — the real ML1400 value (9A 02 08 91...) contains
+        // program memory pointers that cause RSLogix to crash when the ladder
+        // content is zero/empty. Zeroed content is safer for an empty program.
+        memory.CreateAndInitRawFile(0x24, 0, new byte[64]);
 
         // S2: Status file — static fields only (RTC updated by UpdateDateTime every second)
         // All values verified byte-by-byte against real 1766-L32BWA hardware (June 2026).
@@ -431,7 +520,7 @@ public sealed class Plc5FamilyProfile : IPlcFamilyProfile
         // Total data memory: 5572 words (verified against hardware stats).
         //
         // File type codes (PLC-5 / SLC shared):
-        //   0x8B=O  0x8C=I  0x84=S  0x85=B  0x86=T  0x87=C  0x88=R
+        //   0x82=O  0x83=I  0x84=S  0x85=B  0x86=T  0x87=C  0x88=R
         //   0x89=N  0x8A=F  0x93=PD 0x95=BT
         //
         // Element sizes:
@@ -446,8 +535,8 @@ public sealed class Plc5FamilyProfile : IPlcFamilyProfile
 
         var files = new List<DataFileSpec>
         {
-            new(0x8B,   0,   256),           // O0   — output image (128 words)
-            new(0x8C,   1,   256),           // I1   — input image  (128 words)
+            new(0x82,   0,   256),           // O0   — output image (128 words)
+            new(0x83,   1,   256),           // I1   — input image  (128 words)
             new(0x84,   2,   256),           // S2   — status       (128 words)
             new(0x85,   3,     2),           // B3
             new(0x86,   4,  1206,   6),      // T4   — 201 timers

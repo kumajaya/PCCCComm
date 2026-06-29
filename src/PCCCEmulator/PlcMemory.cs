@@ -325,16 +325,45 @@ public class PlcMemory : IDisposable
         }
         else
         {
-            foreach (var pf in progFiles)
+            var sorted = progFiles.OrderBy(p => p.FileNumber).ToList();
+            int nextExpected = 0;
+
+            foreach (var pf in sorted)
             {
+                while (nextExpected < pf.FileNumber)
+                {
+                    if (written >= maxProgEntries) break;
+                    WriteProgramFileGap(dir, ref pos, (byte)nextExpected, ref written);
+                    nextExpected++;
+                }
+
                 if (written >= maxProgEntries) break;
                 WriteProgramFileStub(dir, ref pos, ref progFlatBase,
                     pf.FileType, pf.FileNumber, pf.SizeBytes);
                 written++;
+                nextExpected = pf.FileNumber + 1;
+            }
+
+            while (written < maxProgEntries && nextExpected < cfg.NumProgramFiles)
+            {
+                WriteProgramFileGap(dir, ref pos, (byte)nextExpected, ref written);
+                nextExpected++;
             }
         }
 
         _flatTotalBytes = progFlatBase;
+    }
+
+    private static void WriteProgramFileGap(byte[] dir, ref int pos, byte fileNumber, ref int written)
+    {
+        if (pos + 10 > dir.Length) return;
+
+        dir[pos]     = 0x00;
+        dir[pos + 1] = 0x00;
+        dir[pos + 2] = 0x00;
+        dir[pos + 3] = fileNumber;
+        pos += 10;
+        written++;
     }
 
     private void WriteProgramFileStub(byte[] dir, ref int pos, ref int progFlatBase,
@@ -446,11 +475,19 @@ public class PlcMemory : IDisposable
     /// <summary>
     /// Builds the download seed file (type 0x63, number 0).
     /// DF1Comm.DownloadProgramData reads 4 bytes from this file and copies them
-    /// into the FNC=0x88 init packet. Content 0x00000000 is sufficient.
+    /// into the FNC=0x88 init packet.
+    /// Value 0x9108 verified from real 1766-L32BWA via:
+    ///   sendhex 01 0F A2 04 00 63 00 00  → RX: 08 91 00 00
     /// </summary>
     private void BuildDownloadSeed()
     {
         CreateDataFile(0x63, 0, 4, 4);
+        // Seed with hardware-verified value (little-endian: 08 91 = 0x9108)
+        if (_files.TryGetValue((0x63, 0), out var buf) && buf.Length >= 2)
+        {
+            buf[0] = 0x08; buf[1] = 0x91;
+            buf[2] = 0x00; buf[3] = 0x00;
+        }
     }
 
     // =========================================================================
@@ -841,6 +878,56 @@ public class PlcMemory : IDisposable
     }
 
     /// <summary>
+    /// Ensures a file exists and is large enough to accept a write at
+    /// (byteOffset + lengthInBytes). If the file does not exist it is
+    /// created; if it exists but is too small it is grown (zero-padded).
+    ///
+    /// Used by the ML1400 download path to accept system files
+    /// (ft=0x22, 0x47, 0x49, 0x4D, 0x61, 0x69, 0x6C, 0xA1, 0xA2,
+    ///  0xE0–0xEE, etc.) that are not pre-registered in BuildMemoryConfig.
+    /// These files are written verbatim from the backup taken during upload
+    /// and do not need to be in the directory.
+    ///
+    /// Thread-safe: acquires write lock internally.
+    /// </summary>
+    public void EnsureFileWritable(int fileType, int fileNumber, int byteOffset, int lengthInBytes)
+    {
+        int needed = byteOffset + lengthInBytes;
+        if (needed <= 0) return;
+
+        _rwLock.EnterWriteLock();
+        try
+        {
+            if (_files.TryGetValue((fileType, fileNumber), out var existing))
+            {
+                // Grow if needed
+                if (existing.Length < needed)
+                {
+                    var grown = new byte[needed];
+                    Array.Copy(existing, grown, existing.Length);
+                    _files[(fileType, fileNumber)] = grown;
+
+                    if (_hotCache.TryGetValue(fileNumber, out var hotEntry) && hotEntry.FileType == fileType)
+                    {
+                        hotEntry.Data = grown;
+                        _hotCache[fileNumber] = hotEntry;
+                    }
+                }
+            }
+            else
+            {
+                // Create new — not registered in directory (_fileTypeByNumber stays clean)
+                _files[(fileType, fileNumber)] = new byte[needed];
+                _bytesPerElement[(fileType, fileNumber)] = 2;
+            }
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
     /// Resets all data files to their default values (as after construction).
     /// Used by Initialize Memory command (0x0F/0x57).
     /// Writes seed values only if the target buffer has enough space, avoiding
@@ -852,11 +939,11 @@ public class PlcMemory : IDisposable
         try
         {
             // O0: 12 bytes → all zero
-            var o0 = Lookup(0x8B, 0);
+            var o0 = Lookup(0x82, 0);
             if (o0 != null) Array.Clear(o0, 0, o0.Length);
 
             // I1: 42 bytes → all zero
-            var i1 = Lookup(0x8C, 1);
+            var i1 = Lookup(0x83, 1);
             if (i1 != null) Array.Clear(i1, 0, i1.Length);
 
             // S2: re-initialise with known values (the method handles the actual size)
@@ -955,9 +1042,17 @@ public class PlcMemory : IDisposable
                 }
             }
 
-            // Download seed (file 0x63, 0) — 4 bytes zero
+            // Download seed (file 0x63, 0) — keep the verified ML1400 seed value
             var seed = Lookup(0x63, 0);
-            if (seed != null) Array.Clear(seed, 0, seed.Length);
+            if (seed != null)
+            {
+                Array.Clear(seed, 0, seed.Length);
+                if (seed.Length >= 4)
+                {
+                    seed[0] = 0x08; seed[1] = 0x91;
+                    seed[2] = 0x00; seed[3] = 0x00;
+                }
+            }
 
             // Rebuild flat memory and hot cache inside the write lock so concurrent
             // Read/Write calls never see a partially-reset or inconsistent state.
@@ -1312,6 +1407,38 @@ public class PlcMemory : IDisposable
         {
             buf[byteOffset]     = (byte)(value & 0xFF);
             buf[byteOffset + 1] = (byte)(value >> 8);
+        }
+    }
+
+    /// <summary>
+    /// Creates a raw file entry in <c>_files</c> with the given content,
+    /// bypassing the directory and flat memory. Used by SeedInitialValues
+    /// for files accessed via special file types not registered in the PCCC
+    /// directory (e.g. ML1400 program slot directory fileType=0x00,
+    /// SYS data fileType=0x63).
+    /// </summary>
+    public void CreateAndInitRawFile(int fileType, int fileNum, byte[] content)
+    {
+        if (content == null || content.Length == 0) return;
+        var buf = new byte[content.Length];
+        Array.Copy(content, buf, content.Length);
+        _files[(fileType, fileNum)] = buf;
+        _bytesPerElement[(fileType, fileNum)] = 2;
+        // Do NOT register in _fileTypeByNumber — this file is invisible to the directory.
+    }
+
+    /// <summary>
+    /// Creates a raw file entry that shares the same backing array as an existing file.
+    /// Reads and writes to either file type will see the same data.
+    /// Used to alias ML1400 password storage (fileType=0x03) to the program slot
+    /// directory (fileType=0x00) so setpass/getpass operate on the same memory.
+    /// </summary>
+    public void AliasRawFile(int srcFileType, int srcFileNum, int aliasFileType, int aliasFileNum)
+    {
+        if (_files.TryGetValue((srcFileType, srcFileNum), out var src))
+        {
+            _files[(aliasFileType, aliasFileNum)] = src;   // shared reference
+            _bytesPerElement[(aliasFileType, aliasFileNum)] = 2;
         }
     }
 
