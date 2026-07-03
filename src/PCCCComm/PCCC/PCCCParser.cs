@@ -43,8 +43,13 @@ public static partial class PCCCParser
         @"^\s*(?<FileType>[CT])(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})[.](?<SubElement>(ACC|PRE|EN|DN|TT|CU|CD|OV|UN|UA))\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // I/O and status addressing: O:e.s, Of:e.s, O:e.s/b, Of:e.s/b (and I/S equivalents).
+    // f (file number) is optional; e = slot (element), s = word within slot (sub-element,
+    // 0-255), b = terminal/bit number (0-15). Previously the file number was not permitted
+    // at all (only "O:e" matched, not "O0:e"), and the word number was capped at a single
+    // digit (0-7) instead of the full 0-255 range.
     private static readonly Regex RE4 = new Regex(
-        @"^\s*(?<FileType>([IOS])):(?<ElementNumber>\d{1,3})([.](?<SubElement>[0-7]))?(/(?<BitNumber>\d{1,4}))?\s*$",
+        @"^\s*(?<FileType>([IOS]))(?<FileNumber>\d{1,3})?:(?<ElementNumber>\d{1,3})([.](?<SubElement>\d{1,3}))?(/(?<BitNumber>\d{1,4}))?\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>
@@ -104,6 +109,11 @@ public static partial class PCCCParser
         }
 
         // SubElement
+        // Tracks whether SubElement came from a *named* timer/counter status-bit
+        // mnemonic (EN/TT/DN/CU/CD/OV/UN/UA) as opposed to a plain numeric
+        // sub-element/word number (e.g. the "s" in "O0:e.s" I/O addressing,
+        // which legitimately ranges 0-255 and must NOT be treated as a bit).
+        bool isTimerCounterStatusBit = false;
         if (mc.Groups["SubElement"].Length > 0)
         {
             switch (mc.Groups["SubElement"].Value.ToUpperInvariant())
@@ -111,15 +121,15 @@ public static partial class PCCCParser
                 case "PRE": result.SubElement = 1;  break;
                 case "ACC": result.SubElement = 2;  break;
                 // Timer status bits
-                case "EN":  result.SubElement = 15; break;
-                case "TT":  result.SubElement = 14; break;
-                case "DN":  result.SubElement = 13; break;
+                case "EN":  result.SubElement = 15; isTimerCounterStatusBit = true; break;
+                case "TT":  result.SubElement = 14; isTimerCounterStatusBit = true; break;
+                case "DN":  result.SubElement = 13; isTimerCounterStatusBit = true; break;
                 // Counter status bits
-                case "CU":  result.SubElement = 15; break;
-                case "CD":  result.SubElement = 14; break;
-                case "OV":  result.SubElement = 12; break;
-                case "UN":  result.SubElement = 11; break;
-                case "UA":  result.SubElement = 10; break;
+                case "CU":  result.SubElement = 15; isTimerCounterStatusBit = true; break;
+                case "CD":  result.SubElement = 14; isTimerCounterStatusBit = true; break;
+                case "OV":  result.SubElement = 12; isTimerCounterStatusBit = true; break;
+                case "UN":  result.SubElement = 11; isTimerCounterStatusBit = true; break;
+                case "UA":  result.SubElement = 10; isTimerCounterStatusBit = true; break;
                 default:
                     if (int.TryParse(mc.Groups["SubElement"].Value, out int se))
                         result.SubElement = se;
@@ -128,15 +138,17 @@ public static partial class PCCCParser
         }
 
         // ── Collapse status-bit sub-elements to bit-level access ──────────────
-        // SubElement values > 4 refer to status-word bit positions (e.g. T4:0.EN
-        // maps to bit 15 of the status word).  Convert to BitNumber so the wire
-        // protocol uses the bit-masked write function (0xAB).
+        // Only named timer/counter status mnemonics (e.g. T4:0.EN -> bit 15 of the
+        // status word) get converted to BitNumber so the wire protocol uses the
+        // bit-masked write function (0xAB). Numeric sub-elements/word numbers
+        // (e.g. O0:5.10 — slot 5, word 10) must pass through untouched.
         //
-        // BUG FIX: original code did:
-        //   result.SubElement = 0;
-        //   result.BitNumber  = result.SubElement;   // always 0 — already zeroed!
-        // The sub-element value must be captured before it is cleared.
-        if (result.SubElement > 4)
+        // BUG FIX (previous): this used to key off "SubElement > 4", which also
+        // fired for legitimate numeric sub-elements/word numbers >4, silently
+        // corrupting I/O slot.word addresses (and originally even had a second
+        // bug where the SubElement value was zeroed before being read for
+        // BitNumber, always yielding 0).
+        if (isTimerCounterStatusBit)
         {
             int bitFromSubElement = result.SubElement;   // capture before zeroing
             result.SubElement     = 0;
