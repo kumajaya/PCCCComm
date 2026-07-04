@@ -175,6 +175,21 @@ public class EIPTransport : ITransport
 
             _stream = _tcp.GetStream();
 
+            // Bound every subsequent stream read/write to _connectTimeoutMs.
+            // Without this, NetworkStream defaults to Socket.SendTimeout/
+            // ReceiveTimeout = 0 (infinite): if the connection goes half-open
+            // (peer crashes or is unplugged without sending RST/FIN — TCP
+            // alone cannot detect this), a Write() or Read() call can block
+            // forever. This happens *before* ResponseTimeoutMs ever gets a
+            // chance to matter, since that timeout only bounds the reply-wait
+            // in PCCCProtocol.SendRequest, not the raw socket I/O underneath
+            // it. Confirmed in production: without this, a request could
+            // hang indefinitely on a silently-dead connection, so the caller
+            // never got a false/exception back to trigger reconnect — the
+            // affected tag's last-known value was never invalidated either.
+            _stream.WriteTimeout = _connectTimeoutMs;
+            _stream.ReadTimeout  = _connectTimeoutMs;
+
             // RegisterSession reads/writes the stream directly and synchronously.
             // It must complete before the async receive loop starts, otherwise
             // both would compete for the same incoming bytes.

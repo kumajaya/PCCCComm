@@ -200,6 +200,12 @@ public class CSPTransport : ITransport
 
             _stream = _tcp.GetStream();
 
+            // See EIPTransport for the rationale: without an explicit timeout,
+            // a half-open connection can block Write()/Read() forever, bypassing
+            // ResponseTimeoutMs entirely (that only bounds the reply-wait).
+            _stream.WriteTimeout = _connectTimeoutMs;
+            _stream.ReadTimeout  = _connectTimeoutMs;
+
             // Registration must complete before the async receive loop starts.
             RegisterSession();
 
