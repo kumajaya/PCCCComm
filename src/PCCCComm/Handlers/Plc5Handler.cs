@@ -364,14 +364,29 @@ public class Plc5Handler : IPlcHandler
             p.BytesPerElements = PCCCConstants.Df1Limits.Plc5StringElementBytes;
 
         int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
             bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
 
         int totalBytesNeeded = numberOfWords * 2;
         int numberOfElements = (totalBytesNeeded + bytesPerElem - 1) / bytesPerElem;
         int numberOfBytesToRead = numberOfElements * bytesPerElem;
 
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+        // Byte-count adjustment for Timer/Counter/Control sub-element reads
+        // ("T4:0.PRE", "C5:0.ACC", "R6:0.LEN") on PLC-5.
+        //
+        // Origin (reconstructed — not documented elsewhere): an earlier
+        // version indexed each element at a 6-byte (3-word) stride
+        // (`offset = i*6`), matching a Timer/Counter/Control element's true
+        // layout (status word + 2 sub-elements). That was simplified to the
+        // same 1-word-per-index model SLC uses (bytesPerElem forced to
+        // BytesPerWord above); this line makes the simplified path request
+        // the same total bytes the old stride would have: for N words,
+        // `(N*2*3)-4 = 6N-4` bytes — enough to span N full 3-word elements.
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
             numberOfBytesToRead = (numberOfBytesToRead * 3) - 4;
 
         byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytesToRead, out int reply);
@@ -486,7 +501,9 @@ public class Plc5Handler : IPlcHandler
             p.BytesPerElements = PCCCConstants.Df1Limits.Plc5StringElementBytes;
 
         int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
             bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
 
         int wordsPerElem = bytesPerElem / 2;
@@ -563,7 +580,9 @@ public class Plc5Handler : IPlcHandler
 
         // Determine words per element based on file type
         int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
             bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord; // 2 bytes per sub-element
 
         int wordsPerElem = bytesPerElem / 2;

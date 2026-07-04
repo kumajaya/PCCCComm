@@ -153,8 +153,18 @@ public class SlcHandler : IPlcHandler
                 if (toRead > PCCCConstants.Df1Limits.MaxStringReadBytes && addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
                     toRead = PCCCConstants.Df1Limits.MaxStringReadBytes;
                 
-                // Timer/Counter file restriction: read in multiples of 6 bytes, max 234 bytes
-                if (toRead > PCCCConstants.Df1Limits.MaxTimerCounterReadBytes && (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+                // Timer/Counter/Control file restriction: read in multiples of 6 bytes,
+                // max 234 bytes. All three share the same 3-word (6-byte) element layout
+                // (control/status word + 2 sub-elements: PRE/ACC or LEN/POS) — Control
+                // was missing here even though it needs identical treatment: the generic
+                // chunk limit (236 bytes) is NOT a multiple of 6, so a large multi-element
+                // Control read (more than 39 elements merged into one physical read) could
+                // have its chunk boundary fall mid-element, silently misaligning every
+                // subsequent element's word offset for the rest of the read.
+                if (toRead > PCCCConstants.Df1Limits.MaxTimerCounterReadBytes &&
+                    (addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                     addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                     addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
                     toRead = PCCCConstants.Df1Limits.MaxTimerCounterReadBytes;
                 
                 // SLC 5/02 additional limitation: max 0x50 (80) bytes per read
