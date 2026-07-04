@@ -25,8 +25,29 @@ namespace PCCCComm.Pccc;
 
 /// <summary>
 /// Parses Allen-Bradley PLC address strings into a DataAddress struct.
-/// Supported formats (ref AB Publication 1770-6.5.16, page 7-18):
-///   N7:0, B3:0/5, T4:1.ACC, C5:0.DN, F8:0, ST9:0, I:0, O:0, S:1
+/// Supported formats (ref AB Publication 1770-6.5.16, page 7-18, and AVEVA
+/// Plant SCADA tag addressing references for MicroLogix/SLC 500/PLC-5):
+///   N7:0, B3:0/5, B:0/5, T4:1.ACC, T4:1/EN, C5:0.DN, C5:0/UN, R6:0.LEN,
+///   R6:0/EN, F8:0, ST9:0, I:0, O:0, S:1
+///
+/// Deliberately NOT supported (out of scope until a concrete need arises —
+/// see project history for the AVEVA Plant SCADA compatibility review that
+/// established this boundary):
+///   - PLC-5 native octal I/O addressing (O:O/o, I:O/o) — MicroLogix/SLC 500
+///     I/O addressing (Of:e.s, decimal) IS supported; only the PLC-5-specific
+///     octal element/bit notation is not, and could not be verified against
+///     AB Publication 1770-6.5.16 (which documents wire-level logical binary
+///     addressing, not this text convention, so it neither confirms nor
+///     contradicts AVEVA's octal claim for PLC-5).
+///   - PID (PD) dot-notation sub-elements/bits (e.g. PD12:0.SP, PD12:0/EN)
+///   - Sequential Function Chart (SC) and Block Transfer (BT) file types
+///   - BCD (D) file type
+///   - Control (R) raw numeric sub-element form (R6:1.0) — only the named
+///     forms (R6:1.LEN, R6:1.POS) and named bit mnemonics (R6:2/EN etc.) are
+///     supported
+///   - String sub-addressing (ST9:1.LEN, ST9:1.DATA[n]) — only whole-string
+///     addressing (ST9:1) is supported, matching how DrvSigPccc.Logic reads
+///     strings (whole element via chunking, not per-character)
 /// </summary>
 public static partial class PCCCParser
 {
@@ -39,17 +60,39 @@ public static partial class PCCCParser
         @"^\s*(?<FileType>[BN])(?<FileNumber>\d{1,3})(/(?<BitNumber>\d{1,4}))\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // Control (R) sub-elements only (LEN/POS, dot-notation, word-level) — per
+    // AVEVA Plant SCADA: "Rf:e.LEN", "Rf:e.POS". Bit-status mnemonics (EN, EU,
+    // DN, EM, ER, UL, IN, FD) use slash notation instead ("Rf:e/EN") and are
+    // handled by RE5 below, not here.
     private static readonly Regex RE3 = new Regex(
-        @"^\s*(?<FileType>[CT])(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})[.](?<SubElement>(ACC|PRE|EN|DN|TT|CU|CD|OV|UN|UA))\s*$",
+        @"^\s*(?<FileType>[RCT])(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})[.](?<SubElement>(ACC|PRE|LEN|POS|EN|DN|TT|CU|CD|OV|UN|UA))\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    // I/O and status addressing: O:e.s, Of:e.s, O:e.s/b, Of:e.s/b (and I/S equivalents).
-    // f (file number) is optional; e = slot (element), s = word within slot (sub-element,
-    // 0-255), b = terminal/bit number (0-15). Previously the file number was not permitted
-    // at all (only "O:e" matched, not "O0:e"), and the word number was capped at a single
-    // digit (0-7) instead of the full 0-255 range.
+    // I/O, Status, and Bit addressing without an explicit file number:
+    // O:e.s, Of:e.s, O:e.s/b, Of:e.s/b (I/S equivalents), and B:e, Bf:e, B:e/b, Bf:e/b.
+    // f (file number) is optional; e = slot (element) for I/O, or element for B;
+    // s = word within slot (sub-element, 0-255) — not used by B; b = terminal/bit
+    // number (0-15). RE1 already handles the explicit-file-number form for all of
+    // these types (e.g. "O0:1.3", "B3:4") — this pattern only covers the omitted-
+    // file-number form, tried after RE1 fails to match.
+    // Previously the file number was not permitted at all for I/O/S (only "O:e"
+    // matched, not "O0:e"), and the word number was capped at a single digit
+    // (0-7) instead of the full 0-255 range. B was not included here at all,
+    // so "B:4" (Bit file, default file number 3, no explicit "3") failed to
+    // parse even though AVEVA Plant SCADA documents it as valid — only the
+    // explicit "B3:4" form worked.
     private static readonly Regex RE4 = new Regex(
-        @"^\s*(?<FileType>([IOS]))(?<FileNumber>\d{1,3})?:(?<ElementNumber>\d{1,3})([.](?<SubElement>\d{1,3}))?(/(?<BitNumber>\d{1,4}))?\s*$",
+        @"^\s*(?<FileType>([IOSB]))(?<FileNumber>\d{1,3})?:(?<ElementNumber>\d{1,3})([.](?<SubElement>\d{1,3}))?(/(?<BitNumber>\d{1,4}))?\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Named bit-status mnemonics using slash notation, per AVEVA Plant SCADA:
+    // "Tf:e/EN", "Cf:e/UN", "Rf:e/EN", etc. Purely additive — an alternate,
+    // AVEVA-matching spelling that reaches the same BitNumber values already
+    // produced by RE3's dot-notation mnemonics (e.g. "T4:0.EN" and "T4:0/EN"
+    // both resolve to bit 15). Does not change any existing dot-notation
+    // behavior, so no regression risk for templates already using the dot form.
+    private static readonly Regex RE5 = new Regex(
+        @"^\s*(?<FileType>[RCT])(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})/(?<BitMnemonic>EN|EU|EM|ER|UL|IN|FD|TT|DN|CU|CD|OV|UN|UA)\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>
@@ -70,6 +113,7 @@ public static partial class PCCCParser
         if (!mc.Success) mc = RE2.Match(dataAddress);
         if (!mc.Success) mc = RE3.Match(dataAddress);
         if (!mc.Success) mc = RE4.Match(dataAddress);
+        if (!mc.Success) mc = RE5.Match(dataAddress);
         if (!mc.Success) return result;
 
         // ── FileNumber ────────────────────────────────────────────────────────
@@ -83,6 +127,7 @@ public static partial class PCCCParser
             {
                 case "I": result.FileNumber = 1; break;
                 case "O": result.FileNumber = 0; break;
+                case "B": result.FileNumber = 3; break;
                 default:  result.FileNumber = 2; break; // "S"
             }
         }
@@ -94,6 +139,32 @@ public static partial class PCCCParser
         // BitNumber
         if (mc.Groups["BitNumber"].Length > 0)
             result.BitNumber = int.Parse(mc.Groups["BitNumber"].Value);
+
+        // Named bit-status mnemonic via slash notation (RE5 matches only —
+        // e.g. "T4:0/EN", "R6:2/EN"). Maps directly to BitNumber, same values
+        // as RE3's dot-notation mnemonics for the shared names (EN/TT/DN/CU/
+        // CD/OV/UN/UA); EU/EM/ER/UL/IN/FD are Control-only and have no dot
+        // form at all — slash is their only accepted syntax.
+        if (mc.Groups["BitMnemonic"].Length > 0)
+        {
+            switch (mc.Groups["BitMnemonic"].Value.ToUpperInvariant())
+            {
+                case "EN": result.BitNumber = 15; break;
+                case "TT": result.BitNumber = 14; break;
+                case "EU": result.BitNumber = 14; break;
+                case "DN": result.BitNumber = 13; break;
+                case "CU": result.BitNumber = 15; break;
+                case "CD": result.BitNumber = 14; break;
+                case "EM": result.BitNumber = 12; break;
+                case "OV": result.BitNumber = 12; break;
+                case "ER": result.BitNumber = 11; break;
+                case "UN": result.BitNumber = 11; break;
+                case "UL": result.BitNumber = 10; break;
+                case "UA": result.BitNumber = 10; break;
+                case "IN": result.BitNumber = 9;  break;
+                case "FD": result.BitNumber = 8;  break;
+            }
+        }
 
         // Element
         if (mc.Groups["ElementNumber"].Length > 0)
@@ -130,6 +201,16 @@ public static partial class PCCCParser
                 case "OV":  result.SubElement = 12; isTimerCounterStatusBit = true; break;
                 case "UN":  result.SubElement = 11; isTimerCounterStatusBit = true; break;
                 case "UA":  result.SubElement = 10; isTimerCounterStatusBit = true; break;
+                // Control (R) sub-elements — LEN/POS are word-level, not bits
+                // (same category as PRE/ACC above), per AVEVA Plant SCADA
+                // Control Data File reference: "Rf:e.LEN" -> sub-element 1,
+                // "Rf:e.POS" -> sub-element 2.
+                case "LEN": result.SubElement = 1;  break;
+                case "POS": result.SubElement = 2;  break;
+                // Control's EU/EM/ER/UL/IN/FD are intentionally absent here:
+                // RE3 no longer matches them via dot notation (they're
+                // slash-only, per AVEVA — see RE3's comment above). They're
+                // handled by the BitMnemonic switch above instead (RE5 matches).
                 default:
                     if (int.TryParse(mc.Groups["SubElement"].Value, out int se))
                         result.SubElement = se;
