@@ -114,8 +114,8 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
 
         var files = new List<DataFileSpec>
         {
-            new(0x82,  0,  12),       // O0  — 6 words
-            new(0x83,  1,  42),       // I1  — 21 words
+            new(0x8B,   0,  12),       // O0  — 6 words
+            new(0x8C,   1,  42),       // I1  — 21 words
             new(0x84,  2, 328),       // S2  — 164 words
             new(0x85,  3,  28),       // B3  — 14 words
             new(0x86,  4, 468, 6),    // T4  — 78 timers
@@ -255,8 +255,8 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
         var files = new List<DataFileSpec>
         {
             // Files 0-17 (from filelist.xml)
-            new(0x82,   0,   18),        // O0   — 9 words
-            new(0x83,   1,   82),        // I1   — 41 words
+            new(0x8B,    0,   18),        // O0   — 9 words
+            new(0x8C,    1,   82),        // I1   — 41 words
             new(0x84,   2,  132),        // S2   — 66 words
             new(0x85,   3,   18),        // B3   — 9 words
             new(0x86,   4,  456, 6),     // T4   — 76 timers
@@ -520,7 +520,16 @@ public sealed class Plc5FamilyProfile : IPlcFamilyProfile
         // Total data memory: 5572 words (verified against hardware stats).
         //
         // File type codes (PLC-5 / SLC shared):
-        //   0x82=O  0x83=I  0x84=S  0x85=B  0x86=T  0x87=C  0x88=R
+        //   0x8B=O  0x8C=I  0x84=S  0x85=B  0x86=T  0x87=C  0x88=R
+        //   (O/I use 0x8B/0x8C — "output/input logical by slot" — per AB
+        //   Publication 1770-6.5.16 p.7-18/104's typed logical read/write
+        //   File Type table, which explicitly marks 0x80-0x83 as reserved.
+        //   0x82/0x83 only apply to a different, unrelated structure — the
+        //   PLC's own "File Zero" data-file directory listing returned during
+        //   upload — not the File Type field of a normal read/write request.
+        //   Using 0x82/0x83 here caused every O/I read against this emulator
+        //   to fail, since real requests (built by PCCCParser.cs per the same
+        //   spec) always use 0x8B/0x8C for O/I.
         //   0x89=N  0x8A=F  0x93=PD 0x95=BT
         //
         // Element sizes:
@@ -535,8 +544,8 @@ public sealed class Plc5FamilyProfile : IPlcFamilyProfile
 
         var files = new List<DataFileSpec>
         {
-            new(0x82,   0,   256),           // O0   — output image (128 words)
-            new(0x83,   1,   256),           // I1   — input image  (128 words)
+            new(0x8B,    0,   256),           // O0   — output image (128 words)
+            new(0x8C,    1,   256),           // I1   — input image  (128 words)
             new(0x84,   2,   256),           // S2   — status       (128 words)
             new(0x85,   3,     2),           // B3
             new(0x86,   4,  1206,   6),      // T4   — 201 timers
