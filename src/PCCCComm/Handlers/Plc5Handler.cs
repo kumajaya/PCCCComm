@@ -528,6 +528,17 @@ public class Plc5Handler : IPlcHandler
                 case (byte)PCCCConstants.SlcFileTypeCode.Counter:
                     result[i] = ((short)rawWords[offset]).ToString(CultureInfo.InvariantCulture);
                     break;
+                case (byte)PCCCConstants.SlcFileTypeCode.Binary:
+                case (byte)PCCCConstants.SlcFileTypeCode.Output:
+                case (byte)PCCCConstants.SlcFileTypeCode.OutputAlt:
+                case (byte)PCCCConstants.SlcFileTypeCode.Input:
+                case (byte)PCCCConstants.SlcFileTypeCode.InputAlt:
+                    // Bit/Binary, Output, and Input files are bit patterns, not
+                    // signed quantities — bit 15 is data, not a sign bit.
+                    // N (Integer) and other numeric files are genuinely signed
+                    // 16-bit per AB spec, so they keep the (short) cast below.
+                    result[i] = rawWords[offset].ToString(CultureInfo.InvariantCulture);
+                    break;
                 default:
                     result[i] = ((short)rawWords[offset]).ToString(CultureInfo.InvariantCulture);
                     break;
@@ -607,6 +618,14 @@ public class Plc5Handler : IPlcHandler
                 case (byte)PCCCConstants.SlcFileTypeCode.Counter:
                     // One word -> short (signed 16-bit)
                     result[i] = (short)rawWords[offset];
+                    break;
+                case (byte)PCCCConstants.SlcFileTypeCode.Binary:
+                case (byte)PCCCConstants.SlcFileTypeCode.Output:
+                case (byte)PCCCConstants.SlcFileTypeCode.OutputAlt:
+                case (byte)PCCCConstants.SlcFileTypeCode.Input:
+                case (byte)PCCCConstants.SlcFileTypeCode.InputAlt:
+                    // Bit pattern, not a signed quantity — see ReadAny above.
+                    result[i] = rawWords[offset];
                     break;
                 default:
                     // Default: one word -> short (signed 16-bit)

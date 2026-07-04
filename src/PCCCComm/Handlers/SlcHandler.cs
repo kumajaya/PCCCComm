@@ -678,6 +678,21 @@ public class SlcHandler : IPlcHandler
                 case (byte)PCCCConstants.SlcFileTypeCode.Counter:
                     result[i] = ((short)rawWords[offset]).ToString(CultureInfo.InvariantCulture);
                     break;
+                case (byte)PCCCConstants.SlcFileTypeCode.Binary:
+                case (byte)PCCCConstants.SlcFileTypeCode.Output:
+                case (byte)PCCCConstants.SlcFileTypeCode.OutputAlt:
+                case (byte)PCCCConstants.SlcFileTypeCode.Input:
+                case (byte)PCCCConstants.SlcFileTypeCode.InputAlt:
+                    // Bit/Binary, Output, and Input files are bit patterns, not
+                    // signed quantities — bit 15 is data (e.g. terminal 15's
+                    // state), not a sign bit. Casting to (short) here would
+                    // sign-extend when bit 15 is set, corrupting the value
+                    // (e.g. 0x8083 displays as a large negative number instead
+                    // of the correct unsigned 32899). N (Integer) and other
+                    // numeric files are genuinely signed 16-bit per AB spec,
+                    // so they correctly keep the (short) cast in default below.
+                    result[i] = rawWords[offset].ToString(CultureInfo.InvariantCulture);
+                    break;
                 default:
                     result[i] = ((short)rawWords[offset]).ToString(CultureInfo.InvariantCulture);
                     break;
@@ -751,6 +766,15 @@ public class SlcHandler : IPlcHandler
                 case (byte)PCCCConstants.SlcFileTypeCode.Timer:
                 case (byte)PCCCConstants.SlcFileTypeCode.Counter:
                     result[i] = (short)rawWords[offset];
+                    break;
+                case (byte)PCCCConstants.SlcFileTypeCode.Binary:
+                case (byte)PCCCConstants.SlcFileTypeCode.Output:
+                case (byte)PCCCConstants.SlcFileTypeCode.OutputAlt:
+                case (byte)PCCCConstants.SlcFileTypeCode.Input:
+                case (byte)PCCCConstants.SlcFileTypeCode.InputAlt:
+                    // See ReadAny's identical case above for rationale: these
+                    // are bit patterns, not signed quantities.
+                    result[i] = rawWords[offset];
                     break;
                 default:
                     result[i] = (short)rawWords[offset];
