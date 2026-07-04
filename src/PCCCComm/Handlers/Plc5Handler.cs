@@ -500,14 +500,12 @@ public class Plc5Handler : IPlcHandler
             switch (p.FileType)
             {
                 case (byte)PCCCConstants.SlcFileTypeCode.Float:
-                    byte[] floatBytes = new byte[4];
-                    Buffer.BlockCopy(rawWords, offset * 2, floatBytes, 0, 4);
-                    result[i] = BitConverter.ToSingle(floatBytes, 0).ToString(CultureInfo.InvariantCulture);
+                    result[i] = WordConverter.WordsToFloat(rawWords[offset], rawWords[offset + 1])
+                        .ToString(CultureInfo.InvariantCulture);
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Long:
-                    byte[] longBytes = new byte[4];
-                    Buffer.BlockCopy(rawWords, offset * 2, longBytes, 0, 4);
-                    result[i] = BitConverter.ToInt32(longBytes, 0).ToString(CultureInfo.InvariantCulture);
+                    result[i] = WordConverter.WordsToInt32(rawWords[offset], rawWords[offset + 1])
+                        .ToString(CultureInfo.InvariantCulture);
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Timer:
                 case (byte)PCCCConstants.SlcFileTypeCode.Counter:
@@ -580,15 +578,11 @@ public class Plc5Handler : IPlcHandler
             {
                 case (byte)PCCCConstants.SlcFileTypeCode.Float:
                     // Two words -> float (little-endian)
-                    byte[] floatBytes = new byte[4];
-                    Buffer.BlockCopy(rawWords, offset * 2, floatBytes, 0, 4);
-                    result[i] = BitConverter.ToSingle(floatBytes, 0);
+                    result[i] = WordConverter.WordsToFloat(rawWords[offset], rawWords[offset + 1]);
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Long:
                     // Two words -> int (little-endian)
-                    byte[] longBytes = new byte[4];
-                    Buffer.BlockCopy(rawWords, offset * 2, longBytes, 0, 4);
-                    result[i] = BitConverter.ToInt32(longBytes, 0);
+                    result[i] = WordConverter.WordsToInt32(rawWords[offset], rawWords[offset + 1]);
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Timer:
                 case (byte)PCCCConstants.SlcFileTypeCode.Counter:
@@ -663,12 +657,11 @@ public class Plc5Handler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
             words = new ushort[numberOfElements * 2];
-            byte[] temp = new byte[4];
             for (int i = 0; i < numberOfElements; i++)
             {
-                BitConverter.GetBytes(dataToWrite[i]).CopyTo(temp, 0);
-                words[i * 2] = BitConverter.ToUInt16(temp, 0);
-                words[i * 2 + 1] = BitConverter.ToUInt16(temp, 2);
+                WordConverter.Int32ToWords(dataToWrite[i], out ushort low, out ushort high);
+                words[i * 2] = low;
+                words[i * 2 + 1] = high;
             }
         }
         else
@@ -711,23 +704,21 @@ public class Plc5Handler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Float)
         {
             words = new ushort[numberOfElements * 2];
-            byte[] temp = new byte[4];
             for (int i = 0; i < numberOfElements; i++)
             {
-                BitConverter.GetBytes(dataToWrite[i]).CopyTo(temp, 0);
-                words[i * 2] = BitConverter.ToUInt16(temp, 0);
-                words[i * 2 + 1] = BitConverter.ToUInt16(temp, 2);
+                WordConverter.FloatToWords(dataToWrite[i], out ushort low, out ushort high);
+                words[i * 2] = low;
+                words[i * 2 + 1] = high;
             }
         }
         else if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
         {
             words = new ushort[numberOfElements * 2];
-            byte[] temp = new byte[4];
             for (int i = 0; i < numberOfElements; i++)
             {
-                BitConverter.GetBytes((int)dataToWrite[i]).CopyTo(temp, 0);
-                words[i * 2] = BitConverter.ToUInt16(temp, 0);
-                words[i * 2 + 1] = BitConverter.ToUInt16(temp, 2);
+                WordConverter.Int32ToWords((int)dataToWrite[i], out ushort low, out ushort high);
+                words[i * 2] = low;
+                words[i * 2 + 1] = high;
             }
         }
         else
