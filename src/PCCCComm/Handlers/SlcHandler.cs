@@ -543,14 +543,20 @@ public class SlcHandler : IPlcHandler
             throw new NotSupportedException("ReadWords does not support String (ST) files. Use ReadAny instead.");
 
         int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
             bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
 
         int totalBytesNeeded = numberOfWords * 2;
         int numberOfElements = (totalBytesNeeded + bytesPerElem - 1) / bytesPerElem;
         int numberOfBytesToRead = numberOfElements * bytesPerElem;
 
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+        // Control shares Timer/Counter's 3-word/6-byte element layout; see
+        // Plc5Handler.ReadWords for the derivation of this adjustment.
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
             numberOfBytesToRead = (numberOfBytesToRead * 3) - 4;
 
         byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytesToRead, out int reply);
@@ -653,7 +659,9 @@ public class SlcHandler : IPlcHandler
             return ReadAnyString(startAddress, numberOfElements);
 
         int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
             bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
 
         int wordsPerElem = bytesPerElem / 2;
@@ -744,7 +752,9 @@ public class SlcHandler : IPlcHandler
             throw new NotSupportedException("ReadAnyValues does not support String (ST) files. Use ReadAny instead.");
 
         int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer || p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter))
+        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
             bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
 
         int wordsPerElem = bytesPerElem / 2;
