@@ -2161,7 +2161,7 @@ public class SlcHandler : IPlcHandler
     private void WriteRawFile(Dictionary<(int, int), byte[]> fileMap, int fileType, int fileNumber,
         ref long bytesTransferred, ref int filesCompleted, long totalBytes, int totalFiles)
     {
-        if (!fileMap.TryGetValue((fileType, fileNumber), out byte[] data) || data.Length == 0) return;
+        if (!fileMap.TryGetValue((fileType, fileNumber), out byte[]? data) || data.Length == 0) return;
         var addr = new DataAddress { FileType = (byte)fileType, FileNumber = fileNumber, BitNumber = -1 };
         if (WriteRawDataWithChunking(addr, data) != 0) return;
         bytesTransferred += data.Length;
@@ -2189,7 +2189,7 @@ public class SlcHandler : IPlcHandler
     private void WriteFileByElement(Dictionary<(int, int), byte[]> fileMap, int fileType, int fileNumber,
         ref long bytesTransferred, ref int filesCompleted, long totalBytes, int totalFiles)
     {
-        if (!fileMap.TryGetValue((fileType, fileNumber), out byte[] data) || data.Length == 0)
+        if (!fileMap.TryGetValue((fileType, fileNumber), out byte[]? data) || data.Length == 0)
             return;
 
         var addr = new DataAddress
@@ -2259,7 +2259,7 @@ public class SlcHandler : IPlcHandler
             SetProgramMode();
 
             // ── Phase 3: Write LAD size header (2 bytes at el=40) ──────────
-            if (fileMap.TryGetValue((FileTypeLadder, 0), out byte[] ladData) && ladData.Length >= 82)
+            if (fileMap.TryGetValue((FileTypeLadder, 0), out byte[]? ladData) && ladData.Length >= 82)
             {
                 byte[] header = new byte[2];
                 Array.Copy(ladData, 80, header, 0, 2);

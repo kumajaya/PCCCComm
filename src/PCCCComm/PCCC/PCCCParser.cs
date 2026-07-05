@@ -51,22 +51,19 @@ namespace PCCCComm.Pccc;
 /// </summary>
 public static partial class PCCCParser
 {
-    // Regex patterns - compiled for performance (.NET Standard 2.0 compatible)
-    private static readonly Regex RE1 = new Regex(
-        @"^\s*(?<FileType>([SBCTRNFAIOL])|(ST)|(MG)|(PD)|(PLS))(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})(/(?<BitNumber>\d{1,4}))?\s*$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    // Regex patterns - source-generated at build time via [GeneratedRegex] (net7.0+)
+    [GeneratedRegex(@"^\s*(?<FileType>([SBCTRNFAIOL])|(ST)|(MG)|(PD)|(PLS))(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})(/(?<BitNumber>\d{1,4}))?\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex RE1();
 
-    private static readonly Regex RE2 = new Regex(
-        @"^\s*(?<FileType>[BN])(?<FileNumber>\d{1,3})(/(?<BitNumber>\d{1,4}))\s*$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    [GeneratedRegex(@"^\s*(?<FileType>[BN])(?<FileNumber>\d{1,3})(/(?<BitNumber>\d{1,4}))\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex RE2();
 
     // Control (R) sub-elements only (LEN/POS, dot-notation, word-level) — per
     // AVEVA Plant SCADA: "Rf:e.LEN", "Rf:e.POS". Bit-status mnemonics (EN, EU,
     // DN, EM, ER, UL, IN, FD) use slash notation instead ("Rf:e/EN") and are
     // handled by RE5 below, not here.
-    private static readonly Regex RE3 = new Regex(
-        @"^\s*(?<FileType>[RCT])(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})[.](?<SubElement>(ACC|PRE|LEN|POS|EN|DN|TT|CU|CD|OV|UN|UA))\s*$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    [GeneratedRegex(@"^\s*(?<FileType>[RCT])(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})[.](?<SubElement>(ACC|PRE|LEN|POS|EN|DN|TT|CU|CD|OV|UN|UA))\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex RE3();
 
     // I/O, Status, and Bit addressing without an explicit file number:
     // O:e.s, Of:e.s, O:e.s/b, Of:e.s/b (I/S equivalents), and B:e, Bf:e, B:e/b, Bf:e/b.
@@ -81,9 +78,8 @@ public static partial class PCCCParser
     // so "B:4" (Bit file, default file number 3, no explicit "3") failed to
     // parse even though AVEVA Plant SCADA documents it as valid — only the
     // explicit "B3:4" form worked.
-    private static readonly Regex RE4 = new Regex(
-        @"^\s*(?<FileType>([IOSB]))(?<FileNumber>\d{1,3})?:(?<ElementNumber>\d{1,3})([.](?<SubElement>\d{1,3}))?(/(?<BitNumber>\d{1,4}))?\s*$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    [GeneratedRegex(@"^\s*(?<FileType>([IOSB]))(?<FileNumber>\d{1,3})?:(?<ElementNumber>\d{1,3})([.](?<SubElement>\d{1,3}))?(/(?<BitNumber>\d{1,4}))?\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex RE4();
 
     // Named bit-status mnemonics using slash notation, per AVEVA Plant SCADA:
     // "Tf:e/EN", "Cf:e/UN", "Rf:e/EN", etc. Purely additive — an alternate,
@@ -91,9 +87,8 @@ public static partial class PCCCParser
     // produced by RE3's dot-notation mnemonics (e.g. "T4:0.EN" and "T4:0/EN"
     // both resolve to bit 15). Does not change any existing dot-notation
     // behavior, so no regression risk for templates already using the dot form.
-    private static readonly Regex RE5 = new Regex(
-        @"^\s*(?<FileType>[RCT])(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})/(?<BitMnemonic>EN|EU|EM|ER|UL|IN|FD|TT|DN|CU|CD|OV|UN|UA)\s*$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    [GeneratedRegex(@"^\s*(?<FileType>[RCT])(?<FileNumber>\d{1,3}):(?<ElementNumber>\d{1,3})/(?<BitMnemonic>EN|EU|EM|ER|UL|IN|FD|TT|DN|CU|CD|OV|UN|UA)\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex RE5();
 
     /// <summary>
     /// Parses an AB address string. Returns FileType=0 if the address is invalid.
@@ -109,11 +104,11 @@ public static partial class PCCCParser
         if (string.IsNullOrWhiteSpace(dataAddress))
             return result;
 
-        Match mc = RE1.Match(dataAddress);
-        if (!mc.Success) mc = RE2.Match(dataAddress);
-        if (!mc.Success) mc = RE3.Match(dataAddress);
-        if (!mc.Success) mc = RE4.Match(dataAddress);
-        if (!mc.Success) mc = RE5.Match(dataAddress);
+        Match mc = RE1().Match(dataAddress);
+        if (!mc.Success) mc = RE2().Match(dataAddress);
+        if (!mc.Success) mc = RE3().Match(dataAddress);
+        if (!mc.Success) mc = RE4().Match(dataAddress);
+        if (!mc.Success) mc = RE5().Match(dataAddress);
         if (!mc.Success) return result;
 
         // ── FileNumber ────────────────────────────────────────────────────────
