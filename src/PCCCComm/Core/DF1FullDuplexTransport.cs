@@ -50,6 +50,25 @@ public class DF1FullDuplexTransport : DF1BaseTransport
     private volatile bool _ackReceived;
     private volatile bool _nakReceived;
 
+    // Set by Close() so a SendFrame currently blocked in _ackNakEvent.Wait() knows the
+    // wake-up is a shutdown, not an ACK/NAK, and exits promptly instead of waiting out the
+    // full timeout. Without this, stopping the driver while a frame was awaiting ACK (e.g.
+    // the processor-family diagnostic probe against an unresponsive PLC) would hang for the
+    // whole response timeout. Once set it stays set — the transport is being torn down.
+    private volatile bool _closing;
+
+    /// <summary>
+    /// Signals the ACK/NAK and ENQ waiters from the receive thread, tolerating the events
+    /// having been disposed concurrently during shutdown. Without the guard, a link-control
+    /// byte arriving just as Dispose() tears down the events would throw
+    /// ObjectDisposedException on the receive thread.
+    /// </summary>
+    private void SignalAckNak()
+    {
+        try { _ackNakEvent.Set(); } catch (ObjectDisposedException) { }
+        try { _enqEvent.Set(); } catch (ObjectDisposedException) { }
+    }
+
     // --- ENQ signalling (SendEnqAndWaitForAck uses this event) ---
     private readonly ManualResetEventSlim _enqEvent = new ManualResetEventSlim(false);
     private volatile bool _ackFlagForEnq;
@@ -95,21 +114,41 @@ public class DF1FullDuplexTransport : DF1BaseTransport
 
         while (retries < maxRetries)
         {
-            _ackReceived = false;
-            _nakReceived = false;
-            _ackNakEvent.Reset();
+            // Bail out before touching the event or port if a close has begun.
+            if (_closing)
+                throw new TimeoutException("Send aborted: transport is closing.");
 
-            // SleepDelay is applied before writing (not after receiving ACK).
-            // The original code slept inside the receive-thread lock after ACK — that
-            // blocked the serial port reader. Sleeping here on the send thread is equivalent
-            // for flow control purposes and does not block incoming bytes.
-            if (SleepDelay > 0)
-                Thread.Sleep(SleepDelay);
+            try
+            {
+                _ackReceived = false;
+                _nakReceived = false;
+                _ackNakEvent.Reset();
 
-            _port.Write(frame, 0, frame.Length);
+                // SleepDelay is applied before writing (not after receiving ACK).
+                // The original code slept inside the receive-thread lock after ACK — that
+                // blocked the serial port reader. Sleeping here on the send thread is equivalent
+                // for flow control purposes and does not block incoming bytes.
+                if (SleepDelay > 0)
+                    Thread.Sleep(SleepDelay);
 
-            // Wait for ACK or NAK — wakes immediately when the receive thread signals.
-            _ackNakEvent.Wait(timeoutMs);
+                _port.Write(frame, 0, frame.Length);
+
+                // Wait for ACK or NAK — wakes immediately when the receive thread signals,
+                // or when Close() sets the event to abort a shutdown-in-progress.
+                _ackNakEvent.Wait(timeoutMs);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Close()/Dispose() disposed the event (or port) while we were mid-cycle.
+                // That only happens on shutdown, so treat it as an aborted send rather than
+                // letting an unexpected exception type escape.
+                throw new TimeoutException("Send aborted: transport is closing.");
+            }
+
+            // Shutdown requested while waiting: abandon the send instead of retrying or
+            // waiting out the timeout. Surfaces as a normal send failure to the caller.
+            if (_closing)
+                throw new TimeoutException("Send aborted: transport is closing.");
 
             if (_ackReceived)
                 return;                     // Success
@@ -209,16 +248,14 @@ public class DF1FullDuplexTransport : DF1BaseTransport
                         // after Wait() returns, so order matters.
                         _ackReceived = true;
                         _ackFlagForEnq = true;
-                        _ackNakEvent.Set();
-                        _enqEvent.Set();
+                        SignalAckNak();
                     }
                     else if (ctrl == NAK)
                     {
                         _nakReceived = true;
                         _nakFlagForEnq = true;
                         _lastResponseWasNAK = true;
-                        _ackNakEvent.Set();
-                        _enqEvent.Set();
+                        SignalAckNak();
                     }
                     else if (ctrl == ENQ)
                     {
@@ -347,8 +384,31 @@ public class DF1FullDuplexTransport : DF1BaseTransport
     }
 
     /// <inheritdoc/>
+    public override void Close()
+    {
+        // Signal shutdown and wake any SendFrame blocked on the ACK/NAK wait BEFORE
+        // closing the port, so a send in progress against an unresponsive PLC returns
+        // immediately instead of waiting out its timeout. CloseComms() calls Close()
+        // before Dispose(), so by the time the event is disposed below the waiter has
+        // already observed _closing and left the wait. The event is intentionally not
+        // Reset here: leaving it signaled means even a SendFrame that reaches Wait() just
+        // after this still returns at once and then sees _closing.
+        _closing = true;
+        try { _ackNakEvent.Set(); } catch { /* may already be disposed */ }
+        try { _enqEvent.Set(); } catch { /* wake a pending ENQ wait too */ }
+        base.Close();
+    }
+
+    /// <inheritdoc/>
     public override void Dispose()
     {
+        // Defensive: if Dispose() is called without a preceding Close() (Close() sets these
+        // first in the normal CloseComms() path), still wake any waiter before disposing
+        // the events, so we never dispose an event a thread is still blocked on.
+        _closing = true;
+        try { _ackNakEvent.Set(); } catch { }
+        try { _enqEvent.Set(); } catch { }
+
         _port.BytesReceived -= OnBytesReceived;
         _ackNakEvent.Dispose();
         _enqEvent.Dispose();

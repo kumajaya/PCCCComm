@@ -172,6 +172,13 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
     private volatile bool _responseDataReceived;
     private volatile byte[]? _responseDataFrame;
 
+    // Set by Close()/Dispose() so the polling wait loops (WaitForCommandAck,
+    // PollForResponse) and the SendFrame retry loop exit promptly on shutdown instead of
+    // running out their full timeouts against an unresponsive slave. Unlike the full-duplex
+    // transport this class waits by polling flags with Thread.Sleep rather than on an event,
+    // so shutdown is handled by checking this flag in the loop conditions, not by signalling.
+    private volatile bool _closing;
+
     /// <summary>
     /// Initialises the half‑duplex master transport with a custom <see cref="ISerialPort"/>.
     /// </summary>
@@ -239,6 +246,14 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
                     break;
                 }
 
+                // Shutdown requested: stop retrying and surface as a send failure rather
+                // than exhausting all attempts and their backoff delays.
+                if (_closing)
+                {
+                    _currentState = MasterState.Idle;
+                    throw new TimeoutException("Send aborted: transport is closing.");
+                }
+
                 // If this was the last attempt, throw timeout exception
                 if (attempt == maxCmdRetries - 1)
                 {
@@ -293,6 +308,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < CommandAckTimeoutMs)
         {
+            if (_closing) { wasNak = false; return false; }   // shutdown: stop waiting
             if (_commandAckReceived) { wasNak = false; return true; }
             if (_commandNakReceived) { wasNak = true; return false; }
             Thread.Sleep(1);
@@ -305,6 +321,8 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
     {
         for (int attempt = 0; attempt < MaxPollAttempts; attempt++)
         {
+            if (_closing) return null;   // shutdown: stop polling
+
             _pollNakReceived = false;
             _responseDataReceived = false;
             _responseDataFrame = null;
@@ -315,6 +333,7 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
             var sw = System.Diagnostics.Stopwatch.StartNew();
             while (!_pollNakReceived && !_responseDataReceived)
             {
+                if (_closing) return null;   // shutdown: abandon the wait
                 if (sw.ElapsedMilliseconds >= PollResponseTimeoutMs)
                     break;
                 Thread.Sleep(1);
@@ -578,8 +597,20 @@ public class DF1HalfDuplexTransport : DF1BaseTransport
     }
 
     /// <inheritdoc/>
+    public override void Close()
+    {
+        // Signal shutdown so the polling wait loops (WaitForCommandAck/PollForResponse) and
+        // the SendFrame retry loop exit at their next flag check instead of running out the
+        // remaining timeout against an unresponsive slave. CloseComms() calls Close() before
+        // Dispose(). No event to signal here — the loops poll _closing directly.
+        _closing = true;
+        base.Close();
+    }
+
+    /// <inheritdoc/>
     public override void Dispose()
     {
+        _closing = true;
         _port.BytesReceived -= OnBytesReceived;
         base.Dispose();
     }

@@ -695,15 +695,40 @@ public class PCCCComm : IDisposable, IHandlerContext
             }
             _currentTransport = transport;
             AttachTransportEvents();
-            transport.Open();
+
+            // Open the physical port first. A failure here is genuinely a port problem
+            // (missing device, permissions, already in use) and is reported as such.
+            try
+            {
+                transport.Open();
+            }
+            catch (Exception ex)
+            {
+                throw new PCCCException("Failed To Open " + _comPort + ". " + ex.Message);
+            }
+
+            // From here the port is open; the remaining steps talk to the PLC. A failure
+            // in EnsureHandler (processor-family diagnostic probe) means the PLC did not
+            // respond — NOT that the port failed to open. Let that exception propagate with
+            // its own message ("Failed to retrieve diagnostic status...") instead of
+            // mislabeling it as a port-open failure, which previously sent troubleshooting
+            // in the wrong direction (checking cables/permissions when the serial link was
+            // fine and only the PLC was unresponsive).
             EnsureProtocol();
             EnsureHandler();
             LoadMl1400FileListIfNeeded();
             return 0;
         }
+        catch (PCCCException)
+        {
+            // Already a well-formed PCCC error (port-open failure above, or a PLC-side
+            // diagnostic/protocol failure). Propagate as-is.
+            throw;
+        }
         catch (Exception ex)
         {
-            throw new PCCCException("Failed To Open " + _comPort + ". " + ex.Message);
+            // Unexpected non-PCCC failure during setup.
+            throw new PCCCException("Failed to open serial communication on " + _comPort + ". " + ex.Message);
         }
     }
 

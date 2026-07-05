@@ -463,6 +463,20 @@ namespace PCCCComm.Pccc
         public void Dispose()
         {
             _transport.FrameReceived -= OnFrameReceived;
+
+            // Wake any thread currently blocked in SendRequest's ev.Wait(timeout) before
+            // clearing the table. Without this, a request in flight when the connection is
+            // closed (e.g. the processor-family diagnostic probe in OpenComms, or a normal
+            // poll) would keep waiting the full response timeout even though the transport
+            // is going away — this is what made stopping the driver hang until the request
+            // timed out (or until the PLC happened to answer). Setting the event lets Wait
+            // return immediately; SendRequest then finds no response data and exits with a
+            // no-data/timeout status, which the caller treats as a failed request.
+            foreach (var ev in _responseEvents.Values)
+            {
+                try { ev.Set(); } catch { /* event may already be disposed elsewhere */ }
+            }
+
             // Clear any pending events (without disposing them, as original never disposed)
             _responseEvents.Clear();
             _responseData.Clear();
