@@ -212,6 +212,57 @@ public class PCCCComm : IDisposable, IHandlerContext
         }
     }
 
+    // --- Circuit Breaker & Bulkhead (Anti-Starvation) ---------------------
+
+    private int _maxConcurrentRequests = 10;
+    /// <summary>
+    /// Gets or sets the maximum number of concurrent PCCC requests.
+    /// Limits parallel polling to avoid thread pool exhaustion when the PLC is slow or offline.
+    /// Default is 10.
+    /// </summary>
+    public int MaxConcurrentRequests
+    {
+        get => _maxConcurrentRequests;
+        set
+        {
+            if (value > 0)
+            {
+                _maxConcurrentRequests = value;
+                if (_protocol != null)
+                    _protocol.MaxConcurrentRequests = value;
+            }
+        }
+    }
+
+    private int _maxConsecutiveTimeouts = 3;
+    /// <summary>
+    /// Gets or sets the number of consecutive timeouts that will trip the circuit breaker.
+    /// Once tripped, all requests fail immediately without waiting for a timeout.
+    /// Default is 3.
+    /// </summary>
+    public int MaxConsecutiveTimeouts
+    {
+        get => _maxConsecutiveTimeouts;
+        set
+        {
+            if (value > 0)
+            {
+                _maxConsecutiveTimeouts = value;
+                if (_protocol != null)
+                    _protocol.MaxConsecutiveTimeouts = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Manually resets the circuit breaker. Only call this when you are sure
+    /// the PLC is responsive (e.g., after a successful probe).
+    /// </summary>
+    public void ResetCircuitBreaker()
+    {
+        _protocol?.ResetHealth();
+    }
+
     // ─── Events ────────────────────────────────────────────────────────────
     public event EventHandler? DataReceived;
     public event EventHandler? UnsolicitedMessageRcvd;

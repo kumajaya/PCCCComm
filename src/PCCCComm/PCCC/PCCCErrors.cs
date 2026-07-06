@@ -53,6 +53,8 @@ public static class PCCCErrors
             case -8: return "No data returned from PLC";
             case -20: return "No Data Returned";
             case -21: return "Received Message NAKd from invalid checksum";
+            case -22: return "Too many concurrent requests, transport is busy (throttled). Reduce polling frequency or increase MaxConcurrentRequests.";
+            case -23: return "Circuit breaker is open (PLC unreachable). Call OpenComms() to reset the connection and circuit breaker.";
 
             // Local STS error codes (link layer)
             case Sts.DstOutOfBuffer: return "Destination node is out of buffer space";

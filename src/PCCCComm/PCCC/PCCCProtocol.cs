@@ -46,6 +46,7 @@ namespace PCCCComm.Pccc
         {
             _transport = transport ?? throw new ArgumentNullException(nameof(transport));
             _transport.FrameReceived += OnFrameReceived;
+            _requestThrottle = new SemaphoreSlim(_maxConcurrentRequests, _maxConcurrentRequests);
         }
 
         /// <summary>Timeout in milliseconds for waiting a reply (default 2000).</summary>
@@ -82,55 +83,103 @@ namespace PCCCComm.Pccc
         /// <returns>Reply message, or null if timeout or transport error.</returns>
         public PCCCMessage? SendRequest(PCCCMessage request, out int statusCode)
         {
-            if (request == null) throw new ArgumentNullException(nameof(request));
-            if (!_transport.IsOpen) throw new InvalidOperationException("Transport is not open.");
+            statusCode = 0;
 
-            // Assign TNS if not set
-            ushort tns = request.Tns;
-            if (tns == 0)
+            // 1. Circuit Breaker: Reject new requests immediately if the circuit is open.
+            if (_healthState == 0)
             {
-                tns = GetNextTns();
-                request.Tns = tns;
+                statusCode = -23; // Circuit Open
+                return null;
             }
 
-            var ev = new ManualResetEventSlim(false);
-            _responseEvents[tns] = ev;
-            _responseData.TryRemove(tns, out _);
+            // 2. Bulkhead: Limit concurrent requests to prevent thread pool starvation.
+            if (!_requestThrottle.Wait(_requestQueueTimeoutMs))
+            {
+                statusCode = -22; // Too busy (throttled)
+                return null;
+            }
 
             try
             {
-                _transport.SendFrame(request.ToBytes());
+                if (request == null) throw new ArgumentNullException(nameof(request));
+                if (!_transport.IsOpen) throw new InvalidOperationException("Transport is not open.");
+
+                ushort tns = request.Tns;
+                if (tns == 0)
+                {
+                    tns = GetNextTns();
+                    request.Tns = tns;
+                }
+
+                var ev = new ManualResetEventSlim(false);
+                _responseEvents[tns] = ev;
+                _responseData.TryRemove(tns, out _);
+
+                try
+                {
+                    _transport.SendFrame(request.ToBytes());
+                }
+                catch (Exception)
+                {
+                    // Send failure (e.g., timeout, port error) counts as a consecutive failure
+                    // for the circuit breaker, just like a response timeout.
+                    if (_responseEvents.TryRemove(tns, out var evToDispose))
+                        evToDispose.Dispose();
+
+                    int timeouts = Interlocked.Increment(ref _consecutiveTimeouts);
+                    if (timeouts >= MaxConsecutiveTimeouts)
+                    {
+                        Interlocked.Exchange(ref _healthState, 0); // Trip the circuit
+                    }
+
+                    statusCode = -6; // Send error (kept as-is for backward compatibility)
+                    return null;
+                }
+
+                // 3. Wait for the transport response.
+                if (!ev.Wait(_responseTimeoutMs))
+                {
+                    if (_responseEvents.TryRemove(tns, out var evToDispose))
+                        evToDispose.Dispose();
+
+                    // Circuit Breaker Logic: Count consecutive timeouts to trip the breaker.
+                    int timeouts = Interlocked.Increment(ref _consecutiveTimeouts);
+                    if (timeouts >= MaxConsecutiveTimeouts)
+                    {
+                        Interlocked.Exchange(ref _healthState, 0); // Trip the circuit
+                    }
+
+                    statusCode = -20;
+                    return null;
+                }
+
+                // 4. Success: Reset the timeout counter and close the circuit.
+                Interlocked.Exchange(ref _consecutiveTimeouts, 0);
+                Interlocked.Exchange(ref _healthState, 1);
+
+                if (!_responseData.TryGetValue(tns, out var rawReply))
+                {
+                    if (_responseEvents.TryRemove(tns, out var evToDispose))
+                        evToDispose.Dispose();
+                    statusCode = -8;
+                    return null;
+                }
+
+                if (_responseEvents.TryRemove(tns, out var evToDisposeSuccess))
+                    evToDisposeSuccess.Dispose();
+                _responseData.TryRemove(tns, out _);
+
+                var reply = PCCCMessage.FromBytes(rawReply, hasFnc: false);
+                statusCode = reply.Sts;
+                if (statusCode == Sts.ExtStsPresent && reply.Data.Length >= 3)
+                    statusCode = 0x100 + reply.Data[reply.Data.Length - 1];
+
+                return reply;
             }
-            catch (Exception)
+            finally
             {
-                _responseEvents.TryRemove(tns, out _);
-                statusCode = -6; // Send error
-                return null;
+                _requestThrottle.Release(); // Release the throttle slot
             }
-
-            if (!ev.Wait(_responseTimeoutMs))
-            {
-                _responseEvents.TryRemove(tns, out _);
-                statusCode = -20; // Timeout
-                return null;
-            }
-
-            if (!_responseData.TryGetValue(tns, out var rawReply))
-            {
-                _responseEvents.TryRemove(tns, out _);
-                statusCode = -8; // No data returned
-                return null;
-            }
-
-            _responseEvents.TryRemove(tns, out _);
-            _responseData.TryRemove(tns, out _);
-
-            var reply = PCCCMessage.FromBytes(rawReply, hasFnc: false);
-            statusCode = reply.Sts;
-            // Check for extended status (STS = 0xF0)
-            if (statusCode == Sts.ExtStsPresent && reply.Data.Length >= 3)
-                statusCode = 0x100 + reply.Data[reply.Data.Length - 1];
-            return reply;
         }
 
         /// <summary>
@@ -459,6 +508,51 @@ namespace PCCCComm.Pccc
         /// </summary>
         public bool IsTnsPending(ushort tns) => _responseEvents.ContainsKey(tns);
 
+        // --- Circuit Breaker & Bulkhead (Anti-Starvation) ---------------------
+
+        private SemaphoreSlim _requestThrottle;
+        private int _maxConcurrentRequests = 10;
+        private int _requestQueueTimeoutMs = 50;
+        private int _consecutiveTimeouts = 0;
+        private const int DefaultMaxConsecutiveTimeouts = 3;
+        private volatile int _healthState = 1; // 1 = Healthy, 0 = Circuit Open
+
+        /// <summary>
+        /// Gets or sets the maximum number of concurrent PCCC requests allowed.
+        /// Prevents thread pool starvation when many requests are fired simultaneously.
+        /// Default is 10.
+        /// </summary>
+        public int MaxConcurrentRequests
+        {
+            get => _maxConcurrentRequests;
+            set
+            {
+                if (value > 0)
+                {
+                    _maxConcurrentRequests = value;
+                    var old = Interlocked.Exchange(ref _requestThrottle, new SemaphoreSlim(value, value));
+                    old?.Dispose();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the maximum number of consecutive timeouts allowed before
+        /// the circuit breaker trips and blocks further requests.
+        /// Default is 3.
+        /// </summary>
+        public int MaxConsecutiveTimeouts { get; set; } = DefaultMaxConsecutiveTimeouts;
+
+        /// <summary>
+        /// Resets the circuit breaker state. Should be called after a successful reconnection
+        /// (e.g., in OpenComms) to allow requests to flow again.
+        /// </summary>
+        public void ResetHealth()
+        {
+            Interlocked.Exchange(ref _consecutiveTimeouts, 0);
+            Interlocked.Exchange(ref _healthState, 1);
+        }
+
         // --- Cleanup ---------------------------------------------------------
         public void Dispose()
         {
@@ -480,6 +574,7 @@ namespace PCCCComm.Pccc
             // Clear any pending events (without disposing them, as original never disposed)
             _responseEvents.Clear();
             _responseData.Clear();
+            _requestThrottle?.Dispose();
         }
     }
 }
