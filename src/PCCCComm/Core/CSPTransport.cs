@@ -160,6 +160,15 @@ public class CSPTransport : ITransport
     /// </summary>
     public bool IsOpen => _tcp?.Connected == true && !_disposed;
 
+    // First 4 context bytes on the REGISTER frame (Connection submode).
+    // This exact value is REQUIRED by real PLC-5/40E (1785-L40E) hardware:
+    // a register with an all-zero context is silently ignored (no reply), and
+    // other non-zero values are rejected as well — only 00 04 00 05 is accepted
+    // (verified against live hardware 2026-07). RSLinx uses the same value and
+    // the server echoes it back in the reply. The meaning of the individual
+    // bytes is still unknown, but the value is not arbitrary — do not change it.
+    private static readonly byte[] RegisterContextPrefix = { 0x00, 0x04, 0x00, 0x05 };
+
     /// <summary>
     /// Initialises a new CSPv4 transport.
     /// </summary>
@@ -382,6 +391,12 @@ public class CSPTransport : ITransport
         WriteUInt16BE(req, 2, 0);  // data_length = 0
         WriteUInt32BE(req, 4, 0);  // conn_id = 0 (not yet assigned)
         WriteUInt32BE(req, 8, 0);  // status = 0
+
+        // Register context must be non-zero: this CSPv4 PLC/gateway does NOT
+        // reply to a register with an all-zero context. RSLinx uses the value
+        // below and the server echoes it back in the reply. Byte meaning is
+        // unconfirmed (see RegisterContextPrefix) — do not treat as arbitrary.
+        RegisterContextPrefix.CopyTo(req, 12);
 
         lock (_sendLock)
         {
