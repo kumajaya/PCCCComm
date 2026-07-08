@@ -122,6 +122,7 @@ public static class PCCCConstants
         public const byte TypedWrite = 0x67;        // Typed Write for PLC-5 (0x67)
         public const byte WordRangeRead = 0x01;     // Word Range Read for PLC-5 (0x01)
         public const byte WordRangeWrite = 0x00;    // Word Range Write for PLC-5 (0x00)
+        public const byte ReadSectionSize = 0x29;   // Read Section Size for PLC-5 (0x29)
         public const byte ReadBytesPhysical = 0x17; // Read Bytes Physical for PLC-5 (0x17)
         public const byte WriteBytesPhysical = 0x18; // Write Bytes Physical for PLC-5 (0x18)
     }
@@ -483,10 +484,6 @@ public static class PCCCConstants
             public const int ExpansionByteOffset = 2;
             /// <summary>Value of type extender for SLC and MicroLogix families.</summary>
             public const byte TypeExtenderSlcMl = 0xEE;
-
-
-
-
 
             /// <summary>Mask to get high nibble of a byte.</summary>
             public const byte HighNibbleMask = 0xF0;

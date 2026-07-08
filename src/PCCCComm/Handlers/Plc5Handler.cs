@@ -236,8 +236,20 @@ public class Plc5Handler : IPlcHandler
 
             if (AsyncMode)
             {
-                _protocol.SendRequestAsync(req);
-                reply = 0;
+                try
+                {
+                    _protocol.SendRequestAsync(req);
+                    reply = 0;
+                }
+                catch (PCCCException)
+                {
+                    // SendRequestAsync now throws when the circuit breaker is open (see
+                    // PCCCProtocol.SendRequestAsync), so an unreachable PLC no longer silently
+                    // fires writes into the void. Convert that into the same -23 status code
+                    // the sync path returns via SendRequest, so callers of WriteWords/WriteData
+                    // see consistent behavior regardless of AsyncMode.
+                    reply = -23;
+                }
             }
             else
             {
@@ -852,10 +864,14 @@ public class Plc5Handler : IPlcHandler
         {
             int chunkWords = Math.Min(sizeWords - wordsDone, maxWordsPerChunk);
 
-            // TOTAL TRANS must reflect the whole multi-packet transaction (sizeWords), not just
-            // this chunk — the PLC rejects (STS 0xF0) any packet where offset + size > total trans.
+            // TOTAL TRANS must be >= (this packet's absolute PACKET OFFSET + its size), or the
+            // PLC rejects it (STS 0xF0 / EXT STS 0x12 "Invalid parameter"). It's not enough to
+            // use just sizeWords: if the caller's own wordOffset is already non-zero (e.g.
+            // GetDataMemory reading at word offset 35), sizeWords alone undercounts the required
+            // total. Using the absolute end-of-range (wordOffset + sizeWords) satisfies the rule
+            // both for a single call and for every sub-packet of an auto-chunked one.
             byte[] chunk = _protocol.WordRangeRead(logicalAddress, wordOffset + wordsDone, chunkWords,
-                (byte)MyNode, (byte)TargetNode, totalTransWords: sizeWords);
+                (byte)MyNode, (byte)TargetNode, totalTransWords: wordOffset + sizeWords);
 
             int bytesToCopy = Math.Min(chunk.Length, chunkWords * 2);
             Array.Copy(chunk, 0, result, wordsDone * 2, bytesToCopy);
@@ -888,7 +904,9 @@ public class Plc5Handler : IPlcHandler
             throw new ArgumentException("Data must be non‑empty and have even number of bytes.", nameof(data));
 
         int maxBytesPerChunk = PCCCConstants.Df1Limits.MaxWritePayloadPlc5;
-        int totalTransWords = data.Length / 2;
+        // Absolute end-of-range in words — see the matching comment in WordRangeRead for why
+        // this must include the caller's own wordOffset, not just data.Length/2.
+        int totalTransWords = wordOffset + data.Length / 2;
         int bytesDone = 0;
 
         while (bytesDone < data.Length)
@@ -899,8 +917,6 @@ public class Plc5Handler : IPlcHandler
             byte[] chunkData = new byte[chunkBytes];
             Array.Copy(data, bytesDone, chunkData, 0, chunkBytes);
 
-            // TOTAL TRANS must reflect the whole multi-packet write (data.Length/2 words), not
-            // just this chunk's word count — same "offset + size <= total trans" rule as reads.
             _protocol.WordRangeWrite(logicalAddress, wordOffset + bytesDone / 2, chunkData,
                 (byte)MyNode, (byte)TargetNode, totalTransWords: totalTransWords);
 
@@ -1096,87 +1112,126 @@ public class Plc5Handler : IPlcHandler
 
     public int GetSlotCount() => throw new NotSupportedException("I/O config not yet implemented.");
     public IOConfig[] GetIOConfig() => throw new NotSupportedException("I/O config not yet implemented.");
+
     /// <summary>
-    /// Reads the data file directory from PLC-5 using Word Range Read (FNC 0x01).
+    /// Enumerates PLC-5 data files by probing Read Section Size (FNC 0x29) for each candidate
+    /// file number with a file-level (no element) logical address. Reverse-engineered from a
+    /// live RSLinx "Data Monitor" capture: RSLinx itself builds its file list this way — one
+    /// Read Section Size request per file number, 0 through <paramref name="maxFileNumber"/>
+    /// (RSLinx used 0-200) — rather than reading any kind of directory structure.
     ///
-    /// PLC-5 directory is accessed via flat physical memory addressing.
-    /// Step 1: Read 1 word at flat offset 35 (byte 70) = directory size.
-    /// Step 2: Read entire directory from flat offset 0.
-    /// Step 3: Parse entries at offset 79, 10 bytes each:
-    ///   [fileType(1)] [sizeBytes(2,LE)] [fileNum(1)] [addr(4)] [flags(2)]
-    /// Offset 52-53 = number of data files.
+    /// Reply layout (empirically confirmed against two independently-verified live files —
+    /// F13: 254 elements/508 words, F14: 446 elements/892 words — matching exactly):
+    ///   bytes[0-1] = size, in words (LE)
+    ///   bytes[2-3] = count, in elements (LE)
+    ///   bytes[4...] = 1-2 trailing bytes (type/privilege?) — not yet decoded, so FileType
+    ///                 in the result is left as "?" rather than guessed.
+    /// A file that doesn't exist replies with size=0/count=0 (or a PCCCException, which is
+    /// treated as "does not exist" here too) and is skipped.
     ///
-    /// Ref: AB Publication 1770-6.5.16, Chapter 10 (PLC-5 directory layout).
-    ///      Word Range Read: CMD=0x0F, FNC=0x01.
+    /// Ref: AB Publication 1770-6.5.16 p.7-22 ("read section size").
     /// </summary>
-    public DataFileDetails[] GetDataMemory()
+    public DataFileDetails[] GetDataMemory() => GetDataMemory(200);
+
+    /// <summary>
+    /// Overload allowing a narrower/wider file-number scan range than the
+    /// IPlcHandler.GetDataMemory() default of 0-200 (the range RSLinx itself used).
+    ///
+    /// Requests are fired concurrently (bounded by PCCCProtocol.MaxConcurrentRequests,
+    /// default 10) rather than one-at-a-time. A live capture comparison showed RSLinx does
+    /// the same 201-file scan in ~1.9s by pipelining requests instead of waiting for each
+    /// reply before sending the next; a naive sequential loop here took ~10.1s (201 requests
+    /// x ~50ms round trip each). PCCCProtocol.SendRequest is already safe to call
+    /// concurrently — every call gets its own TNS and its own wait handle — so this just
+    /// fans the scan out across worker tasks instead of adding new synchronization.
+    /// </summary>
+    public DataFileDetails[] GetDataMemory(int maxFileNumber)
     {
-        // Logical address for PLC-5 directory: file 0, type 0x24 (directory)
-        byte[] dirAddr = EncodePlc5LogicalAddress(0, 0);
-
-        // Step 1: read 1 word at word offset 35 (byte offset 70) = dirSize field
-        byte[] sizeData = WordRangeRead(dirAddr, 35, 1);
-        if (sizeData == null || sizeData.Length < 2)
-            throw new PCCCException("PLC-5 GetDataMemory: failed to read directory size");
-
-        int dirSize = sizeData[0] | (sizeData[1] << 8);
-        if (dirSize <= 0 || dirSize > 65535)
-            throw new PCCCException($"PLC-5 GetDataMemory: invalid directory size {dirSize}");
-
-        int dirWords = (dirSize + 1) / 2;
-
-        // Step 2: read entire directory with chunking
-        // WordRangeRead max = MaxReadPayloadPlc5 / 2 words per request
-        const int maxWordsPerChunk = PCCCConstants.Df1Limits.MaxReadPayloadPlc5 / 2;  // 118
-        byte[] fzd = new byte[dirWords * 2];
-        int wordsRead = 0;
-        while (wordsRead < dirWords)
+        // Genuine single-threaded pipelining, matching what a live capture showed RSLinx
+        // itself doing: fire every request back to back without waiting for replies (RSLinx's
+        // ~200 requests were sent microseconds apart), THEN collect replies as they arrive,
+        // matched by TNS. This replaces an earlier Parallel.For attempt: spreading the sends
+        // across multiple threads/the MaxConcurrentRequests throttle (built for one request
+        // at a time, not a 200-request burst) caused non-deterministic drops — some requests
+        // waited past the 50ms queue timeout for a free throttle slot and were wrongly treated
+        // as "file doesn't exist". Sending everything from one thread up front sidesteps that
+        // machinery entirely and mirrors the access pattern that's actually proven to work
+        // against this PLC.
+        var pending = new System.Collections.Generic.List<(int fileNumber, ushort tns)>(maxFileNumber + 1);
+        for (int fileNumber = 0; fileNumber <= maxFileNumber; fileNumber++)
         {
-            int chunk = Math.Min(maxWordsPerChunk, dirWords - wordsRead);
-            byte[] part = WordRangeRead(dirAddr, wordsRead, chunk);
-            if (part == null || part.Length == 0)
-                throw new PCCCException("PLC-5 GetDataMemory: failed to read directory chunk");
-            Array.Copy(part, 0, fzd, wordsRead * 2, part.Length);
-            wordsRead += chunk;
+            var req = PCCCMessage.CreateReadSectionSizeRequest(fileNumber, 0, (byte)MyNode, (byte)TargetNode);
+            ushort tns;
+            try
+            {
+                tns = _protocol.BeginRequest(req);
+            }
+            catch (PCCCException)
+            {
+                // Circuit breaker tripped mid-scan (e.g. by a concurrent SendRequest call on
+                // another thread). Stop sending further probes, but still fall through to
+                // collect/clean up the ones already sent below — otherwise their TNS entries
+                // in PCCCProtocol's response tables would never be removed or disposed.
+                break;
+            }
+            pending.Add((fileNumber, tns));
         }
-        if (fzd.Length < PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault)
-            throw new PCCCException("PLC-5 GetDataMemory: directory too small");
-
-        // Step 3: parse — same layout as SLC default
-        int numberOfDataFiles = fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesLo]
-                              | (fzd[PCCCConstants.ResponseOffsets.FileDirectory.NumberOfDataFilesHi] << 8);
 
         var dataFiles = new System.Collections.Generic.List<DataFileDetails>();
-        int pos       = PCCCConstants.ResponseOffsets.FileDirectory.StartOffsetDefault;   // 79
-        const int bpr = PCCCConstants.ResponseOffsets.FileDirectory.BytesPerEntryDefault; // 10
-        int parsed    = 0;
-
-        while (parsed < numberOfDataFiles && pos + bpr <= fzd.Length)
+        foreach (var (fileNumber, tns) in pending)
         {
-            byte fileTypeByte = fzd[pos];
-            // Valid PLC-5 data file types: 0x82–0x9F
-            if (fileTypeByte > 0x81 && fileTypeByte < 0x9F)
+            var reply = _protocol.EndRequest(tns, 5000, out int sts);
+            if (sts != PCCCConstants.Sts.Success || reply?.Data == null || reply.Data.Length < 4)
+                continue; // definitive PLC-side error, or no reply within 5s — file doesn't exist
+
+            int sizeWords = reply.Data[0] | (reply.Data[1] << 8);
+            int countElements = reply.Data[2] | (reply.Data[3] << 8);
+            if (countElements <= 0)
+                continue; // empty/non-existent file
+
+            byte[] trailing = reply.Data.Length > 4
+                ? reply.Data[4..]
+                : Array.Empty<byte>();
+
+            dataFiles.Add(new DataFileDetails
             {
-                int sizeBytes = fzd[pos + 1] | (fzd[pos + 2] << 8);
-                int fileNumber = fzd[pos + 3];
-                string ftStr = PCCCConstants.SlcFileTypeInfo.GetTypeName(
-                    (PCCCConstants.SlcFileTypeCode)fileTypeByte);
-
-                // Read element size from directory, not from static lookup
-                int bpe = fzd[pos + 5];   // byte offset 5 is elemSize
-                if (bpe == 0) bpe = 2;    // fallback safety
-
-                dataFiles.Add(new DataFileDetails
-                {
-                    FileType = ftStr,
-                    NumberOfElements = bpe > 0 ? sizeBytes / bpe : 0,
-                    FileNumber = fileNumber
-                });
-            }
-            parsed++;
-            pos += bpr;
+                FileType = InferFileType(fileNumber, trailing),
+                NumberOfElements = countElements,
+                FileNumber = fileNumber
+            });
         }
+
         return dataFiles.ToArray();
+    }
+
+    /// <summary>
+    /// Maps the Read Section Size reply's trailing byte(s) (after size/count) to a PLC-5 file
+    /// type letter. AB Pub. 1770-6.5.16 doesn't document this byte's bit layout, so this is
+    /// reverse-engineered from a live RSLinx capture cross-referenced with independently
+    /// verified files (F13/F14 -> Float, N20 -> Integer) and AB's default file-number
+    /// convention (0=Output, 1=Input, 2=Status are always reserved regardless of what the
+    /// trailing byte says, since it can't distinguish O/I/S/N from each other on its own).
+    /// Unrecognized patterns fall back to "?" rather than guessing.
+    /// </summary>
+    private static string InferFileType(int fileNumber, byte[] trailing)
+    {
+        if (fileNumber == 0) return "O";
+        if (fileNumber == 1) return "I";
+        if (fileNumber == 2) return "S";
+
+        string key = Convert.ToHexString(trailing);
+        return key switch
+        {
+            "10" => "B",   // Binary/Bit
+            "40" => "N",   // Integer
+            "50" => "T",   // Timer
+            "60" => "C",   // Counter
+            "70" => "R",   // Control
+            "9008" => "F", // Float
+            "9015" => "PD", // PID (164 bytes/element)
+            "9020" => "BT", // Block Transfer (12 bytes/element)
+            _ => "?"
+        };
     }
     public DataFileDetails[] GetML1500DataMemory() => throw new NotSupportedException("ML1500 specific method not applicable.");
     public ushort OpenFile(int fileNumber, int fileType) => throw new NotSupportedException("File-based operations not supported.");

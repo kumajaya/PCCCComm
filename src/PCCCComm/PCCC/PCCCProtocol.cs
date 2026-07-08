@@ -37,6 +37,15 @@ namespace PCCCComm.Pccc
         private readonly ITransport _transport;
         private ushort _nextTns = 1;
         private readonly object _tnsLock = new object();
+        // Serializes the actual wire write. Multiple requests can still be in flight
+        // concurrently (each gets its own TNS and wait handle, and GetDataMemory's parallel
+        // file scan relies on that) — but concurrent unsynchronized writes to the same
+        // socket/stream can interleave two frames' bytes on the wire and corrupt both. A
+        // live concurrency test against a real PLC-5 (parallelized Read Section Size scan)
+        // reproduced exactly this: different, non-deterministic subsets of files "missing"
+        // on every run. Locking only the SendFrame call (not the wait-for-reply) fixes that
+        // while preserving pipelining.
+        private readonly object _sendLock = new object();
         private readonly ConcurrentDictionary<ushort, ManualResetEventSlim> _responseEvents = new();
         private readonly ConcurrentDictionary<ushort, byte[]> _responseData = new();
         private int _responseTimeoutMs = 2000;
@@ -117,7 +126,7 @@ namespace PCCCComm.Pccc
 
                 try
                 {
-                    _transport.SendFrame(request.ToBytes());
+                    lock (_sendLock) { _transport.SendFrame(request.ToBytes()); }
                 }
                 catch (Exception)
                 {
@@ -171,7 +180,12 @@ namespace PCCCComm.Pccc
 
                 var reply = PCCCMessage.FromBytes(rawReply, hasFnc: false);
                 statusCode = reply.Sts;
-                if (statusCode == Sts.ExtStsPresent && reply.Data.Length >= 3)
+                // EXT STS is a single trailing byte (per AB Pub. 1770-6.5.16 ch.8 — e.g. the
+                // "Reply Data: 12" 1-byte payload seen on a rejected Word Range Read). The old
+                // `>= 3` guard meant this branch almost never fired in practice, so real PLC
+                // rejections surfaced as an undecoded raw STS 0xF0 ("Unknown Message - 240")
+                // instead of the actual EXT STS reason.
+                if (statusCode == Sts.ExtStsPresent && reply.Data.Length >= 1)
                     statusCode = 0x100 + reply.Data[reply.Data.Length - 1];
 
                 return reply;
@@ -189,10 +203,20 @@ namespace PCCCComm.Pccc
         public void SendRequestAsync(PCCCMessage request)
         {
             if (!_transport.IsOpen) throw new InvalidOperationException("Transport not open.");
+
+            // Circuit Breaker: this fire-and-forget path bypassed both the breaker and the
+            // bulkhead throttle entirely, meaning AsyncMode writes had none of the
+            // fail-fast/anti-starvation protection that SendRequest provides. The throttle is
+            // intentionally still not acquired here (this path is meant to be non-blocking),
+            // but an open breaker must still stop the send — otherwise AsyncMode writes keep
+            // going out to a PLC already known to be unreachable.
+            if (_healthState == 0)
+                throw new PCCCException(PCCCErrors.DecodeStatus(-23));
+
             ushort tns = request.Tns == 0 ? GetNextTns() : request.Tns;
             request.Tns = tns;
             // No event registration; just send.
-            _transport.SendFrame(request.ToBytes());
+            lock (_sendLock) { _transport.SendFrame(request.ToBytes()); }
         }
 
         // --- Basic single-PDU operations ------------------------------------
@@ -481,6 +505,115 @@ namespace PCCCComm.Pccc
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success)
                 throw new PCCCException($"WordRangeWrite failed: {PCCCErrors.DecodeStatus(sts)}");
+        }
+
+        /// <summary>
+        /// Performs a Read Section Size (PLC-5, FNC=0x29) for a whole file (no element level).
+        /// Returns the raw reply bytes: [SizeWords(2,LE)][CountElements(2,LE)] plus 1-2 trailing
+        /// type/privilege bytes the meaning of which isn't fully reverse-engineered yet.
+        /// Returns null (rather than throwing) when the file doesn't exist, since that's the
+        /// expected/common case while probing a range of file numbers for GetDataMemory.
+        /// </summary>
+        public byte[]? ReadSectionSize(int fileNumber, byte myNode, byte targetNode, out int statusCode)
+        {
+            var req = PCCCMessage.CreateReadSectionSizeRequest(fileNumber, 0, myNode, targetNode);
+            var reply = SendRequest(req, out statusCode);
+            if (statusCode != Sts.Success || reply?.Data == null || reply.Data.Length < 4)
+                return null;
+            return reply.Data;
+        }
+
+        /// <summary>
+        /// Sends a request without waiting for the reply, returning the TNS to collect it
+        /// later with <see cref="EndRequest"/>. Deliberately bypasses the circuit breaker and
+        /// the MaxConcurrentRequests throttle (both designed around one request at a time) —
+        /// this pair exists specifically for bulk scans (see Plc5Handler.GetDataMemory) that
+        /// need genuine single-threaded pipelining: send everything first (like RSLinx does —
+        /// a live capture showed it firing ~200 requests back to back within microseconds,
+        /// not waiting for each reply), then collect replies afterward, possibly out of order.
+        /// All sends happen on the calling thread, so no _sendLock contention or interleaving
+        /// risk from multiple threads writing to the transport concurrently.
+        /// </summary>
+        public ushort BeginRequest(PCCCMessage request)
+        {
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            if (!_transport.IsOpen) throw new InvalidOperationException("Transport is not open.");
+
+            // Circuit Breaker: this pair deliberately bypasses the throttle/bulkhead (see
+            // remarks above), but it must NOT bypass the breaker itself — otherwise a bulk
+            // scan (e.g. Plc5Handler.GetDataMemory) would fire 200+ requests at an
+            // already-unreachable PLC, each waiting the full EndRequest timeout, instead of
+            // failing fast the same way SendRequest does.
+            if (_healthState == 0)
+                throw new PCCCException(PCCCErrors.DecodeStatus(-23));
+
+            ushort tns = request.Tns;
+            if (tns == 0)
+            {
+                tns = GetNextTns();
+                request.Tns = tns;
+            }
+
+            var ev = new ManualResetEventSlim(false);
+            _responseEvents[tns] = ev;
+            _responseData.TryRemove(tns, out _);
+
+            lock (_sendLock) { _transport.SendFrame(request.ToBytes()); }
+            return tns;
+        }
+
+        /// <summary>Waits for and decodes the reply to a request previously sent with
+        /// <see cref="BeginRequest"/>. See BeginRequest for why this pair exists.</summary>
+        public PCCCMessage? EndRequest(ushort tns, int timeoutMs, out int statusCode)
+        {
+            statusCode = 0;
+
+            if (!_responseEvents.TryGetValue(tns, out var ev))
+            {
+                statusCode = -8;
+                return null;
+            }
+
+            if (!ev.Wait(timeoutMs))
+            {
+                if (_responseEvents.TryRemove(tns, out var evTimeout))
+                    evTimeout.Dispose();
+
+                // Circuit Breaker: deliberately NOT counted here. Unlike SendRequest, a
+                // timeout on this bulk-scan path (see BeginRequest/EndRequest remarks) is the
+                // expected, normal outcome for probing an item that doesn't exist — e.g.
+                // Plc5Handler.GetDataMemory scans file numbers 0-200 and a real PLC-5 may
+                // simply not reply at all for a file number that isn't in use. Tripping the
+                // breaker here would misread "this file doesn't exist" (near-certain to happen
+                // repeatedly during a normal scan) as "the PLC is unreachable", aborting the
+                // scan early and leaving the breaker open for every other operation afterward.
+                statusCode = -20;
+                return null;
+            }
+
+            if (_responseEvents.TryRemove(tns, out var evDone))
+                evDone.Dispose();
+
+            if (!_responseData.TryGetValue(tns, out var rawReply))
+            {
+                statusCode = -8;
+                return null;
+            }
+            _responseData.TryRemove(tns, out _);
+
+            // Circuit Breaker: a successful reply means the PLC is reachable, so reset the
+            // same counters SendRequest resets on success — otherwise a breaker already open
+            // (tripped by earlier SendRequest timeouts) would stay stuck open even though a
+            // bulk scan just proved the PLC answers fine.
+            Interlocked.Exchange(ref _consecutiveTimeouts, 0);
+            Interlocked.Exchange(ref _healthState, 1);
+
+            var reply = PCCCMessage.FromBytes(rawReply, hasFnc: false);
+            statusCode = reply.Sts;
+            if (statusCode == Sts.ExtStsPresent && reply.Data.Length >= 1)
+                statusCode = 0x100 + reply.Data[reply.Data.Length - 1];
+
+            return reply;
         }
 
         /// <summary>Reads raw physical memory from PLC-5.</summary>

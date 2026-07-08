@@ -626,6 +626,35 @@ namespace PCCCComm.Pccc
                 PCCCConstants.Fnc.WordRangeWrite, body.ToArray());
         }
 
+        /// <summary>
+        /// Creates a Read Section Size request (CMD=0x0F, FNC=0x29) for a file-level PLC-5
+        /// logical binary address (AB Pub. 1770-6.5.16 p.7-22, p.13-11/13-12). Encodes a
+        /// 2-level address — level 1 (data table area, always 0) and level 2 (file number) —
+        /// with no element level, which is what makes the PLC return whole-file info: reply
+        /// = [SizeWords(2,LE)][CountElements(2,LE)] plus 1-2 trailing type/privilege bytes
+        /// (empirically verified against a live PLC-5: file 13 -> size=508, count=254 words/
+        /// elements, matching an independently-read 254-element Float file).
+        /// </summary>
+        public static PCCCMessage CreateReadSectionSizeRequest(int fileNumber, ushort tns, byte myNode, byte targetNode)
+        {
+            var body = new List<byte>();
+            body.Add(0x03); // mask: level 1 (data table area) + level 2 (file number)
+            body.Add(0x00); // level 1: data table area, always 0
+            if (fileNumber < 255)
+            {
+                body.Add((byte)fileNumber);
+            }
+            else
+            {
+                body.Add(0xFF);
+                body.Add((byte)(fileNumber & 0xFF));
+                body.Add((byte)((fileNumber >> 8) & 0xFF));
+            }
+
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.ReadSectionSize, body.ToArray());
+        }
+
         /// <summary>Creates a Read Bytes Physical request (CMD=0x0F, FNC=0x17).</summary>
         public static PCCCMessage CreateReadBytesPhysicalRequest(int address, int bytesToRead,
             ushort tns, byte myNode, byte targetNode)
