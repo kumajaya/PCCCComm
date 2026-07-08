@@ -296,6 +296,7 @@ class Program
     // ── Keepalive / auto-reconnect ────────────────────────────────────────────
 
     private static volatile bool _keepaliveRunning = false;
+    private static volatile bool _keepaliveEnabled = true;
     private static TimeSpan      _keepaliveInterval = TimeSpan.FromSeconds(5);
     private const  int           KeepaliveFailThreshold = 2;
     private static volatile bool _linkConnected = true;
@@ -304,6 +305,7 @@ class Program
     private static void StartKeepalive(Comm.PCCCComm pccc, Config cfg)
     {
         _keepaliveRunning = true;
+        _keepaliveEnabled = true;
         _linkConnected    = true;
         var thread = new System.Threading.Thread(() =>
         {
@@ -312,6 +314,7 @@ class Program
             {
                 System.Threading.Thread.Sleep(_keepaliveInterval);
                 if (!_keepaliveRunning) break;
+                if (!_keepaliveEnabled) continue;
                 if (!_linkConnected) continue;
                 try { pccc.Echo(new byte[] { 0xAA }); failures = 0; }
                 catch
@@ -774,6 +777,28 @@ class Program
         Console.WriteLine($"  {files.Length} file(s) total.");
     }
 
+    private static void HandleKeepalive(string[] parts)
+    {
+        if (parts.Length < 2)
+        {
+            Console.WriteLine($"Keepalive is {( _keepaliveEnabled ? "ON" : "OFF")}");
+            return;
+        }
+        string sub = parts[1].ToLowerInvariant();
+        if (sub == "on")
+        {
+            _keepaliveEnabled = true;
+            Console.WriteLine("Keepalive enabled.");
+        }
+        else if (sub == "off")
+        {
+            _keepaliveEnabled = false;
+            Console.WriteLine("Keepalive disabled.");
+        }
+        else
+            Console.WriteLine("Usage: keepalive [on|off]");
+    }
+
     private static int Plc5FileTypeCode(string letter) => letter switch
     {
         "O" => 0x00, "I" => 0x01, "S" => 0x02, "B" => 0x03, "T" => 0x04, "C" => 0x05, "R" => 0x06, "N" => 0x07,
@@ -828,6 +853,7 @@ class Program
                     case "setmaster"  when parts.Length >= 2: HandlePassword(pccc, 0x10, parts[1], "Master",   read: false); break;
                     case "clearpass":   HandlePassword(pccc, 0x0B, "",       "Password", read: false); break;
                     case "clearmaster": HandlePassword(pccc, 0x10, "",       "Master",   read: false); break;
+                    case "keepalive":   HandleKeepalive(parts); break;
                     default: Console.WriteLine($"Unknown command '{cmd}'. Type 'help' for list."); break;
                 }
             }
@@ -1750,6 +1776,7 @@ class Program
         Console.WriteLine("Node management (DF1/RS-485):");
         Console.WriteLine("  scannodes [from] [to]          Scan node range (default: 1–31)");
         Console.WriteLine("  settarget <node>               Change target node at runtime");
+        Console.WriteLine("  keepalive [on|off]             Enable/disable periodic connection test (Echo)");
         Console.WriteLine();
         Console.WriteLine("Advanced:");
         Console.WriteLine("  echo [hex byte...]             Send Echo command and verify response");
