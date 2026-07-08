@@ -383,7 +383,7 @@ public sealed class CSPTransport : ILinkTransport
                         CSPCapture.Append(_transport.CaptureLogPath, "RX", _connId, fullPacket, fullPacket.Length, dataLen, mode, submode);
                     }
 
-                    await Dispatch(mode, submode, payload, dataLen).ConfigureAwait(false);
+                    await Dispatch(header, mode, submode, payload, dataLen).ConfigureAwait(false);
                 }
                 catch (IOException) { break; }
                 catch (OperationCanceledException) { break; }
@@ -407,7 +407,10 @@ public sealed class CSPTransport : ILinkTransport
             return total;
         }
 
-        private async Task Dispatch(byte mode, byte submode, byte[] payload, ushort dataLen)
+        /// <summary>
+        /// Dispatches a received frame to the appropriate handler based on its submode.
+        /// </summary>
+        private async Task Dispatch(byte[] header, byte mode, byte submode, byte[] payload, ushort dataLen)
         {
             if (mode != MODE_REQUEST)
             {
@@ -417,7 +420,7 @@ public sealed class CSPTransport : ILinkTransport
 
             if (submode == SUBMODE_CONNECTION)
             {
-                await HandleConnectionRegister().ConfigureAwait(false);
+                await HandleConnectionRegister(header).ConfigureAwait(false);
                 return;
             }
 
@@ -457,12 +460,11 @@ public sealed class CSPTransport : ILinkTransport
         }
 
         /// <summary>
-        /// VERIFY: Connection-submode register handshake payload shape is
-        /// assumed to be a bare 28-byte header on both sides (no LSAP/PCCC
-        /// body), with conn_id assigned here and echoed by the client on
-        /// every later frame.
+        /// Handles the Connection-submode register request (submode 0x01).
+        /// Echoes the 16-byte context from the request header in the response.
+        /// The client (e.g., RSLinx, PCCCComm) requires this exact echo to validate the session.
         /// </summary>
-        private async Task HandleConnectionRegister()
+        private async Task HandleConnectionRegister(byte[] requestHeader)
         {
             var response = new byte[CSPHeaderLen];
             response[0] = MODE_RESPONSE;
@@ -470,6 +472,15 @@ public sealed class CSPTransport : ILinkTransport
             WriteUInt16BE(response, 2, 0);       // data_length = 0
             WriteUInt32BE(response, 4, _connId); // assigned connection id
             WriteUInt32BE(response, 8, CSP_STATUS_OK);
+
+            // Echo the 16-byte context from the request (offset 12-27) back to the client.
+            // Real PLC-5/40E hardware over CSPv4 does this: it accepts a non-zero register
+            // context and echoes it back verbatim in the reply (observed via capture; a
+            // request with an all-zero context was never answered by that unit). We mirror
+            // that behavior here so this emulator matches the wire format. Whether PCCCComm
+            // itself validates the echoed context (and would reject a wrong echo) has not
+            // been tested — only the PLC's send-side behavior is confirmed.
+            Array.Copy(requestHeader, 12, response, 12, 16);
 
             await SendRawResponse(response, response.Length, MODE_RESPONSE, SUBMODE_CONNECTION).ConfigureAwait(false);
             _isRegistered = true;

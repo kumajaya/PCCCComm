@@ -452,6 +452,12 @@ public class PlcMemory : IDisposable
     /// </summary>
     private void BuildIoConfig()
     {
+        // I/O configuration file (0x60, 0) is specific to SLC/MicroLogix families.
+        // PLC-5 does not use this file; skip to avoid clashing with data file 0 (O0).
+        if (_family != PCCCEmulator.EmulationFamily.SlcMicroLogix &&
+            _family != PCCCEmulator.EmulationFamily.Ml1400)
+            return;
+
         // Buffer = 4 + 8×6 + 2 = 54 bytes minimum; padded to 64 for safety
         CreateDataFile(0x60, 0, 64, 2);
         byte[] io = _files[(0x60, 0)];
@@ -481,6 +487,11 @@ public class PlcMemory : IDisposable
     /// </summary>
     private void BuildDownloadSeed()
     {
+        // Download seed file (0x63, 0) is specific to ML1400 download procedure.
+        // Skip for other families to avoid clashing with data file 0.
+        if (_family != PCCCEmulator.EmulationFamily.Ml1400)
+            return;
+
         CreateDataFile(0x63, 0, 4, 4);
         // Seed with hardware-verified value (little-endian: 08 91 = 0x9108)
         if (_files.TryGetValue((0x63, 0), out var buf) && buf.Length >= 2)

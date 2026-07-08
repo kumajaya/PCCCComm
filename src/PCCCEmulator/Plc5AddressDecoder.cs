@@ -3,9 +3,6 @@
 // PCCCEmulator - PCCC Engine and Transports for .NET
 // Copyright (c) 2026 Ketut Kumajaya
 // 
-// Initial reference: DF1Comm.vb (Archie Jacobs); implementation substantially modified.
-// which was released under GPLv2-or-later.
-// 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
@@ -26,59 +23,149 @@ using System.Text.RegularExpressions;
 /// Decodes PLC-5 logical addresses (binary or ASCII) from a byte stream.
 /// Reference: AB Publication 1770-6.5.16, Chapter 13.
 ///
-/// BINARY ADDRESS FORMAT (mask byte + level bytes):
-///   Byte 0 — mask: bits [7:4] = level count (2–4), bit [3] = hasSubElement flag
-///   Each level: 1 byte if value < 255; 3 bytes (0xFF, lo, hi) if value >= 255
-///   Level order: [0]=fileNumber, [1]=fileType, [2]=element, [3]=subElement
+/// Two binary address formats are supported:
 ///
-/// ASCII ADDRESS FORMAT (logical address string, null-terminated):
-///   Byte 0 = 0x00, Byte 1 = '$' (0x24), then ASCII string, then 0x00 terminator
-///   String format: "N7:0", "F8:2", "T4:1/ACC", etc.
+/// 1. Legacy SLC/DF1 format (mask bits [7:4] = level count, bit [3] = sub‑element flag):
+///    Byte 0 — mask: bits [7:4] = level count (2–4), bit [3] = hasSubElement
+///    Each level: 1 byte if value < 255; 3 bytes (0xFF, lo, hi) if value >= 255
+///    Level order: [0]=fileNumber, [1]=fileType, [2]=element, [3]=subElement
 ///
-/// PLC-5 FILE TYPE CODES (1770-6.5.16 Table 13-1):
-///   0x00=O(Output)  0x01=I(Input)  0x02=S(Status)  0x03=B(Bit)
-///   0x04=T(Timer)   0x05=C(Counter) 0x06=R(Control) 0x07=N(Integer)
-///   0x08=F(Float)   0x09=D(BCD)     0x0A=ST(String) 0x0B=A(ASCII)
-///   0x0C=L(Long)    0x0D=MG(Msg)    0x0E=PD(PID)    0x0F=PLS
+/// 2. PLC‑5‑compatible format (used by PCCCComm.Plc5Handler.EncodePlc5LogicalAddress
+///    and by RSLinx for Word Range Read/Write):
+///    Byte 0 — mask bit flags:
+///       bit 0 (0x01) = Level 1 (Data Table Area) — default 0, rarely used
+///       bit 1 (0x02) = Level 2 (File Number)     — default 1 if not present
+///       bit 2 (0x04) = Level 3 (Element)         — default 0 if not present
+///       bit 3 (0x08) = Level 4 (Sub‑Element)     — default 0 if not present
+///    There is NO separate "file type" level; the file type is determined
+///    by the file number and the context of the command.
+///
+/// ASCII format (same for both):
+///    Byte 0 = 0x00, Byte 1 = '$' (0x24), then ASCII string, then 0x00 terminator
+///    String format: "N7:0", "F8:2", "T4:1/ACC", etc.
 /// </summary>
 public static class Plc5AddressDecoder
 {
     /// <summary>
     /// Decodes a PLC-5 logical binary address from the buffer, advancing <paramref name="offset"/>.
+    /// Supports both legacy (level‑count in high nibble) and PLC‑5‑compatible (bit‑flag) masks.
+    ///
+    /// For legacy format, fileType is set to the value from level 1.
+    /// For bit‑flag format, fileType is set to 0 (since it is not encoded).
     /// </summary>
     public static bool Decode(byte[] data, ref int offset,
         out int fileNumber, out int fileType, out int element, out int subElement)
     {
-        fileNumber = fileType = element = subElement = 0;
+        fileNumber = 1;  // default file number per spec
+        fileType = 0;    // default (not encoded in bit‑flag format)
+        element = 0;
+        subElement = 0;
+
         if (offset >= data.Length) return false;
 
-        byte mask       = data[offset++];
-        int  levelCount = (mask >> 4) & 0x0F;
-        bool hasSub     = (mask & 0x08) != 0;
+        byte mask = data[offset++];
 
-        if (levelCount < 2 || levelCount > 4) return false;
+        // --- Detect which format is being used ---
+        // Legacy format: high nibble contains level count (2–4).
+        int levelCount = (mask >> 4) & 0x0F;
+        bool isLegacy = (levelCount >= 2 && levelCount <= 4);
 
-        int[] levels = new int[4];
-        for (int i = 0; i < levelCount; i++)
+        if (isLegacy)
         {
-            if (offset >= data.Length) return false;
-            if (data[offset] == 0xFF)
+            // Legacy SLC/DF1 format: read levels sequentially.
+            bool hasSub = (mask & 0x08) != 0;
+            int[] levels = new int[4];
+            for (int i = 0; i < levelCount; i++)
             {
-                if (offset + 3 > data.Length) return false;
-                levels[i] = data[offset + 1] | (data[offset + 2] << 8);
-                offset += 3;
+                if (offset >= data.Length) return false;
+                if (data[offset] == 0xFF)
+                {
+                    if (offset + 3 > data.Length) return false;
+                    levels[i] = data[offset + 1] | (data[offset + 2] << 8);
+                    offset += 3;
+                }
+                else
+                {
+                    levels[i] = data[offset++];
+                }
             }
-            else
-            {
-                levels[i] = data[offset++];
-            }
+
+            fileNumber = levels[0];
+            fileType   = levels[1];
+            element    = levelCount >= 3 ? levels[2] : 0;
+            subElement = hasSub && levelCount >= 4 ? levels[3] : 0;
+            return true;
         }
 
-        fileNumber = levels[0];
-        fileType   = levels[1];
-        element    = levelCount >= 3 ? levels[2] : 0;
-        subElement = hasSub && levelCount >= 4 ? levels[3] : 0;
+        // --- PLC‑5‑compatible bit‑flag format ---
+        // Mask bits:
+        //   bit 0 (0x01) = Level 1 (Data Table Area) — default 0, ignored
+        //   bit 1 (0x02) = Level 2 (File Number)     — default 1
+        //   bit 2 (0x04) = Level 3 (Element)         — default 0
+        //   bit 3 (0x08) = Level 4 (Sub‑Element)     — default 0
+        if ((mask & 0x06) == 0) // at least file number or element must be present
+        {
+            // If neither bit 1 nor bit 2 is set, this is not a valid address mask.
+            return false;
+        }
+
+        // Level 1 (bit 0) – Data Table Area (usually 0)
+        if ((mask & 0x01) != 0)
+        {
+            if (offset >= data.Length) return false;
+            int _ = ReadLevelValue(data, ref offset);
+            // ignore the value; it is almost always 0
+        }
+
+        // Level 2 (bit 1) – File Number
+        if ((mask & 0x02) != 0)
+        {
+            if (offset >= data.Length) return false;
+            fileNumber = ReadLevelValue(data, ref offset);
+            if (fileNumber < 0 || fileNumber > 255) return false;
+        }
+        // else fileNumber remains 1 (default)
+
+        // Level 3 (bit 2) – Element
+        if ((mask & 0x04) != 0)
+        {
+            if (offset >= data.Length) return false;
+            element = ReadLevelValue(data, ref offset);
+            if (element < 0 || element > 65535) return false;
+        }
+        // else element remains 0
+
+        // Level 4 (bit 3) – Sub‑Element
+        if ((mask & 0x08) != 0)
+        {
+            if (offset >= data.Length) return false;
+            subElement = ReadLevelValue(data, ref offset);
+            if (subElement < 0 || subElement > 65535) return false;
+        }
+        // else subElement remains 0
+
+        // fileType is not encoded in the bit‑flag format; leave it as 0.
         return true;
+    }
+
+    /// <summary>
+    /// Reads a level value from the buffer. If the byte is 0xFF, reads the next
+    /// two bytes as a little‑endian 16‑bit value. Otherwise returns the byte.
+    /// </summary>
+    private static int ReadLevelValue(byte[] data, ref int offset)
+    {
+        if (data[offset] != 0xFF)
+        {
+            return data[offset++];
+        }
+        else
+        {
+            if (offset + 3 > data.Length) return 0;
+            offset++; // skip 0xFF
+            int value = data[offset] | (data[offset + 1] << 8);
+            offset += 2;
+            return value;
+        }
     }
 
     /// <summary>
@@ -112,8 +199,6 @@ public static class Plc5AddressDecoder
         if (string.IsNullOrEmpty(addr)) return false;
 
         addr = addr.ToUpperInvariant();
-        // Group2 (file number) is now optional (\d*)
-        // Group3 (element) allows hex digits because PLC-5 I/O uses octal
         var m = Regex.Match(addr, @"^([A-Z]+)(\d*):([0-9A-Fa-f]+)(?:[/\.](\w+))?$");
         if (!m.Success) return false;
 
@@ -122,20 +207,18 @@ public static class Plc5AddressDecoder
         string elementStr = m.Groups[3].Value;
         string subStr     = m.Groups[4].Success ? m.Groups[4].Value : "";
 
-        // Handle implicit file numbers for PLC-5 I/O and Status
         if (string.IsNullOrEmpty(fileNumStr))
         {
             if (filePrefix == "O")      fileNumber = 0;
             else if (filePrefix == "I") fileNumber = 1;
             else if (filePrefix == "S") fileNumber = 2;
-            else return false; // Other file types must specify number
+            else return false;
         }
         else
         {
             if (!int.TryParse(fileNumStr, out fileNumber)) return false;
         }
 
-        // Parse element: octal for O/I files, decimal otherwise
         if (filePrefix == "O" || filePrefix == "I")
         {
             try { element = Convert.ToInt32(elementStr, 8); }
@@ -146,7 +229,6 @@ public static class Plc5AddressDecoder
             if (!int.TryParse(elementStr, out element)) return false;
         }
 
-        // Map PLC-5 file type code (same as before)
         fileType = filePrefix switch
         {
             "O"   => 0x00,
@@ -168,7 +250,6 @@ public static class Plc5AddressDecoder
             _     => 0x00
         };
 
-        // Parse subElement (bit or timer/counter member) – unchanged from original
         subElement = subStr switch
         {
             "PRE" => 1, "ACC" => 2,
@@ -181,40 +262,15 @@ public static class Plc5AddressDecoder
     }
 
     /// <summary>
-    /// Parses the address portion of a Word Range Read/Write payload and returns the
-    /// resolved file coordinates and the index of the first data byte.
+    /// Parses the address portion of a Word Range Read/Write payload.
+    /// Supports two formats used by RSLinx and PLC-5:
     ///
-    /// Two wire formats are handled:
+    /// 1. RSLinx flat 10-byte header (used for data file access):
+    ///    [00 00][sizeWords 1B][00][0F 00][fileNum 1B][element 1B][subElement 1B][byteCount 1B]
     ///
-    ///   A) PLC-5 standard (1770-6.5.16 §7-8)
-    ///      [wordOffset 2B LE] [totalTrans 2B LE — ignored]
-    ///      [logical address — binary or ASCII (variable)]
-    ///      [sizeWords 2B LE]
-    ///
-    ///   B) RSLinx flat 10-byte header (observed from DF1 capture)
-    ///      [00 00] [sizeWords 1B] [00] [0F 00] [fileNum 1B] [element 1B] [subElement 1B] [byteCount 1B]
-    ///      - byte0-1: ignored (wordOffset, always 0)
-    ///      - byte2: sizeWords
-    ///      - byte3: 0x00
-    ///      - byte4-5: constant (0x0F 0x00) used as discriminator
-    ///      - byte6: fileNumber
-    ///      - byte7: element
-    ///      - byte8: subElement
-    ///      - byte9: byteCount (sizeWords * 2)
-    ///
-    ///   Format is identified by inspecting the candidate mask byte at payload[4]:
-    ///   a valid PLC-5 binary address mask has level count 2–4 in bits [7:4].
-    ///   RSLinx flat format has fileNum_hi (0x00) there, giving level count 0.
-    ///
-    /// On success, <paramref name="dataStart"/> points to the first write-data byte
-    /// (for Read, it points past the end of the address fields — not used).
-    ///
-    /// For standard format (PLC-5 logical addressing), <paramref name="rawFileType"/> is set
-    /// to the wire file type code (0x00-0x0F per Table 13-1). For flat format,
-    /// <paramref name="rawFileType"/> is set to 0 and the caller must resolve the actual
-    /// file type from the file number (e.g., via PlcMemory.GetFileTypeForNumber).
+    /// 2. PLC-5 standard format (1770-6.5.16 §7-8) — binary or ASCII address.
     /// </summary>
-    public static bool TryDecodeWordRangeAddress(
+    public static bool TryDecodeWordRangeReadAddress(
         byte[] payload,
         out int fileNumber, out int rawFileType,
         out int element,    out int subElement,
@@ -225,56 +281,97 @@ public static class Plc5AddressDecoder
         isFlatFormat = false;
         if (payload == null || payload.Length < 8) return false;
 
-        // Discriminate by the candidate mask byte at payload[4].
-        // Standard format: payload[4] is the binary address mask byte, level count 2–4.
-        // RSLinx flat:     payload[4] is 0x0F (constant), level count = 0.
-        // ASCII marker:    payload[4] == 0x00 && payload[5] == 0x24 ('$').
-        int levelCount = (payload[4] >> 4) & 0x0F;
-        bool isStandard = (levelCount >= 2 && levelCount <= 4)
-                        || (payload[4] == 0x00 && payload.Length > 5 && payload[5] == 0x24);
-
-        if (isStandard)
+        // ─── Format 1: RSLinx flat 10-byte header ──────────────────────────────
+        if (payload.Length >= 10 && payload[4] == 0x0F && payload[5] == 0x00)
         {
-            // --- Format A: PLC-5 standard ---
-            if (payload.Length < 9) return false;
-
-            int idx = 0;
-            wordOffset = payload[idx] | (payload[idx + 1] << 8); idx += 2;
-            idx += 2; // skip totalTrans — not used
-
-            // Decode the logical address (binary or ASCII) into components
-            bool ok = (payload[idx] == 0x00 && idx + 1 < payload.Length && payload[idx + 1] == 0x24)
-                ? TryParseAsciiAddress(payload, ref idx,
-                    out fileNumber, out rawFileType, out element, out subElement)
-                : Decode(payload, ref idx,
-                    out fileNumber, out rawFileType, out element, out subElement);
-            if (!ok) return false;
-
-            if (idx + 2 > payload.Length) return false;
-            sizeWords = payload[idx] | (payload[idx + 1] << 8); idx += 2;
-            dataStart = idx;
-            isFlatFormat = false;
-        }
-        else
-        {
-            // --- Format B: RSLinx flat 10-byte header ---
-            if (payload.Length < 10) return false;
-
             wordOffset = 0;
             sizeWords  = payload[2];
-            // payload[3]    = 0x00 padding
-            // payload[4..5] = 0x0F 0x00 (constant)
-            fileNumber  = payload[6];
-            element     = payload[7];
-            subElement  = payload[8];
-            // rawFileType not present in flat format; set to 0 and caller must resolve.
+            fileNumber = payload[6];
+            element    = payload[7];
+            subElement = payload[8];
             rawFileType = 0;
             dataStart = 10;
             isFlatFormat = true;
-            // Optional debug: Logger.Debug(null, $"WR flat: file={fileNumber} elem={element} words={sizeWords}");
+            return sizeWords > 0;
         }
 
+        // ─── Format 2: PLC-5 standard ──────────────────────────────────────────
+        // Check for ASCII marker.
+        bool isAscii = (payload[4] == 0x00 && payload.Length > 5 && payload[5] == 0x24);
+
+        // Check for binary mask: legacy (high nibble 2–4) or PLC‑5‑compatible (bit‑flag).
+        byte mask = payload[4];
+        bool isLegacyMask = ((mask >> 4) >= 2 && (mask >> 4) <= 4);
+        bool isPlc5Mask   = ((mask & 0xF0) == 0 && (mask & 0x06) != 0);
+        bool isStandard   = isAscii || isLegacyMask || isPlc5Mask;
+
+        if (!isStandard) return false;
+
+        int idx = 0;
+        if (idx + 4 > payload.Length) return false;
+        wordOffset = payload[idx] | (payload[idx + 1] << 8); idx += 2;
+        idx += 2; // skip totalTrans
+
+        bool ok = isAscii
+            ? TryParseAsciiAddress(payload, ref idx,
+                out fileNumber, out rawFileType, out element, out subElement)
+            : Decode(payload, ref idx,
+                out fileNumber, out rawFileType, out element, out subElement);
+        if (!ok) return false;
+
+        // Size is a single BYTE-count byte (max 244 per AB Pub. 1770-6.5.16), not a 2-byte
+        // word count — matching what Plc5Handler.CreateWordRangeReadRequest actually puts on
+        // the wire (and the same 1-byte convention EncodeReadBody uses for the SLC-style
+        // Typed Read). The previous 2-byte read here required a 9th byte that a minimal
+        // 2-level address (mask+fileNumber+element, 3 bytes) + 1-byte Size never sends,
+        // making every PLC-5-format Word Range Read (e.g. "N7:0") fail before parsing.
+        if (idx + 1 > payload.Length) return false;
+        int byteCount = payload[idx]; idx += 1;
+        sizeWords = byteCount / 2;
+        dataStart = idx;
+        isFlatFormat = false;
         return sizeWords > 0;
+    }
+
+    /// <summary>
+    /// Parses the address portion of a Word Range Write payload (FNC 0x00).
+    /// Format: [PktOff 2B][TotTrans 2B][address var][data]
+    /// There is NO separate Size field; data starts immediately after the address.
+    /// </summary>
+    public static bool TryDecodeWordRangeWriteAddress(
+        byte[] payload,
+        out int fileNumber, out int rawFileType,
+        out int element,    out int subElement,
+        out int wordOffset, out int dataStart)
+    {
+        fileNumber = rawFileType = element = subElement = wordOffset = dataStart = 0;
+        if (payload == null || payload.Length < 8) return false;
+
+        int idx = 0;
+        wordOffset = payload[idx] | (payload[idx + 1] << 8); idx += 2;
+        idx += 2; // skip totalTrans
+
+        // Check for ASCII marker.
+        bool isAscii = (payload[idx] == 0x00 && payload.Length > idx + 1 && payload[idx + 1] == 0x24);
+
+        // Check for binary mask: legacy (high nibble 2–4) or PLC‑5‑compatible (bit‑flag).
+        byte mask = payload[idx];
+        bool isLegacyMask = ((mask >> 4) >= 2 && (mask >> 4) <= 4);
+        bool isPlc5Mask   = ((mask & 0xF0) == 0 && (mask & 0x06) != 0);
+        bool isStandard   = isAscii || isLegacyMask || isPlc5Mask;
+
+        if (!isStandard || payload.Length < idx + 1) return false;
+
+        bool ok = isAscii
+            ? TryParseAsciiAddress(payload, ref idx,
+                out fileNumber, out rawFileType, out element, out subElement)
+            : Decode(payload, ref idx,
+                out fileNumber, out rawFileType, out element, out subElement);
+        if (!ok) return false;
+
+        // For Write, data starts at idx (no Size field)
+        dataStart = idx;
+        return true;
     }
 
     /// <summary>

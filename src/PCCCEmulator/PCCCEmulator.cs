@@ -602,8 +602,8 @@ public class PCCCEmulator : IDisposable
             // Acknowledged commands (no processing required)
             case 0x11:  // Get Edit Resource
             case 0x12:  // Return Edit Resource
-            case 0x29:  // Unrecognized (sent by RSLinx during auto-configure)
-                SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+            case 0x29:  // Read Section Size (PLC-5 upload/download procedure)
+                HandleReadSectionSize(src, tns, data, clientContext);
                 break;
 
             case 0x88:  // Execute Command List (download initialization)
@@ -1357,7 +1357,24 @@ public class PCCCEmulator : IDisposable
             SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
             return;
         }
-        fileType = Plc5AddressDecoder.Plc5ToSlcFileType(fileType);
+
+        // Determine actual file type
+        int actualFileType;
+        if (fileType == 0)
+        {
+            // Bit-flag format: file type not encoded; resolve from file number
+            actualFileType = _memory.GetFileTypeForNumber(fileNumber);
+            if (actualFileType == 0)
+            {
+                SendErrorResponse(src, tns, 0x0F, 0x67, 0x50, clientContext);
+                return;
+            }
+        }
+        else
+        {
+            // Legacy format: convert PLC-5 wire type to SLC type
+            actualFileType = Plc5AddressDecoder.Plc5ToSlcFileType(fileType);
+        }
 
         // Expect typeDataParam (0x31) but we don't need to validate unless desired
         if (idx >= payload.Length)
@@ -1368,7 +1385,7 @@ public class PCCCEmulator : IDisposable
         // Optionally check that the byte equals TypedTypeDataParamByteArray
         idx += 1;
 
-        int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
+        int bpe = _memory.GetBytesPerElement(actualFileType, fileNumber);
         // Align data length to element boundaries
         int dataBytes = ((payload.Length - idx) / bpe) * bpe;
         if (dataBytes <= 0)
@@ -1381,7 +1398,7 @@ public class PCCCEmulator : IDisposable
         byte[] data = new byte[dataBytes];
         Array.Copy(payload, idx, data, 0, dataBytes);
 
-        bool ok = _memory.WriteRaw(fileType, fileNumber, byteOffset, dataBytes, data);
+        bool ok = _memory.WriteRaw(actualFileType, fileNumber, byteOffset, dataBytes, data);
         if (ok) SendEmptyResponse(src, tns, TypedSuccessReply, 0x67, clientContext);
         else    SendErrorResponse(src, tns, 0x0F, 0x67, 0x10, clientContext);
     }
@@ -1413,7 +1430,22 @@ public class PCCCEmulator : IDisposable
             SendErrorResponse(src, tns, 0x0F, 0x68, 0x01, clientContext);
             return;
         }
-        fileType = Plc5AddressDecoder.Plc5ToSlcFileType(fileType);
+
+        // Determine actual file type
+        int actualFileType;
+        if (fileType == 0)
+        {
+            actualFileType = _memory.GetFileTypeForNumber(fileNumber);
+            if (actualFileType == 0)
+            {
+                SendErrorResponse(src, tns, 0x0F, 0x68, 0x50, clientContext);
+                return;
+            }
+        }
+        else
+        {
+            actualFileType = Plc5AddressDecoder.Plc5ToSlcFileType(fileType);
+        }
 
         if (idx + TypedSizeBytes > payload.Length)
         {
@@ -1422,11 +1454,11 @@ public class PCCCEmulator : IDisposable
         }
         int elementCount = payload[idx] | (payload[idx + 1] << 8);
 
-        int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
+        int bpe = _memory.GetBytesPerElement(actualFileType, fileNumber);
         int bytesToRead = elementCount * bpe;
         int byteOffset = element * bpe + subElement * 2;
 
-        byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
+        byte[] data = _memory.ReadRaw(actualFileType, fileNumber, byteOffset, bytesToRead, out int status);
         if      (status == 2) SendErrorResponse(src, tns, 0x0F, 0x68, 0x50, clientContext);
         else if (status != 0) SendErrorResponse(src, tns, 0x0F, 0x68, 0x10, clientContext);
         else                  SendDataResponse(src, tns, TypedSuccessReply, data, clientContext);
@@ -1444,7 +1476,7 @@ public class PCCCEmulator : IDisposable
             return;
         }
 
-        if (!Plc5AddressDecoder.TryDecodeWordRangeAddress(payload,
+        if (!Plc5AddressDecoder.TryDecodeWordRangeReadAddress(payload,
                 out int fileNumber, out int rawFileType,
                 out int element,    out int subElement,
                 out int wordOffset, out int sizeWords,
@@ -1454,10 +1486,11 @@ public class PCCCEmulator : IDisposable
             return;
         }
 
-        // ─── Special case: directory file (fileNum=0, rawFileType=0x24) ──────────
+        // ─── Special case: directory file (fileNum=0) ─────────────────────────────
         // PLC-5 directory is accessed via Word Range Read with logical address
-        // file number 0, type 0x24. Serve directly from cached _directoryBytes.
-        if (fileNumber == 0 && rawFileType == 0x24)
+        // file number 0. The client may send rawFileType=0x24 (legacy) or rawFileType=0
+        // (bit-flag format, no file type encoded). Both cases should serve the directory.
+        if (fileNumber == 0 && (rawFileType == 0x24 || rawFileType == 0))
         {
             if (_directoryBytes == null)
             {
@@ -1501,8 +1534,20 @@ public class PCCCEmulator : IDisposable
         }
         else
         {
-            // Standard format: rawFileType is PLC-5 wire code, convert to SLC type
-            fileType = Plc5AddressDecoder.Plc5ToSlcFileType(rawFileType);
+            // Standard format: rawFileType may be 0 for bit-flag encoded addresses
+            if (rawFileType == 0)
+            {
+                fileType = _memory.GetFileTypeForNumber(fileNumber);
+                if (fileType == 0)
+                {
+                    SendErrorResponse(src, tns, 0x0F, 0x01, 0x50, clientContext);
+                    return;
+                }
+            }
+            else
+            {
+                fileType = Plc5AddressDecoder.Plc5ToSlcFileType(rawFileType);
+            }
         }
 
         // ─── Guard: reject bit‑level subElement (EN/TT/DN etc.) ─────────────────
@@ -1554,23 +1599,67 @@ public class PCCCEmulator : IDisposable
 
     /// <summary>
     /// Handles Word Range Write (CMD=0x0F, FNC=0x00) for PLC-5.
-    /// See <see cref="TryDecodeWordRangeAddress"/> for supported wire formats.
+    /// See <see cref="TryDecodeWordRangeWriteAddress"/> for supported wire formats.
     /// </summary>
     private void HandleWordRangeWrite(int src, int tns, byte[] payload, object clientContext)
     {
-        if (!Plc5AddressDecoder.TryDecodeWordRangeAddress(payload,
+        if (!Plc5AddressDecoder.TryDecodeWordRangeWriteAddress(payload,
                 out int fileNumber, out int rawFileType,
                 out int element,    out int subElement,
-                out int wordOffset, out int sizeWords,
-                out int dataStart, out bool isFlatFormat))
+                out int wordOffset, out int dataStart))
         {
             SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
             return;
         }
 
+        int bytesToWrite = payload.Length - dataStart;
+        if (bytesToWrite <= 0 || bytesToWrite % 2 != 0)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+            return;
+        }
+
+        int sizeWords = bytesToWrite / 2;
+
+        // ─── Special case: directory write (fileNum=0) ──────────────────────────────
+        // PLC-5 directory may be written during download. Accept writes to directory
+        // when fileNumber == 0 and rawFileType is 0 or 0x24.
+        if (fileNumber == 0 && (rawFileType == 0x24 || rawFileType == 0))
+        {
+            if (_directoryBytes == null)
+            {
+                SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+                return;
+            }
+
+            int byteOff = wordOffset * 2;
+            int byteCnt = sizeWords * 2;
+            int paddedLen = (_directoryBytes.Length + 1) & ~1;
+
+            if (byteOff < 0 || byteOff + byteCnt > paddedLen)
+            {
+                SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+                return;
+            }
+
+            // Data to write starts at dataStart
+            if (payload.Length < dataStart + byteCnt)
+            {
+                SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+                return;
+            }
+
+            int bytesToCopy = Math.Min(byteCnt, _directoryBytes.Length - byteOff);
+            if (bytesToCopy > 0)
+                Array.Copy(payload, dataStart, _directoryBytes, byteOff, bytesToCopy);
+
+            SendEmptyResponse(src, tns, 0x4F, 0x00, clientContext);
+            return;
+        }
+
         // Resolve actual SLC file type from wire information
         int fileType;
-        if (isFlatFormat)
+        if (rawFileType == 0)
         {
             fileType = _memory.GetFileTypeForNumber(fileNumber);
             if (fileType == 0)
@@ -1593,7 +1682,6 @@ public class PCCCEmulator : IDisposable
             return;
         }
 
-        int bytesToWrite = sizeWords * 2;
         if (payload.Length < dataStart + bytesToWrite)
         {
             SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
@@ -1636,6 +1724,66 @@ public class PCCCEmulator : IDisposable
             SendEmptyResponse(src, tns, 0x4F, 0x00, clientContext);
         else
             SendErrorResponse(src, tns, 0x0F, 0x00, 0x10, clientContext);
+    }
+
+    /// <summary>
+    /// Handles Read Section Size (FNC 0x29) for PLC-5 upload/download procedure.
+    /// Request format: [0x03, 0x00, fileNumber]
+    /// Reply format: [SizeInWords 2B LE][ElementCount 2B LE][Tail1 1B][Tail2 1B optional]
+    /// </summary>
+    private void HandleReadSectionSize(int src, int tns, byte[] data, object clientContext)
+    {
+        if (data == null || data.Length < 3)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x29, 0x01, clientContext);
+            return;
+        }
+
+        int fileNumber = data[2];
+
+        if (!_memory.GetFileInfo(fileNumber, out int fileType, out int fileSizeBytes, out int elements))
+        {
+            // File not found – return zero size (as seen in captures for missing files)
+            SendDataResponse(src, tns, 0x4F, new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00 }, clientContext);
+            return;
+        }
+
+        int sizeWords = fileSizeBytes / 2;
+
+        var reply = new List<byte>(6);
+        reply.Add((byte)(sizeWords & 0xFF));
+        reply.Add((byte)((sizeWords >> 8) & 0xFF));
+        reply.Add((byte)(elements & 0xFF));
+        reply.Add((byte)((elements >> 8) & 0xFF));
+
+        // Determine tail byte(s) based on file type.
+        // Confirmed against PLC-5/40E capture (Data Monitor, 161 section-size
+        // request/reply pairs) only for the element sizes that are unique to a
+        // type: Timer/Counter/Control (3 words/elem -> tail 0x50/0x60/0x70) and
+        // Float (2 words/elem -> tail 0x90 0x08) are unambiguous because no
+        // other type shares their word count. For the 1-word/elem types (B, N,
+        // O, I, S) the capture cannot distinguish which specific type produced
+        // tail 0x10 vs 0x40, since all four have the same 1-word ratio and we
+        // do not know the real file types behind those capture entries. The B
+        // vs N/O/I/S split below is a plausible guess, NOT independently
+        // verified — re-check against a capture where the file type is known
+        // before relying on it.
+        byte tail1 = 0x40, tail2 = 0x00;
+        switch (fileType)
+        {
+            case 0x85: tail1 = 0x10; break;      // B — unverified vs N/O/I/S, see note above
+            case 0x86: tail1 = 0x50; break;      // T — confirmed (3 words/elem is unique to T/C/R)
+            case 0x87: tail1 = 0x60; break;      // C — same word count as T; specific tail unverified
+            case 0x88: tail1 = 0x70; break;      // R — same word count as T; specific tail unverified
+            case 0x8A: tail1 = 0x90; tail2 = 0x08; break; // F — confirmed (2 words/elem is unique to F)
+            case 0x91: tail1 = 0x90; tail2 = 0x20; break; // L — not seen in capture, per spec guess
+            default:   tail1 = 0x40; break;      // N (0x89), O (0x8B), I (0x8C), S (0x84) — unverified
+        }
+
+        reply.Add(tail1);
+        if (tail2 != 0x00) reply.Add(tail2);
+
+        SendDataResponse(src, tns, 0x4F, reply.ToArray(), clientContext);
     }
 
     // ─── Response Helpers ────────────────────────────────────────────────────
