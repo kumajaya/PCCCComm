@@ -530,7 +530,7 @@ namespace PCCCComm.Pccc
             // Size = number of elements to read (again)
             body.Add((byte)(elementCount & 0xFF));
             body.Add((byte)((elementCount >> 8) & 0xFF));
-            
+
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
                 PCCCConstants.Fnc.TypedRead, body.ToArray());
         }
@@ -563,7 +563,7 @@ namespace PCCCComm.Pccc
             body.Add(PCCCConstants.Df1Limits.TypedTypeDataParamByteArray);
             // Data bytes (must be aligned to element boundaries)
             body.AddRange(data);
-            
+
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
                 PCCCConstants.Fnc.TypedWrite, body.ToArray());
         }
@@ -572,15 +572,28 @@ namespace PCCCComm.Pccc
         /// Creates a Word Range Read request for PLC-5 (CMD=0x0F, FNC=0x01).
         /// </summary>
         public static PCCCMessage CreateWordRangeReadRequest(byte[] logicalAddress, int wordOffset, int sizeWords,
-            ushort tns, byte myNode, byte targetNode)
+            ushort tns, byte myNode, byte targetNode, int totalTransWords = -1)
         {
+            // totalTransWords: the size (in words) of the OVERALL multi-packet transaction this
+            // request is part of. Per AB Pub. 1770-6.5.16 p.14-6/14-7 (multi-packet "word range
+            // read" example), TOTAL TRANS stays constant across every packet of a transaction
+            // while PACKET OFFSET advances and each packet's own SIZE is just that packet's byte
+            // count. The PLC validates "packet offset + size (words) <= total trans" and rejects
+            // (STS 0xF0) requests where a smaller, per-packet total trans is sent instead.
+            // Default (-1) preserves old single-packet behavior: total trans == this request's size.
+            int effectiveTotalTransWords = totalTransWords >= 0 ? totalTransWords : sizeWords;
+            int byteCount = sizeWords * 2; // Size must be byte count, not word count
             var body = new List<byte>();
+            // Packet Offset
             body.Add((byte)(wordOffset & 0xFF));
             body.Add((byte)((wordOffset >> 8) & 0xFF));
-            body.Add(0x00); body.Add(0x00); // totalTrans – ignored
+            // Total Transaction = overall transaction size in words (constant across packets)
+            body.Add((byte)(effectiveTotalTransWords & 0xFF));
+            body.Add((byte)((effectiveTotalTransWords >> 8) & 0xFF));
+            // Logical address
             body.AddRange(logicalAddress);
-            body.Add((byte)(sizeWords & 0xFF));
-            body.Add((byte)((sizeWords >> 8) & 0xFF));
+            // Size = byte count for THIS packet (single byte per AB Pub. 1770-6.5.16, max 244 bytes)
+            body.Add((byte)byteCount);
 
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
                 PCCCConstants.Fnc.WordRangeRead, body.ToArray());
@@ -590,16 +603,23 @@ namespace PCCCComm.Pccc
         /// Creates a Word Range Write request for PLC-5 (CMD=0x0F, FNC=0x00).
         /// </summary>
         public static PCCCMessage CreateWordRangeWriteRequest(byte[] logicalAddress, int wordOffset, byte[] data,
-            ushort tns, byte myNode, byte targetNode)
+            ushort tns, byte myNode, byte targetNode, int totalTransWords = -1)
         {
+            // See CreateWordRangeReadRequest for why totalTransWords must stay constant across
+            // the packets of a multi-packet transaction instead of reflecting just this chunk.
             int sizeWords = data.Length / 2;
+            int effectiveTotalTransWords = totalTransWords >= 0 ? totalTransWords : sizeWords;
             var body = new List<byte>();
+            // Packet Offset
             body.Add((byte)(wordOffset & 0xFF));
             body.Add((byte)((wordOffset >> 8) & 0xFF));
-            body.Add(0x00); body.Add(0x00);
+            // Total Transaction = overall transaction size in words (constant across packets)
+            body.Add((byte)(effectiveTotalTransWords & 0xFF));
+            body.Add((byte)((effectiveTotalTransWords >> 8) & 0xFF));
+            // Logical address
             body.AddRange(logicalAddress);
-            body.Add((byte)(sizeWords & 0xFF));
-            body.Add((byte)((sizeWords >> 8) & 0xFF));
+            // No separate SIZE field for word range write per AB Pub. 1770-6.5.16 "word range write" —
+            // data length is implicit from the packet length; only OFFSET + TOTAL TRANS + ADDRESS + DATA.
             body.AddRange(data);
 
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,

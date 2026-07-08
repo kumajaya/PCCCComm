@@ -718,7 +718,7 @@ class Program
 
     private static void HandleWordRead(Comm.PCCCComm pccc, string[] parts)
     {
-        if (!TryParseWordAddress(parts, 6, out _, out int fn, out int elem, out int wo, out int ftc) || !int.TryParse(parts[5], out int sz))
+        if (!TryParseWordAddress(parts, 6, out _, out int fn, out int elem, out int wo, out int _) || !int.TryParse(parts[5], out int sz))
         {
             Console.WriteLine("Usage: wordread <fileType> <fileNumber> <element> <wordOffset> <sizeWords>");
             Console.WriteLine("Example: wordread N 7 0 0 10");
@@ -727,7 +727,7 @@ class Program
         }
         try
         {
-            byte[] data = pccc.WordRangeRead(Comm.Handlers.Plc5Handler.EncodePlc5LogicalAddress(fn, ftc, elem, 0, false), wo, sz);
+            byte[] data = pccc.WordRangeRead(Comm.Handlers.Plc5Handler.EncodePlc5LogicalAddress(fn, elem), wo, sz);
             Console.WriteLine($"Read {data.Length} bytes:"); WriteHex("  ", data, data.Length);
         }
         catch (Exception ex) { Console.WriteLine($"WordRangeRead failed: {ex.Message}"); }
@@ -735,7 +735,7 @@ class Program
 
     private static void HandleWordWrite(Comm.PCCCComm pccc, string[] parts)
     {
-        if (!TryParseWordAddress(parts, 5, out _, out int fn, out int elem, out int wo, out int ftc))
+        if (!TryParseWordAddress(parts, 5, out _, out int fn, out int elem, out int wo, out int _))
         {
             Console.WriteLine("Usage: wordwrite <fileType> <fileNumber> <element> <wordOffset> <dataHex...>");
             Console.WriteLine("Example: wordwrite N 7 0 0 0010 0020 0030");
@@ -757,7 +757,7 @@ class Program
         if (dataBytes.Count % 2 != 0) { Console.WriteLine("Total data must be an even number of bytes."); return; }
         try
         {
-            pccc.WordRangeWrite(Comm.Handlers.Plc5Handler.EncodePlc5LogicalAddress(fn, ftc, elem, 0, false), wo, dataBytes.ToArray());
+            pccc.WordRangeWrite(Comm.Handlers.Plc5Handler.EncodePlc5LogicalAddress(fn, elem), wo, dataBytes.ToArray());
             Console.WriteLine($"Wrote {dataBytes.Count / 2} word(s) successfully.");
         }
         catch (Exception ex) { Console.WriteLine($"WordRangeWrite failed: {ex.Message}"); }

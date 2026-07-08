@@ -389,11 +389,11 @@ public static class PCCCConstants
         /// <summary>Maximum read payload for MicroLogix 1000 (95 bytes).</summary>
         public const int MaxReadPayloadMl1000 = 95;
 
-        /// <summary>Maximum read payload for PLC-5 Typed Read (FNC 0x68).</summary>
+        /// <summary>Maximum read payload for PLC-5 Word Range Read (FNC 0x01).</summary>
         /// <remarks>AB 1770-6.5.16 allows up to 240 bytes. Using 236 for safety.</remarks>
         public const int MaxReadPayloadPlc5 = 236;
 
-        /// <summary>Maximum write payload for PLC-5 Typed Write (FNC 0x67).</summary>
+        /// <summary>Maximum write payload for PLC-5 Word Range Write (FNC 0x00).</summary>
         /// <remarks>AB 1770-6.5.16 allows up to 238 bytes. Using 236 for consistency.</remarks>
         public const int MaxWritePayloadPlc5 = 236;
 

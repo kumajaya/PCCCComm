@@ -38,10 +38,10 @@ namespace PCCCComm.Handlers;
 ///   - Chapter 10: Diagnostic status information (PLC‑5 status bytes, pages 10-20 to 10-23)
 ///   - Chapter 12: Uploading and downloading with PLC‑5 (pages 12-3 to 12-5, 12-8 to 12-10)
 ///   - Chapter 13: PLC‑5 logical binary addressing (pages 13-11 to 13-14)
-///   - Typed Read (FNC 0x68) and Typed Write (FNC 0x67) pages 7-28 and 7-30
+///   - Word Range Read (FNC 0x01) and Word Range Write (FNC 0x00), page 14-6/14-7
 /// 
-/// This implementation provides full data read/write access using Typed Read/Write
-/// with logical binary addressing, supporting all SLC file types (N, B, F, T, C, R, ST, etc.)
+/// This implementation provides full data read/write access using Word Range Read/Write
+/// with logical binary addressing, supporting all PLC-5 file types (N, B, F, T, C, R, ST, etc.)
 /// </summary>
 public class Plc5Handler : IPlcHandler
 {
@@ -85,56 +85,48 @@ public class Plc5Handler : IPlcHandler
     // ---------------------------------------------------------------------
 
     /// <summary>
-    /// Encodes a logical binary address for PLC-5 Typed Read/Write commands.
-    /// Format per 1770-6.5.16 Chapter 13, page 13-11:
-    ///   [mask byte] [level1] [level2] ... [levelN]
-    /// where mask byte bits:
-    ///   bits 7-4: number of levels (1-8)
-    ///   bit 3: 0 = last level is element, 1 = last level is sub-element (for structured)
-    ///   bit 2-0: reserved (0)
-    /// Levels are 1-byte each, with 0xFF extended to 3 bytes for values >= 255.
-    /// For SLC-style files: level1=file number, level2=file type, level3=element, level4=sub-element.
+    /// Encodes a PLC-5 logical binary address with 2 levels (file number + element).
+    /// Format: [mask=0x06][fileNumber][element].
+    /// Reference: AB Publication 1770-6.5.16, Chapter 13, page 13-12.
     /// </summary>
-    /// <param name="fileNumber">File number (0-255)</param>
-    /// <param name="fileType">PLC-5 file type code (0x00-0x0F)</param>
-    /// <param name="element">Element number (0-65535)</param>
-    /// <param name="subElement">Sub-element number (0-65535, typically for Timer/Counter members)</param>
-    /// <param name="isStructured">True if the data type has sub-element (Timer, Counter, Control, String)</param>
-    public static byte[] EncodePlc5LogicalAddress(int fileNumber, int fileType, int element, int subElement, bool isStructured)
+    public static byte[] EncodePlc5LogicalAddress(int fileNumber, int element)
     {
-        // Number of levels depends on whether the address points to a structured type
-        int levelCount = isStructured ? 4 : 3;
-        
-        Span<byte> buffer = stackalloc byte[14]; // max 4 levels + mask (1 + 4*3 + 1)
-        int idx = 0;
+        var result = new List<byte>();
+        result.Add(0x06); // 2 levels, last level = element
 
-        int maskHigh = (levelCount << 4);
-        int maskLow = isStructured ? 0x08 : 0x00;
-        buffer[idx++] = (byte)(maskHigh | maskLow);
-
-        int[] values = { fileNumber, fileType, element, subElement };
-        for (int i = 0; i < levelCount; i++)
+        // Encode file number
+        // Threshold is deliberately "< 255", not "<= 255": 0xFF is reserved as the
+        // extended-encoding marker byte itself, so a fileNumber of exactly 255 must
+        // also go through the extended (3-byte) form below, not the 1-byte form.
+        if (fileNumber < 255)
+            result.Add((byte)fileNumber);
+        else
         {
-            int val = values[i];
-            if (val < 255)
-                buffer[idx++] = (byte)val;
-            else
-            {
-                buffer[idx++] = 0xFF;
-                buffer[idx++] = (byte)(val & 0xFF);
-                buffer[idx++] = (byte)((val >> 8) & 0xFF);
-            }
+            result.Add(0xFF);
+            result.Add((byte)(fileNumber & 0xFF));
+            result.Add((byte)((fileNumber >> 8) & 0xFF));
         }
 
-        return buffer.Slice(0, idx).ToArray();
+        // Encode element (same "< 255" reasoning as file number above: 0xFF is the
+        // extended-form marker, so element == 255 must use the 3-byte form too).
+        if (element < 255)
+            result.Add((byte)element);
+        else
+        {
+            result.Add(0xFF);
+            result.Add((byte)(element & 0xFF));
+            result.Add((byte)((element >> 8) & 0xFF));
+        }
+
+        return result.ToArray();
     }
 
     // ---------------------------------------------------------------------
-    // Chunked read/write helpers using Typed Read/Write
+    // Chunked read/write helpers using Word Range Read/Write
     // ---------------------------------------------------------------------
 
     /// <summary>
-    /// Reads raw data from PLC-5 using Typed Read (FNC 0x68) with automatic chunking.
+    /// Reads raw data from PLC-5 using Word Range Read (FNC 0x01) with automatic chunking.
     /// </summary>
     private byte[] ReadRawDataWithChunking(ref DataAddress addr, int numberOfBytes, out int finalStatus)
     {
@@ -145,41 +137,48 @@ public class Plc5Handler : IPlcHandler
         {
             int bytesPerElem = addr.BytesPerElements;
 
-            bool isStructured = addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                                addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                                addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control ||
-                                addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String;
-
             while (filePosition < numberOfBytes && finalStatus == 0)
             {
                 int maxChunkBytes = PCCCConstants.Df1Limits.MaxReadPayloadPlc5;
                 int remainingBytes = numberOfBytes - filePosition;
                 int chunkBytes = Math.Min(remainingBytes, maxChunkBytes);
                 
-                if (isStructured)
-                {
-                    int elemAlign = (chunkBytes + bytesPerElem - 1) / bytesPerElem * bytesPerElem;
-                    if (elemAlign > maxChunkBytes) elemAlign -= bytesPerElem;
-                    chunkBytes = Math.Max(bytesPerElem, elemAlign);
-                }
+                // Align chunk to a whole number of elements, not just a word boundary.
+                // For 2-byte element types (Integer, Binary, ...) this is the same thing,
+                // but for Float/Long (4 bytes), Timer/Counter/Control (6 bytes), String, etc.
+                // a plain word-boundary trim can still leave a partial element at the end
+                // of a chunk. That previously caused two bugs:
+                //   1. "sizeWords" was actually an element count, so byteCount = sizeWords*2
+                //      under-requested data for any element size != 2 bytes.
+                //   2. On the following chunk, chunkBytes / bytesPerElem could truncate to 0
+                //      (integer division), producing a zero-size Word Range Read that the
+                //      PLC rejects (STS 0xF0 - "size to read equals zero" per AB 1770-6.5.16).
+                chunkBytes -= chunkBytes % bytesPerElem;
+                if (chunkBytes == 0) chunkBytes = bytesPerElem; // guard: always make progress
                 
-                int chunkElements = chunkBytes / bytesPerElem;
+                int chunkWords = chunkBytes / 2;
                 int currentElement = addr.Element + (filePosition / bytesPerElem);
-                int subElementOffset = addr.SubElement + ((filePosition % bytesPerElem) / PCCCConstants.Df1Limits.BytesPerWord);
                 
-                byte[] logicalAddress = EncodePlc5LogicalAddress(
-                    addr.FileNumber, addr.FileType, currentElement, subElementOffset, isStructured);
+                // Encode 2-level logical address (file + element)
+                byte[] logicalAddress = EncodePlc5LogicalAddress(addr.FileNumber, currentElement);
                 
-                var req = PCCCMessage.CreateTypedReadRequest(
-                    logicalAddress, chunkElements, 0, (byte)MyNode, (byte)TargetNode);
+                // Use WordRangeRead (FNC 0x01)
+                var req = PCCCMessage.CreateWordRangeReadRequest(
+                    logicalAddress,
+                    0,                // wordOffset
+                    chunkWords,       // sizeWords (word count, not element count)
+                    0,
+                    (byte)MyNode,
+                    (byte)TargetNode);
+
                 var reply = _protocol.SendRequest(req, out int sts);
-                
+
                 if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
                 {
                     finalStatus = sts;
                     break;
                 }
-                
+
                 int bytesRead = Math.Min(chunkBytes, reply.Data.Length);
                 Array.Copy(reply.Data, 0, result, filePosition, bytesRead);
                 filePosition += bytesRead;
@@ -196,7 +195,7 @@ public class Plc5Handler : IPlcHandler
     }
 
     /// <summary>
-    /// Writes raw data to PLC-5 using Typed Write (FNC 0x67) with automatic chunking.
+    /// Writes raw data to PLC-5 using Word Range Write (FNC 0x00) with automatic chunking.
     /// </summary>
     private int WriteRawDataWithChunking(DataAddress addr, byte[] dataToWrite)
     {
@@ -205,37 +204,36 @@ public class Plc5Handler : IPlcHandler
         int reply = 0;
         int bytesPerElem = addr.BytesPerElements;
 
-        bool isStructured = addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control ||
-                            addr.FileType == (byte)PCCCConstants.SlcFileTypeCode.String;
-
         while (filePosition < dataToWrite.Length && reply == 0)
         {
             int maxChunkBytes = PCCCConstants.Df1Limits.MaxWritePayloadPlc5;
             int remainingBytes = dataToWrite.Length - filePosition;
             int chunkBytes = Math.Min(remainingBytes, maxChunkBytes);
             
-            if (isStructured)
-            {
-                int elemAlign = (chunkBytes + bytesPerElem - 1) / bytesPerElem * bytesPerElem;
-                if (elemAlign > maxChunkBytes) elemAlign -= bytesPerElem;
-                chunkBytes = Math.Max(bytesPerElem, elemAlign);
-            }
+            // Align chunk to a whole number of elements (not just a word boundary).
+            // Otherwise a chunk can end mid-element for element sizes != 2 bytes
+            // (Float/Long = 4, Timer/Counter/Control = 6, String = 84, ...), which
+            // shifts the following chunk's data relative to its computed element
+            // address and corrupts the write.
+            chunkBytes -= chunkBytes % bytesPerElem;
+            if (chunkBytes == 0) chunkBytes = bytesPerElem; // guard: always make progress
             
             int currentElement = addr.Element + (filePosition / bytesPerElem);
-            int subElementOffset = addr.SubElement + ((filePosition % bytesPerElem) / PCCCConstants.Df1Limits.BytesPerWord);
             
-            byte[] logicalAddress = EncodePlc5LogicalAddress(
-                addr.FileNumber, addr.FileType, currentElement, subElementOffset, isStructured);
+            byte[] logicalAddress = EncodePlc5LogicalAddress(addr.FileNumber, currentElement);
             
             byte[] chunkData = new byte[chunkBytes];
             Array.Copy(dataToWrite, filePosition, chunkData, 0, chunkBytes);
             
-            int chunkElements = chunkBytes / bytesPerElem;
-            var req = PCCCMessage.CreateTypedWriteRequest(
-                logicalAddress, chunkData, chunkElements, 0, (byte)MyNode, (byte)TargetNode);
-            
+            // Use WordRangeWrite (FNC 0x00)
+            var req = PCCCMessage.CreateWordRangeWriteRequest(
+                logicalAddress,
+                0,
+                chunkData,
+                0,
+                (byte)MyNode,
+                (byte)TargetNode);
+
             if (AsyncMode)
             {
                 _protocol.SendRequestAsync(req);
@@ -359,35 +357,35 @@ public class Plc5Handler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new NotSupportedException("ReadWords does not support String (ST) files. Use ReadAny instead.");
 
-        // PLC-5 String file override
-        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
-            p.BytesPerElements = PCCCConstants.Df1Limits.Plc5StringElementBytes;
+        // Timer/Counter/Control are always 3 words (6 bytes: control, preset/PRE or LEN,
+        // accumulated/ACC or POS) on the wire, regardless of SubElement — but PCCCParser
+        // leaves BytesPerElements at its generic default (2) for these types since it doesn't
+        // special-case them, so that can't be relied on here. The caller (ReadAny/
+        // ReadAnyValues) requests a whole number of 3-word elements and picks out the right
+        // word client-side, since PLC-5 Word Range Read can't target a sub-element directly on
+        // the wire the way this 2-level EncodePlc5LogicalAddress works. (A previous version
+        // forced bytesPerElem down to 2 and over-fetched via an undocumented "(N*2*3)-4"
+        // formula, but ReadWords then truncated its result to just the first `numberOfWords`
+        // words — so a ".ACC" and a ".PRE" read of the same element ended up reading the exact
+        // same raw words with no sub-element offset ever applied.)
+        // NOTE: ReadRawDataWithChunking reads addr.BytesPerElements directly (it needs
+        // the true per-element size to align chunk boundaries AND to compute each
+        // chunk's logical element address as filePosition/bytesPerElem — see its body).
+        // A local-only "bytesPerElem = 6" here without also updating p.BytesPerElements
+        // was a bug: single-packet reads worked, but any read needing >1 packet advanced
+        // to the wrong element on the 2nd+ packet (using /2 instead of /6), eventually
+        // requesting an element past the real end of the file and getting back PCCC's
+        // "File is wrong size" (STS) from the PLC.
+        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+            p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+            p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control)
+            p.BytesPerElements = 6;
 
         int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
-            bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
 
         int totalBytesNeeded = numberOfWords * 2;
         int numberOfElements = (totalBytesNeeded + bytesPerElem - 1) / bytesPerElem;
         int numberOfBytesToRead = numberOfElements * bytesPerElem;
-
-        // Byte-count adjustment for Timer/Counter/Control sub-element reads
-        // ("T4:0.PRE", "C5:0.ACC", "R6:0.LEN") on PLC-5.
-        //
-        // Origin (reconstructed — not documented elsewhere): an earlier
-        // version indexed each element at a 6-byte (3-word) stride
-        // (`offset = i*6`), matching a Timer/Counter/Control element's true
-        // layout (status word + 2 sub-elements). That was simplified to the
-        // same 1-word-per-index model SLC uses (bytesPerElem forced to
-        // BytesPerWord above); this line makes the simplified path request
-        // the same total bytes the old stride would have: for N words,
-        // `(N*2*3)-4 = 6N-4` bytes — enough to span N full 3-word elements.
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
-            numberOfBytesToRead = (numberOfBytesToRead * 3) - 4;
 
         byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytesToRead, out int reply);
         if (reply != 0)
@@ -412,10 +410,6 @@ public class Plc5Handler : IPlcHandler
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new PCCCException("Use WriteData(string, string) for ST files.");
-
-        // PLC-5 String override
-        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
-            p.BytesPerElements = PCCCConstants.Df1Limits.Plc5StringElementBytes;
 
         byte[] byteData = new byte[data.Length * 2];
         for (int i = 0; i < data.Length; i++)
@@ -496,15 +490,14 @@ public class Plc5Handler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             return ReadAnyString(startAddress, numberOfElements);
 
-        // PLC-5 Float and Long file handling
-        if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
-            p.BytesPerElements = PCCCConstants.Df1Limits.Plc5StringElementBytes;
-
-        int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
-            bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
+        // Timer/Counter/Control always fetch full 3-word elements (control, PRE/LEN,
+        // ACC/POS), whether or not a sub-element was requested — see ReadWords for why
+        // BytesPerElements (generic default 2) can't be used for these types here.
+        int bytesPerElem = (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                             p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                             p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control)
+            ? 6
+            : p.BytesPerElements;
 
         int wordsPerElem = bytesPerElem / 2;
         int totalWords = numberOfElements * wordsPerElem;
@@ -517,16 +510,22 @@ public class Plc5Handler : IPlcHandler
             switch (p.FileType)
             {
                 case (byte)PCCCConstants.SlcFileTypeCode.Float:
-                    result[i] = WordConverter.WordsToFloat(rawWords[offset], rawWords[offset + 1])
+                    // Word Range Read transmits Float/Long as HIGH word then LOW word
+                    // (AB Pub. 1770-6.5.16 p.13-17 "PLC5 word range read" example) —
+                    // the opposite order from Typed Read. Swap accordingly.
+                    result[i] = WordConverter.WordsToFloat(rawWords[offset + 1], rawWords[offset])
                         .ToString(CultureInfo.InvariantCulture);
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Long:
-                    result[i] = WordConverter.WordsToInt32(rawWords[offset], rawWords[offset + 1])
+                    result[i] = WordConverter.WordsToInt32(rawWords[offset + 1], rawWords[offset])
                         .ToString(CultureInfo.InvariantCulture);
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Timer:
                 case (byte)PCCCConstants.SlcFileTypeCode.Counter:
-                    result[i] = ((short)rawWords[offset]).ToString(CultureInfo.InvariantCulture);
+                    // p.SubElement selects control(0, default)/PRE-LEN(1)/ACC-POS(2) within
+                    // this element's 3-word block — see ReadWords for why this can't be
+                    // done on the wire and has to be picked out of the raw stream here.
+                    result[i] = ((short)rawWords[offset + p.SubElement]).ToString(CultureInfo.InvariantCulture);
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Binary:
                 case (byte)PCCCConstants.SlcFileTypeCode.Output:
@@ -589,12 +588,13 @@ public class Plc5Handler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new NotSupportedException("ReadAnyValues does not support String (ST) files. Use ReadAny instead.");
 
-        // Determine words per element based on file type
-        int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
-            bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord; // 2 bytes per sub-element
+        // Timer/Counter/Control always fetch full 3-word elements — see ReadWords for why
+        // BytesPerElements (generic default 2) can't be used for these types here.
+        int bytesPerElem = (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                             p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                             p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control)
+            ? 6
+            : p.BytesPerElements;
 
         int wordsPerElem = bytesPerElem / 2;
         int totalWords = numberOfElements * wordsPerElem;
@@ -607,17 +607,17 @@ public class Plc5Handler : IPlcHandler
             switch (p.FileType)
             {
                 case (byte)PCCCConstants.SlcFileTypeCode.Float:
-                    // Two words -> float (little-endian)
-                    result[i] = WordConverter.WordsToFloat(rawWords[offset], rawWords[offset + 1]);
+                    // Word Range Read transmits Float/Long as HIGH word then LOW word
+                    // (AB Pub. 1770-6.5.16 p.13-17) — swapped from Typed Read order.
+                    result[i] = WordConverter.WordsToFloat(rawWords[offset + 1], rawWords[offset]);
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Long:
-                    // Two words -> int (little-endian)
-                    result[i] = WordConverter.WordsToInt32(rawWords[offset], rawWords[offset + 1]);
+                    result[i] = WordConverter.WordsToInt32(rawWords[offset + 1], rawWords[offset]);
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Timer:
                 case (byte)PCCCConstants.SlcFileTypeCode.Counter:
-                    // One word -> short (signed 16-bit)
-                    result[i] = (short)rawWords[offset];
+                    // p.SubElement selects control(0)/PRE(1)/ACC(2) — see ReadAny above.
+                    result[i] = (short)rawWords[offset + p.SubElement];
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Binary:
                 case (byte)PCCCConstants.SlcFileTypeCode.Output:
@@ -663,8 +663,14 @@ public class Plc5Handler : IPlcHandler
         DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
 
-        // Bit-level write
-        if (p.BitNumber >= 0 && p.BitNumber < 16)
+        // Note: unlike ReadWords/ReadAny, this intentionally does NOT correct
+        // BytesPerElements to 6 for Timer/Counter/Control. A bit-level write to
+        // T/C/R only ever targets a named status-bit mnemonic (EN/DN/TT/...),
+        // which PCCCParser collapses onto the control word (word 0) of the
+        // element. The masked write below addresses p.Element directly, so a
+        // 2-byte mask covering just that control word is correct here — a
+        // 6-byte mask would incorrectly extend the AND/OR mask over PRE/ACC too.
+        if (p.BitNumber >= 0 && p.BitNumber < p.BytesPerElements * 8)
         {
             // Build address without bit to read the whole word
             string wordAddress = startAddress.Split('/')[0];
@@ -698,8 +704,10 @@ public class Plc5Handler : IPlcHandler
             for (int i = 0; i < numberOfElements; i++)
             {
                 WordConverter.Int32ToWords(dataToWrite[i], out ushort low, out ushort high);
-                words[i * 2] = low;
-                words[i * 2 + 1] = high;
+                // Word Range Write expects HIGH word then LOW word for 32-bit types
+                // (mirrors Word Range Read order, AB Pub. 1770-6.5.16 p.13-17).
+                words[i * 2] = high;
+                words[i * 2 + 1] = low;
             }
         }
         else
@@ -745,8 +753,9 @@ public class Plc5Handler : IPlcHandler
             for (int i = 0; i < numberOfElements; i++)
             {
                 WordConverter.FloatToWords(dataToWrite[i], out ushort low, out ushort high);
-                words[i * 2] = low;
-                words[i * 2 + 1] = high;
+                // Word Range Write expects HIGH word then LOW word (see ReadAny/ReadAnyValues).
+                words[i * 2] = high;
+                words[i * 2 + 1] = low;
             }
         }
         else if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Long)
@@ -755,8 +764,9 @@ public class Plc5Handler : IPlcHandler
             for (int i = 0; i < numberOfElements; i++)
             {
                 WordConverter.Int32ToWords((int)dataToWrite[i], out ushort low, out ushort high);
-                words[i * 2] = low;
-                words[i * 2 + 1] = high;
+                // Word Range Write expects HIGH word then LOW word (see ReadAny/ReadAnyValues).
+                words[i * 2] = high;
+                words[i * 2 + 1] = low;
             }
         }
         else
@@ -818,6 +828,15 @@ public class Plc5Handler : IPlcHandler
         }
     }
 
+    /// <summary>
+    /// Reads <paramref name="sizeWords"/> words starting at <paramref name="wordOffset"/>
+    /// from the given logical address, automatically splitting the request into multiple
+    /// Word Range Read packets if it exceeds the AB protocol's per-packet limit (244 bytes /
+    /// 122 words per AB Pub. 1770-6.5.16 p.7-34). Successive packets reuse the same logical
+    /// address and advance the PACKET OFFSET field, exactly as shown in the multi-packet
+    /// "word range read" example on p.14-6/14-7 of that spec — so results are byte-for-byte
+    /// identical to what a single (hypothetically unlimited) request would return.
+    /// </summary>
     public byte[] WordRangeRead(byte[] logicalAddress, int wordOffset, int sizeWords)
     {
         if (logicalAddress == null || logicalAddress.Length == 0)
@@ -825,10 +844,42 @@ public class Plc5Handler : IPlcHandler
         if (sizeWords <= 0)
             throw new ArgumentOutOfRangeException(nameof(sizeWords), "Size must be positive.");
 
-        return _protocol.WordRangeRead(logicalAddress, wordOffset, sizeWords,
-            (byte)MyNode, (byte)TargetNode);
+        int maxWordsPerChunk = PCCCConstants.Df1Limits.MaxReadPayloadPlc5 / 2;
+        byte[] result = new byte[sizeWords * 2];
+        int wordsDone = 0;
+
+        while (wordsDone < sizeWords)
+        {
+            int chunkWords = Math.Min(sizeWords - wordsDone, maxWordsPerChunk);
+
+            // TOTAL TRANS must reflect the whole multi-packet transaction (sizeWords), not just
+            // this chunk — the PLC rejects (STS 0xF0) any packet where offset + size > total trans.
+            byte[] chunk = _protocol.WordRangeRead(logicalAddress, wordOffset + wordsDone, chunkWords,
+                (byte)MyNode, (byte)TargetNode, totalTransWords: sizeWords);
+
+            int bytesToCopy = Math.Min(chunk.Length, chunkWords * 2);
+            Array.Copy(chunk, 0, result, wordsDone * 2, bytesToCopy);
+
+            // If the PLC returned fewer bytes than requested, stop rather than looping forever.
+            if (bytesToCopy < chunkWords * 2)
+            {
+                Array.Resize(ref result, wordsDone * 2 + bytesToCopy);
+                return result;
+            }
+
+            wordsDone += chunkWords;
+        }
+
+        return result;
     }
 
+    /// <summary>
+    /// Writes <paramref name="data"/> starting at <paramref name="wordOffset"/> from the given
+    /// logical address, automatically splitting the write into multiple Word Range Write
+    /// packets if it exceeds the AB protocol's per-packet limit (240 bytes per AB Pub.
+    /// 1770-6.5.16 p.7-35). Successive packets reuse the same logical address and advance
+    /// the PACKET OFFSET field, mirroring the chunking used for <see cref="WordRangeRead"/>.
+    /// </summary>
     public void WordRangeWrite(byte[] logicalAddress, int wordOffset, byte[] data)
     {
         if (logicalAddress == null || logicalAddress.Length == 0)
@@ -836,8 +887,25 @@ public class Plc5Handler : IPlcHandler
         if (data == null || data.Length == 0 || data.Length % 2 != 0)
             throw new ArgumentException("Data must be non‑empty and have even number of bytes.", nameof(data));
 
-        _protocol.WordRangeWrite(logicalAddress, wordOffset, data,
-            (byte)MyNode, (byte)TargetNode);
+        int maxBytesPerChunk = PCCCConstants.Df1Limits.MaxWritePayloadPlc5;
+        int totalTransWords = data.Length / 2;
+        int bytesDone = 0;
+
+        while (bytesDone < data.Length)
+        {
+            int chunkBytes = Math.Min(data.Length - bytesDone, maxBytesPerChunk);
+            if (chunkBytes % 2 != 0) chunkBytes--; // keep whole words per chunk
+
+            byte[] chunkData = new byte[chunkBytes];
+            Array.Copy(data, bytesDone, chunkData, 0, chunkBytes);
+
+            // TOTAL TRANS must reflect the whole multi-packet write (data.Length/2 words), not
+            // just this chunk's word count — same "offset + size <= total trans" rule as reads.
+            _protocol.WordRangeWrite(logicalAddress, wordOffset + bytesDone / 2, chunkData,
+                (byte)MyNode, (byte)TargetNode, totalTransWords: totalTransWords);
+
+            bytesDone += chunkBytes;
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1044,8 +1112,7 @@ public class Plc5Handler : IPlcHandler
     public DataFileDetails[] GetDataMemory()
     {
         // Logical address for PLC-5 directory: file 0, type 0x24 (directory)
-        // EncodePlc5LogicalAddress(fileNum=0, fileType=0x24, element=0, subElement=0)
-        byte[] dirAddr = EncodePlc5LogicalAddress(0, 0x24, 0, 0, false);
+        byte[] dirAddr = EncodePlc5LogicalAddress(0, 0);
 
         // Step 1: read 1 word at word offset 35 (byte offset 70) = dirSize field
         byte[] sizeData = WordRangeRead(dirAddr, 35, 1);
