@@ -670,7 +670,7 @@ public class Plc5Handler : IPlcHandler
             "ReadModifyWrite for PLC-5 requires PLC-5 logical binary addressing. " +
             "SLC-style addressing is not supported. See 1770-6.5.16 page 7-20.");
 
-    public string WriteData(string startAddress, int dataToWrite)
+public string WriteData(string startAddress, int dataToWrite)
     {
         DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
@@ -684,17 +684,27 @@ public class Plc5Handler : IPlcHandler
         // 6-byte mask would incorrectly extend the AND/OR mask over PRE/ACC too.
         if (p.BitNumber >= 0 && p.BitNumber < p.BytesPerElements * 8)
         {
-            // Build address without bit to read the whole word
-            string wordAddress = startAddress.Split('/')[0];
-            string[] current = ReadAny(wordAddress, 1);
-            int word = int.Parse(current[0], CultureInfo.InvariantCulture);
-            // Modify the specified bit
+            int elemSize = p.BytesPerElements;
+            byte[] andMask = new byte[elemSize];
+            byte[] orMask = new byte[elemSize];
+
+            for (int i = 0; i < elemSize; i++)
+            {
+                andMask[i] = 0xFF;
+                orMask[i] = 0x00;
+            }
+
+            int byteIndex = p.BitNumber / 8;
+            int bitIndex = p.BitNumber % 8;
+
+            andMask[byteIndex] = (byte)~(1 << bitIndex);
             if (dataToWrite != 0)
-                word |= (1 << p.BitNumber);
-            else
-                word &= ~(1 << p.BitNumber);
-            // Write back using word write
-            int status = WriteData(wordAddress, 1, new int[] { word });
+                orMask[byteIndex] = (byte)(1 << bitIndex);
+
+            byte[] logicalAddress = EncodePlc5LogicalAddress(p.FileNumber, p.Element);
+            _protocol.ReadModifyWritePlc5(logicalAddress, andMask, orMask, out int status,
+                (byte)MyNode, (byte)TargetNode);
+
             return status == 0 ? string.Empty : PCCCErrors.DecodeStatus(status);
         }
 

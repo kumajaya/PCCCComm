@@ -244,6 +244,28 @@ namespace PCCCComm.Pccc
             SendRequest(req, out statusCode);
         }
 
+        /// <summary>Read-Modify-Write for PLC-5 (FNC 0x26) with logical binary addressing.</summary>
+        public void ReadModifyWritePlc5(byte[] logicalAddress, byte[] andMask, byte[] orMask,
+            out int statusCode, byte myNode, byte targetNode)
+        {
+            if (logicalAddress == null || logicalAddress.Length == 0)
+                throw new ArgumentException("Logical address cannot be null or empty.", nameof(logicalAddress));
+            if (andMask == null || orMask == null || andMask.Length != orMask.Length)
+                throw new ArgumentException("AND mask and OR mask must be non-null and have the same length.");
+
+            byte[] body = new byte[logicalAddress.Length + andMask.Length + orMask.Length];
+            int offset = 0;
+            Buffer.BlockCopy(logicalAddress, 0, body, offset, logicalAddress.Length);
+            offset += logicalAddress.Length;
+            Buffer.BlockCopy(andMask, 0, body, offset, andMask.Length);
+            offset += andMask.Length;
+            Buffer.BlockCopy(orMask, 0, body, offset, orMask.Length);
+
+            var req = new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite,
+                0, 0, PCCCConstants.Fnc.ReadModifyWrite, body);
+            SendRequest(req, out statusCode);
+        }
+
         // --- Processor information and mode control -------------------------
 
         /// <summary>Returns the processor type code (e.g., 0x49 for SLC 5/03).</summary>
