@@ -149,7 +149,13 @@ class Program
         public bool IsSerial => Transport is "df1" or "df1master";
 
         // Protocol capability flags
-        /// <summary>FNC 0xAB (SLC-style bit RMW) and FNC 0x26 not supported on PLC-5.</summary>
+        /// <summary>
+        /// Gates the SLC-style FNC 0xAB / FNC 0x26 wire format tested by SelfTest_BitReadWrite
+        /// and SelfTest_ReadModifyWrite. PLC-5 does NOT use FNC 0xAB at all, and uses a
+        /// different FNC 0x26 payload (PLC-5 logical binary addressing + element-sized masks,
+        /// see PCCCProtocol.ReadModifyWritePlc5) — it is exercised separately by
+        /// SelfTest_Plc5ReadModifyWrite, gated on IsPlc5 instead.
+        /// </summary>
         public bool SupportsSlcRmw    => !IsPlc5;
         /// <summary>DH485 link parameters only meaningful on SLC serial.</summary>
         public bool SupportsLinkParams => IsSlc && IsSerial;
@@ -1045,7 +1051,8 @@ class Program
 //   8.  MultiElementRead      — burst read N7 and F8 (emulator only)
 //   9.  MultiElementWrite     — burst write N7 (emulator only)
 //   10. ProcessorMode         — SetRunMode/SetProgramMode (emulator only)
-//   11. ReadModifyWrite       — FNC 0x26 (emulator only, not PLC-5)
+//   11. ReadModifyWrite       — FNC 0x26 SLC-style (emulator only, not PLC-5)
+//   11b.Plc5ReadModifyWrite   — FNC 0x26 PLC-5 logical binary addressing (emulator, PLC-5 only)
 //   12. StringReadWrite       — ST file round-trips, file-aware (emulator only)
 //   13. InitializeMemory      — FNC 0x57 (emulator only)
 //   14. LinkParameters        — FNC 0x09/0x0A (emulator only, SLC serial only)
@@ -1170,6 +1177,7 @@ class Program
             SelfTest_MultiElementWrite(pccc, ctx);
             SelfTest_ProcessorMode(pccc);
             SelfTest_ReadModifyWrite(pccc, ctx);
+            SelfTest_Plc5ReadModifyWrite(pccc, ctx);
             SelfTest_StringReadWrite(pccc, ctx);
             SelfTest_InitializeMemory(pccc, ctx);
             SelfTest_LinkParameters(pccc, ctx);
@@ -1374,15 +1382,15 @@ class Program
         TryWrite(() => pccc.WriteData("B3:0/15", 1));
         string? rawSet = TryTest(() => pccc.ReadAny("B3:0"), out _);
         int expSet = (1 << 0) | (1 << 4) | (1 << 15);
-        bool okSet = int.TryParse(rawSet, out int sv) && sv == (short)expSet;
-        TestResult($"Bit set: bits 0,4,15 → word=0x{expSet:X4} ({(short)expSet})", okSet,
+        bool okSet = int.TryParse(rawSet, out int sv) && sv == expSet;
+        TestResult($"Bit set: bits 0,4,15 → word=0x{expSet:X4} ({expSet})", okSet,
                    okSet ? $"= 0x{sv:X4}" : $"got '{rawSet}'");
 
         TryWrite(() => pccc.WriteData("B3:0/4", 0));
         string? rawClr = TryTest(() => pccc.ReadAny("B3:0"), out _);
         int expClr = (1 << 0) | (1 << 15);
-        bool okClr = int.TryParse(rawClr, out int cv) && cv == (short)expClr;
-        TestResult($"Bit clear: clear bit 4 → word=0x{expClr:X4} ({(short)expClr})", okClr,
+        bool okClr = int.TryParse(rawClr, out int cv) && cv == expClr;
+        TestResult($"Bit clear: clear bit 4 → word=0x{expClr:X4} ({expClr})", okClr,
                    okClr ? $"= 0x{cv:X4}" : $"got '{rawClr}'");
 
         // All-bits test on B3:1 (only if available)
@@ -1486,6 +1494,53 @@ class Program
         val = TryTest(() => pccc.ReadAny("B3:1"), out string re2);
         ok = int.TryParse(val, out iv) && iv == 4;
         TestResult("RMW clear bit 0 → value 4 (bit 2 only)", ok, ok ? "" : $"got '{val ?? re2}'");
+    }
+
+    // ── Test group 11b: PLC-5 Read-Modify-Write (logical binary addressing) ──
+
+    /// <summary>
+    /// Exercises the PLC-5-specific FNC 0x26 wire format via WriteData("N7:x/n", ...), which
+    /// routes through Plc5Handler.WriteData(string,int) -> PCCCProtocol.ReadModifyWritePlc5.
+    /// This is a distinct code path from SelfTest_ReadModifyWrite above (SLC-style FNC 0x26,
+    /// raw fileNumber/fileType/element/subElement + fixed 2-byte masks) — PLC-5 instead sends
+    /// PLC-5 logical binary addressing with AND/OR masks sized to the target element. Without
+    /// this test, that path had no automated coverage: both SelfTest_BitReadWrite and
+    /// SelfTest_ReadModifyWrite skip entirely on PLC-5 via ctx.SupportsSlcRmw.
+    /// </summary>
+    private static void SelfTest_Plc5ReadModifyWrite(Comm.PCCCComm pccc, SelfTestContext ctx)
+    {
+        Console.WriteLine("── PLC-5 Read-Modify-Write Test (bit-level via N7) ──");
+        if (!ctx.IsPlc5)
+        { TestSkip("PLC-5 Read-Modify-Write", "only applies to PLC-5 (SLC/ML1400 covered by SelfTest_BitReadWrite / SelfTest_ReadModifyWrite instead)"); return; }
+        if (!ctx.CanAccess(7, 0))
+        { TestSkip("PLC-5 Read-Modify-Write", ctx.SkipReason(7, "N7", 1)); return; }
+
+        TryWrite(() => pccc.WriteData("N7:0", 0));
+        TryWrite(() => pccc.WriteData("N7:0/0", 1));
+        TryWrite(() => pccc.WriteData("N7:0/4", 1));
+        TryWrite(() => pccc.WriteData("N7:0/15", 1));
+        string? rawSet = TryTest(() => pccc.ReadAny("N7:0"), out string errSet);
+        int expSet = (1 << 0) | (1 << 4) | (1 << 15);
+        short expSetSigned = (short)expSet;
+        bool okSet = int.TryParse(rawSet, out int sv) && sv == expSetSigned;
+        TestResult($"PLC-5 RMW set bits 0,4,15 → N7:0 = {expSetSigned}", okSet,
+                   okSet ? $"= {sv}" : $"got '{rawSet ?? errSet}'");
+
+        TryWrite(() => pccc.WriteData("N7:0/4", 0));
+        string? rawClr = TryTest(() => pccc.ReadAny("N7:0"), out string errClr);
+        int expClr = (1 << 0) | (1 << 15);
+        short expClrSigned = (short)expClr;
+        bool okClr = int.TryParse(rawClr, out int cv) && cv == expClrSigned;
+        TestResult($"PLC-5 RMW clear bit 4 → N7:0 = {expClrSigned}", okClr,
+                   okClr ? $"= {cv}" : $"got '{rawClr ?? errClr}'");
+
+        // Regression guard for the AND-mask width bug class: confirm bit 0 and 15
+        // (in a different byte of the 2-byte element) both survived the clear of bit 4
+        // untouched — proves the mask was sized/aligned to the whole element, not just
+        // clipped to a single byte.
+        bool bothSurvived = okClr && cv == expClrSigned;
+        TestResult("PLC-5 RMW mask width covers full element (bits 0 and 15 both survived)",
+                   bothSurvived, bothSurvived ? "" : $"expected {expClrSigned}, got {cv}");
     }
 
     // ── Test group 12: String read/write ─────────────────────────────────────
