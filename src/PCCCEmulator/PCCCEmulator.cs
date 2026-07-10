@@ -491,45 +491,61 @@ public class PCCCEmulator : IDisposable
         // Extract data payload — everything after the header (+ FUNC byte for 0x0F)
         byte[] data = pdu.Length > dataOffset ? pdu[dataOffset..] : Array.Empty<byte>();
 
-        // Dispatch based on command code
-        if (cmd == 0x06 && func == 0x00)
-            SendGetStatusLoopbackResponse(src, tns, data, clientContext);
-        else if (cmd == 0x06 && func == 0x03)
-            SendGetStatusResponse(src, tns, clientContext);
-        else if (cmd == 0x06 && func == 0x01)
-            SendDiagnosticCountersResponse(src, tns, replyCmd: 0x46, clientContext);
-        else if (cmd == 0x06 && func == 0x07)
+        try
         {
-            ResetDiagnosticCounters();
-            SendEmptyResponse(src, tns, 0x46, func, clientContext);
+            // Dispatch based on command code
+            if (cmd == 0x06 && func == 0x00)
+                SendGetStatusLoopbackResponse(src, tns, data, clientContext);
+            else if (cmd == 0x06 && func == 0x03)
+                SendGetStatusResponse(src, tns, clientContext);
+            else if (cmd == 0x06 && func == 0x01)
+                SendDiagnosticCountersResponse(src, tns, replyCmd: 0x46, clientContext);
+            else if (cmd == 0x06 && func == 0x07)
+            {
+                ResetDiagnosticCounters();
+                SendEmptyResponse(src, tns, 0x46, func, clientContext);
+            }
+            else if (cmd == 0x06 && func == 0x02)
+                SendLoopbackResponse(src, tns, data, clientContext);
+            else if (cmd == 0x01)
+                SendEmptyResponse(src, tns, 0x41, 0x00, clientContext);
+            else if (cmd == 0x0B)
+                SendEmptyResponse(src, tns, 0x4B, 0x00, clientContext);
+            else if (cmd == 0x0F)
+                DispatchFunctionCode(src, tns, func, data, clientContext);
+            else if (cmd == 0x0A)
+                SendDiagnosticCountersResponse(src, tns, 0x4A, clientContext);
+            else if (cmd == 0x67)
+                HandleReadModifiedData(src, tns, data, clientContext);
+            else if (cmd == 0x06 && func == 0x09)
+            {
+                // Read Link Parameters – return one byte containing _maxNodeAddress
+                byte[] linkParam = new byte[] { (byte)_maxNodeAddress };
+                SendDataResponse(src, tns, 0x46, linkParam, clientContext);
+            }
+            else if (cmd == 0x06 && func == 0x0A)
+            {
+                // Set Link Parameters – expects one byte in data
+                if (data != null && data.Length >= 1)
+                    _maxNodeAddress = data[0];
+                SendEmptyResponse(src, tns, 0x46, func, clientContext);
+            }
+            else
+                SendErrorResponse(src, tns, cmd, func, 0x01, clientContext);
         }
-        else if (cmd == 0x06 && func == 0x02)
-            SendLoopbackResponse(src, tns, data, clientContext);
-        else if (cmd == 0x01)
-            SendEmptyResponse(src, tns, 0x41, 0x00, clientContext);
-        else if (cmd == 0x0B)
-            SendEmptyResponse(src, tns, 0x4B, 0x00, clientContext);
-        else if (cmd == 0x0F)
-            DispatchFunctionCode(src, tns, func, data, clientContext);
-        else if (cmd == 0x0A)
-            SendDiagnosticCountersResponse(src, tns, 0x4A, clientContext);
-        else if (cmd == 0x67)
-            HandleReadModifiedData(src, tns, data, clientContext);
-        else if (cmd == 0x06 && func == 0x09)
+        catch (Exception ex)
         {
-            // Read Link Parameters – return one byte containing _maxNodeAddress
-            byte[] linkParam = new byte[] { (byte)_maxNodeAddress };
-            SendDataResponse(src, tns, 0x46, linkParam, clientContext);
+            // Defensive catch-all: an unhandled exception anywhere in the handlers above
+            // (e.g. PlcMemory throwing on an out-of-range/unconfigured file number, or any
+            // future bug) must not silently disappear into the transport's generic
+            // ProcessAsync error log — that leaves the real caller hanging until its own
+            // request timeout with no PCCC-level indication of what happened. A real PLC
+            // always replies with *some* status to a request it can't process, so do the
+            // same here: log it for diagnosis, then send a generic error reply.
+            System.Diagnostics.Debug.WriteLine(
+                $"[PCCCEmulator] Unhandled exception dispatching CMD=0x{cmd:X2} FUNC=0x{func:X2} TNS=0x{tns:X4}: {ex}");
+            SendErrorResponse(src, tns, cmd, func, 0x10, clientContext);
         }
-        else if (cmd == 0x06 && func == 0x0A)
-        {
-            // Set Link Parameters – expects one byte in data
-            if (data != null && data.Length >= 1)
-                _maxNodeAddress = data[0];
-            SendEmptyResponse(src, tns, 0x46, func, clientContext);
-        }
-        else
-            SendErrorResponse(src, tns, cmd, func, 0x01, clientContext);
     }
 
     // ─── PCCC Function Code Handlers ─────────────────────────────────────────
@@ -1250,17 +1266,37 @@ public class PCCCEmulator : IDisposable
 
     /// <summary>
     /// Handles Read‑Modify‑Write (CMD=0x0F, FNC=0x26).
-    /// Payload format: for each set:
-    ///   fileNumber (1 byte)
-    ///   fileType   (1 byte)
-    ///   element    (1 or 3 bytes, 0xFF extended)
-    ///   subElement (1 or 3 bytes, 0xFF extended)
-    ///   andMask    (2 bytes LE)
-    ///   orMask     (2 bytes LE)
+    ///
+    /// Two incompatible wire formats exist for this same FNC across processor families —
+    /// there is no reliable way to auto-detect which one a given payload uses (the SLC
+    /// format's raw fileNumber byte and the PLC-5 format's mask byte overlap in value
+    /// range), so this dispatches on <see cref="_family"/> instead, matching how a real
+    /// SLC vs PLC-5 processor would only ever understand its own format:
+    ///
+    ///   SLC/ML1400 (this method): for each set:
+    ///     fileNumber (1 byte), fileType (1 byte),
+    ///     element (1 or 3 bytes, 0xFF extended), subElement (1 or 3 bytes, 0xFF extended),
+    ///     andMask (2 bytes LE), orMask (2 bytes LE)
+    ///
+    ///   PLC-5 (see HandleReadModifyWritePlc5): PLC-5 logical binary address (variable)
+    ///     followed by AND/OR masks sized to the target element (not fixed at 2 bytes) —
+    ///     matching PCCCProtocol.ReadModifyWritePlc5 / Plc5Handler.WriteData(string,int).
     /// </summary>
     private void HandleReadModifyWrite(int src, int tns, byte[] payload, object clientContext)
     {
-        if (payload == null || payload.Length < 8) // at least one full set
+        if (payload == null || payload.Length < 4)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x26, 0x01, clientContext);
+            return;
+        }
+
+        if (_family == EmulationFamily.Plc5)
+        {
+            HandleReadModifyWritePlc5(src, tns, payload, clientContext);
+            return;
+        }
+
+        if (payload.Length < 8) // at least one full set
         {
             SendErrorResponse(src, tns, 0x0F, 0x26, 0x01, clientContext);
             return;
@@ -1322,6 +1358,79 @@ public class PCCCEmulator : IDisposable
             SendEmptyResponse(src, tns, 0x4F, 0x26, clientContext);
         else
             SendErrorResponse(src, tns, 0x0F, 0x26, 0x10, clientContext);
+    }
+
+    /// <summary>
+    /// PLC-5 variant of Read-Modify-Write (FNC 0x26). Wire format (per
+    /// PCCCProtocol.ReadModifyWritePlc5 / Plc5Handler.EncodePlc5LogicalAddress):
+    ///   [PLC-5 logical binary address: mask + levels (variable length)]
+    ///   [andMask: N bytes][orMask: N bytes]
+    /// where N = the target element's byte size (2 for most types, more for wide types).
+    /// Unlike the SLC format, there is no separate fileType field — the file type is
+    /// resolved from the file number (same pattern as HandleWordRangeRead/Write), and the
+    /// masks are sized to the element rather than fixed at 2 bytes.
+    /// </summary>
+    private void HandleReadModifyWritePlc5(int src, int tns, byte[] payload, object clientContext)
+    {
+        int idx = 0;
+        if (!Plc5AddressDecoder.Decode(payload, ref idx,
+                out int fileNumber, out int rawFileType, out int element, out int subElement))
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x26, 0x10, clientContext);
+            return;
+        }
+
+        // fileType is not encoded in the PLC-5 bit-flag address format (rawFileType stays
+        // 0 in that case) — resolve it from the file number instead, same as
+        // HandleWordRangeRead/HandleWordRangeWrite do for the same reason.
+        int fileType = rawFileType != 0
+            ? Plc5AddressDecoder.Plc5ToSlcFileType(rawFileType)
+            : _memory.GetFileTypeForNumber(fileNumber);
+        if (fileType == 0)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x26, 0x50, clientContext);
+            return;
+        }
+
+        int bpe = _memory.GetBytesPerElement(fileType, fileNumber);
+        if (bpe <= 0)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x26, 0x10, clientContext);
+            return;
+        }
+
+        // Masks follow the address, each sized to the element — see
+        // Plc5Handler.WriteData(string,int)'s masked-write path, which builds andMask/
+        // orMask with length == p.BytesPerElements, not a fixed 2 bytes.
+        int maskLen = bpe;
+        if (idx + maskLen * 2 > payload.Length)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x26, 0x01, clientContext);
+            return;
+        }
+
+        byte[] andMask = new byte[maskLen];
+        byte[] orMask  = new byte[maskLen];
+        Array.Copy(payload, idx, andMask, 0, maskLen);
+        idx += maskLen;
+        Array.Copy(payload, idx, orMask, 0, maskLen);
+        idx += maskLen;
+
+        int byteOffset = element * bpe + subElement * 2;
+        byte[] current = _memory.ReadRaw(fileType, fileNumber, byteOffset, maskLen, out int status);
+        if (status != 0 || current.Length != maskLen)
+        {
+            SendErrorResponse(src, tns, 0x0F, 0x26, 0x10, clientContext);
+            return;
+        }
+
+        byte[] result = new byte[maskLen];
+        for (int i = 0; i < maskLen; i++)
+            result[i] = (byte)((current[i] & andMask[i]) | orMask[i]);
+
+        bool ok = _memory.WriteRaw(fileType, fileNumber, byteOffset, maskLen, result);
+        if (ok) SendEmptyResponse(src, tns, 0x4F, 0x26, clientContext);
+        else    SendErrorResponse(src, tns, 0x0F, 0x26, 0x10, clientContext);
     }
 
     // Typed Read/Write frame field sizes per 1770-6.5.16 §7-28 and §7-30.
