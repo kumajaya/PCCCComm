@@ -1685,9 +1685,16 @@ public class PCCCEmulator : IDisposable
 
         byte[] data = _memory.ReadRaw(fileType, fileNumber, byteOffset, bytesToRead, out int status);
         // Swap word for RSLinx
+        // Guard: i + 4 <= data.Length (not "i < data.Length") — a client can request an
+        // odd/partial word count from a float file (e.g. sizeWords=1 = 2 bytes, half of a
+        // 4-byte float element; this is exactly what happens reading 1 word from an F-file
+        // like F100). The old condition let the loop start a final iteration it couldn't
+        // finish, indexing data[i+2]/data[i+3] past the end of the array and throwing
+        // IndexOutOfRangeException. Any trailing incomplete word-pair (already a malformed/
+        // misaligned request) is left unswapped rather than crashing the whole reply.
         if (status == 0 && fileType == 0x8A)  // float file
         {
-            for (int i = 0; i < data.Length; i += 4)
+            for (int i = 0; i + 4 <= data.Length; i += 4)
             {
                 // swap word: word0 (bytes i..i+1) with word1 (bytes i+2..i+3)
                 byte tmp0 = data[i];
@@ -1816,8 +1823,9 @@ public class PCCCEmulator : IDisposable
 
         if (fileType == 0x8A) // float file
         {
-            // swap word
-            for (int i = 0; i < writeData.Length; i += 4)
+            // swap word — see the matching guard/comment in HandleWordRangeRead above for
+            // why "i + 4 <= writeData.Length" is required instead of "i < writeData.Length".
+            for (int i = 0; i + 4 <= writeData.Length; i += 4)
             {
                 byte tmp0 = writeData[i];
                 byte tmp1 = writeData[i+1];
