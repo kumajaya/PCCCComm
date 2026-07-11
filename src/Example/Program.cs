@@ -963,6 +963,20 @@ class Program
         if (parsed.FileType == 0) { Console.WriteLine($"Invalid address: '{addr}'"); return; }
         var fileType = (Comm.Pccc.PCCCConstants.SlcFileTypeCode)parsed.FileType;
 
+        // Bit-level write (e.g. B3:0/5, N7:0/2): route to the single-value WriteData
+        // overload, whose bit path performs a Read-Modify-Write so ONLY the addressed
+        // bit changes. Without this, the multi-element int path below would write the
+        // value as the whole word (e.g. "write B3:0/5 1" would overwrite B3:0 with 1,
+        // setting bit 0 instead of bit 5 while still reporting success).
+        if (parsed.BitNumber >= 0 && parsed.BitNumber < 16)
+        {
+            if (parts.Length != 3 || !int.TryParse(parts[2], out int bit) || (bit != 0 && bit != 1))
+            { Console.WriteLine("Bit write expects a single 0 or 1, e.g. write B3:0/5 1"); return; }
+            string bitRes = pccc.WriteData(addr, bit);
+            Console.WriteLine(string.IsNullOrEmpty(bitRes) ? "Write successful." : $"Write failed: {bitRes}");
+            return;
+        }
+
         if (fileType == Comm.Pccc.PCCCConstants.SlcFileTypeCode.String)
         { pccc.WriteData(addr, string.Join(" ", parts.Skip(2))); Console.WriteLine("String write successful."); return; }
 
