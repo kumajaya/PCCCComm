@@ -708,6 +708,77 @@ class Program
         Console.WriteLine($"\n  Watch stopped. {readCount} reads, {changeCount} change(s) in {sw.Elapsed:hh\\:mm\\:ss}.");
     }
 
+    // ── TypedRead / TypedWrite (PLC-5, FNC 0x68/0x67) ─────────────────────────
+    // Exercises the typed command path (distinct from wordread/wordwrite). Supports
+    // N (integer, 2 bytes) and F (float, 4 bytes) — the two types with spec/capture
+    // ground truth. Typed float uses STANDARD little-endian (no high-word swap), unlike
+    // Word Range. Address uses the 3-level write form (mask 0x07), matching live RSLinx
+    // typed traffic.
+
+    private static void HandleTypedRead(Comm.PCCCComm pccc, string[] parts)
+    {
+        if (parts.Length < 4)
+        {
+            Console.WriteLine("Usage: typedread <N|F> <fileNumber> <element> [count]");
+            Console.WriteLine("Example: typedread F 8 0   /   typedread N 7 0 3");
+            return;
+        }
+        string ft = parts[1].ToUpperInvariant();
+        if (ft != "N" && ft != "F") { Console.WriteLine("typedread currently supports N and F only."); return; }
+        if (!int.TryParse(parts[2], out int fn) || !int.TryParse(parts[3], out int elem)) { Console.WriteLine("Invalid file number/element."); return; }
+        int count = 1;
+        if (parts.Length >= 5 && !int.TryParse(parts[4], out count)) { Console.WriteLine("Invalid count."); return; }
+
+        byte[] addr = Comm.Handlers.Plc5Handler.EncodePlc5WriteAddress(fn, elem);
+        try
+        {
+            byte[] data = pccc.TypedRead(addr, count);
+            int bpe = ft == "F" ? 4 : 2;
+            var vals = new System.Collections.Generic.List<string>();
+            for (int i = 0; i + bpe <= data.Length && i / bpe < count; i += bpe)
+                vals.Add(ft == "F"
+                    ? System.BitConverter.ToSingle(data, i).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : System.BitConverter.ToInt16(data, i).ToString());
+            Console.WriteLine($"Result: {string.Join(", ", vals)}");
+        }
+        catch (Exception ex) { Console.WriteLine($"TypedRead failed: {ex.Message}"); }
+    }
+
+    private static void HandleTypedWrite(Comm.PCCCComm pccc, string[] parts)
+    {
+        if (parts.Length < 5)
+        {
+            Console.WriteLine("Usage: typedwrite <N|F> <fileNumber> <element> <value>");
+            Console.WriteLine("Example: typedwrite F 8 0 123.5   /   typedwrite N 7 0 999");
+            return;
+        }
+        string ft = parts[1].ToUpperInvariant();
+        if (ft != "N" && ft != "F") { Console.WriteLine("typedwrite currently supports N and F only."); return; }
+        if (!int.TryParse(parts[2], out int fn) || !int.TryParse(parts[3], out int elem)) { Console.WriteLine("Invalid file number/element."); return; }
+
+        byte[] addr = Comm.Handlers.Plc5Handler.EncodePlc5WriteAddress(fn, elem);
+        byte[] descriptor, data;
+        if (ft == "F")
+        {
+            if (!float.TryParse(parts[4], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float f))
+            { Console.WriteLine("Invalid float value."); return; }
+            descriptor = new byte[] { 0x94, 0x08 };            // ID 8 (float), size 4
+            data = System.BitConverter.GetBytes(f);            // standard little-endian
+        }
+        else
+        {
+            if (!short.TryParse(parts[4], out short n)) { Console.WriteLine("Invalid integer value (-32768..32767)."); return; }
+            descriptor = new byte[] { 0x42 };                  // ID 4 (integer), size 2
+            data = System.BitConverter.GetBytes(n);
+        }
+        try
+        {
+            pccc.TypedWrite(addr, descriptor, data, 1);
+            Console.WriteLine("Typed write successful.");
+        }
+        catch (Exception ex) { Console.WriteLine($"TypedWrite failed: {ex.Message}"); }
+    }
+
     // ── WordRead / WordWrite (PLC-5) ──────────────────────────────────────────
 
     /// <summary>Shared address parsing for wordread and wordwrite.</summary>
@@ -851,6 +922,8 @@ class Program
                     case "watch":       HandleWatch(pccc, parts); break;
                     case "wordread":    HandleWordRead(pccc, parts); break;
                     case "wordwrite":   HandleWordWrite(pccc, parts); break;
+                    case "typedread":   HandleTypedRead(pccc, parts); break;
+                    case "typedwrite":  HandleTypedWrite(pccc, parts); break;
                     case "datamem":     HandleDataMemory(pccc); break;
                     // Password commands — ML1100/1200/1400 only (hidden from help)
                     case "getpass":     HandlePassword(pccc, 0x0B, null,     "Password", read: true);  break;
@@ -1839,6 +1912,8 @@ class Program
         Console.WriteLine("                                 Example: sendhex 01 06 03");
         Console.WriteLine("  wordread <type> <num> <elem> <offset> <words>  Word Range Read (PLC-5)");
         Console.WriteLine("  wordwrite <type> <num> <elem> <offset> <hex...>  [!] Word Range Write (PLC-5)");
+        Console.WriteLine("  typedread <N|F> <num> <elem> [count]           Typed Read (PLC-5, FNC 0x68)");
+        Console.WriteLine("  typedwrite <N|F> <num> <elem> <value>          [!] Typed Write (PLC-5, FNC 0x67)");
         Console.WriteLine();
         Console.WriteLine("  [!] = modifies PLC state — use with caution");
         Console.WriteLine("  exit / quit                    Leave interactive mode");

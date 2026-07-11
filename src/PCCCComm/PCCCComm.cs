@@ -665,6 +665,22 @@ public class PCCCComm : IDisposable, IHandlerContext
     }
 
     /// <summary>Word Range Write for PLC-5 (FNC=0x00).</summary>
+    /// <summary>Typed Read (PLC-5, FNC 0x68). Returns element data bytes (descriptor stripped).</summary>
+    public byte[] TypedRead(byte[] logicalAddress, int elementCount)
+    {
+        EnsureHandler();
+        if (_handler is Plc5Handler plc5) return plc5.TypedReadRaw(logicalAddress, elementCount);
+        throw new NotSupportedException("TypedRead is only supported for PLC-5 processors.");
+    }
+
+    /// <summary>Typed Write (PLC-5, FNC 0x67). Caller supplies the type/data parameter for the target type.</summary>
+    public void TypedWrite(byte[] logicalAddress, byte[] typeDataParam, byte[] data, int elementCount)
+    {
+        EnsureHandler();
+        if (_handler is Plc5Handler plc5) { plc5.TypedWriteRaw(logicalAddress, typeDataParam, data, elementCount); return; }
+        throw new NotSupportedException("TypedWrite is only supported for PLC-5 processors.");
+    }
+
     public void WordRangeWrite(byte[] logicalAddress, int wordOffset, byte[] data)
     {
         EnsureHandler();

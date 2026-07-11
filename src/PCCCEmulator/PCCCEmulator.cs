@@ -1559,6 +1559,18 @@ public class PCCCEmulator : IDisposable
     }
 
     /// <summary>
+    /// Builds a type/data parameter for a Typed Read reply, keyed on element size.
+    /// Integer (2B) -> { 0x42 } (ID 4, size 2); Float (4B) -> { 0x94, 0x08 } (ID 8, size 4,
+    /// extended type byte). Other sizes use a byte-array descriptor (ID 3, size = bpe).
+    /// </summary>
+    private static byte[] BuildTypedReadDescriptor(int bytesPerElement) => bytesPerElement switch
+    {
+        2 => new byte[] { 0x42 },
+        4 => new byte[] { 0x94, 0x08 },
+        _ => new byte[] { (byte)(0x30 | (bytesPerElement & 0x0F)) }
+    };
+
+    /// <summary>
     /// Handles Typed Read (CMD=0x0F, FNC=0x68) for PLC-5.
     /// Request payload per 1770-6.5.16 §7-28:
     ///   [PktOff 2B LE] [TotTrans 2B LE] [logical binary address (variable)] [Size 2B LE (element count)]
@@ -1616,7 +1628,15 @@ public class PCCCEmulator : IDisposable
         byte[] data = _memory.ReadRaw(actualFileType, fileNumber, byteOffset, bytesToRead, out int status);
         if      (status == 2) SendErrorResponse(src, tns, 0x0F, 0x68, 0x50, clientContext);
         else if (status != 0) SendErrorResponse(src, tns, 0x0F, 0x68, 0x10, clientContext);
-        else                  SendDataResponse(src, tns, TypedSuccessReply, data, clientContext);
+        else
+        {
+            // Typed Read reply is [type/data parameter (var)][data] per 1770-6.5.16 §7-28.
+            byte[] descriptor = BuildTypedReadDescriptor(bpe);
+            byte[] reply = new byte[descriptor.Length + data.Length];
+            Buffer.BlockCopy(descriptor, 0, reply, 0, descriptor.Length);
+            Buffer.BlockCopy(data, 0, reply, descriptor.Length, data.Length);
+            SendDataResponse(src, tns, TypedSuccessReply, reply, clientContext);
+        }
     }
 
     /// <summary>

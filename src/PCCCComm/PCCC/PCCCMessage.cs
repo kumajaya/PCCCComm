@@ -545,7 +545,7 @@ namespace PCCCComm.Pccc
         /// <param name="myNode">Source node address.</param>
         /// <param name="targetNode">Destination node address.</param>
         /// <returns>PCCCMessage ready to send.</returns>
-        public static PCCCMessage CreateTypedWriteRequest(byte[] logicalAddress, byte[] data,
+        public static PCCCMessage CreateTypedWriteRequest(byte[] logicalAddress, byte[] typeDataParam, byte[] data,
             int elementCount, ushort tns, byte myNode, byte targetNode)
         {
             // Format per 1770-6.5.16 §7-30:
@@ -559,8 +559,10 @@ namespace PCCCComm.Pccc
             body.Add((byte)((elementCount >> 8) & 0xFF));
             // Logical binary address
             body.AddRange(logicalAddress);
-            // Type/Data Parameter (0x31 = byte array, 1 byte per element)
-            body.Add(PCCCConstants.Df1Limits.TypedTypeDataParamByteArray);
+            // Type/Data Parameter (variable length, self-describing per 1770-6.5.16 §7-36).
+            // Caller supplies the correct descriptor for the target type, e.g.
+            //   integer -> { 0x42 } (ID 4, size 2), float -> { 0x94, 0x08 } (ID 8, size 4).
+            body.AddRange(typeDataParam);
             // Data bytes (must be aligned to element boundaries)
             body.AddRange(data);
 

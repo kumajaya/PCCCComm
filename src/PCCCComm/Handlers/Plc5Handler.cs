@@ -187,6 +187,62 @@ public class Plc5Handler : IPlcHandler
                                 : EncodePlc5LogicalAddress(fileNumber, element);
 
     // ---------------------------------------------------------------------
+    // Typed Read / Typed Write (FNC 0x68 / 0x67)
+    // ---------------------------------------------------------------------
+    // The primary data path uses Word Range Read/Write; these typed methods exist so the
+    // typed command path is correct and testable. Ground truth covers integer (type ID 4,
+    // size 2 — 1770-6.5.16 §7-36) and float (type ID 8, size 4 — live RSLinx typed-write).
+    // Unlike Word Range, the typed path uses standard little-endian for float/long (no
+    // high-word-first swap).
+
+    /// <summary>Advance idx past a variable-length type/data parameter (§7-36/7-37).</summary>
+    public static bool SkipTypeDataParam(byte[] p, ref int idx)
+    {
+        if (p == null || idx >= p.Length) return false;
+        byte flag = p[idx++];
+        int typeId;
+        if ((flag & 0x80) != 0)
+        {
+            int n = (flag >> 4) & 0x07;
+            if (idx + n > p.Length) return false;
+            typeId = 0;
+            for (int i = 0; i < n; i++) typeId |= p[idx++] << (8 * i);
+        }
+        else typeId = (flag >> 4) & 0x07;
+        if ((flag & 0x08) != 0)
+        {
+            int m = flag & 0x07;
+            if (idx + m > p.Length) return false;
+            idx += m;
+        }
+        if (typeId == 9) return SkipTypeDataParam(p, ref idx);
+        return true;
+    }
+
+    /// <summary>Typed Read (FNC 0x68). Returns DATA bytes with the reply descriptor stripped.</summary>
+    public byte[] TypedReadRaw(byte[] logicalAddress, int elementCount)
+    {
+        var req = PCCCMessage.CreateTypedReadRequest(logicalAddress, elementCount, 0, (byte)MyNode, (byte)TargetNode);
+        var reply = _protocol.SendRequest(req, out int sts);
+        if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
+            throw new PCCCException($"TypedRead failed: {PCCCErrors.DecodeStatus(sts)}");
+        int idx = 0;
+        if (!SkipTypeDataParam(reply.Data, ref idx))
+            throw new PCCCException("TypedRead: malformed type/data parameter in reply.");
+        return reply.Data[idx..];
+    }
+
+    /// <summary>Typed Write (FNC 0x67). Caller supplies the type/data parameter for the type.</summary>
+    public void TypedWriteRaw(byte[] logicalAddress, byte[] typeDataParam, byte[] data, int elementCount)
+    {
+        var req = PCCCMessage.CreateTypedWriteRequest(logicalAddress, typeDataParam, data,
+            elementCount, 0, (byte)MyNode, (byte)TargetNode);
+        _protocol.SendRequest(req, out int sts);
+        if (sts != PCCCConstants.Sts.Success)
+            throw new PCCCException($"TypedWrite failed: {PCCCErrors.DecodeStatus(sts)}");
+    }
+
+    // ---------------------------------------------------------------------
     // Chunked read/write helpers using Word Range Read/Write
     // ---------------------------------------------------------------------
 
