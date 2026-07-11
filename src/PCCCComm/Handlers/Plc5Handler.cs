@@ -122,6 +122,71 @@ public class Plc5Handler : IPlcHandler
     }
 
     // ---------------------------------------------------------------------
+    // RSLinx-exact logical binary encoders (defensive: stricter PLC-5 firmware)
+    // ---------------------------------------------------------------------
+    //
+    // The compact EncodePlc5LogicalAddress above (mask 0x06 = file+element, section
+    // and sub-element levels omitted) is accepted by the PLC-5 we tested against and
+    // by libplctag's target — the PLC-5 fills absent levels with their defaults, which
+    // is consistent with the "insignificant zero fields may be omitted" rule in
+    // AB 1770-6.5.16 §7-36. The encoders below instead reproduce, byte-for-byte, what
+    // RSLinx itself sends (verified against live RSLinx->PLC-5 captures):
+    //   READ  (word range read  0x01): mask 0x0F, levels [section=0, file, elem, sub=0]
+    //   WRITE (word range write 0x00): mask 0x07, levels [section=0, file, elem]
+    // RSLinx's form is the maximally-compatible superset every PLC-5 must accept, so it
+    // is the safer default for meeting firmware whose default-level leniency is unknown.
+
+    /// <summary>
+    /// When true (default) the read/write data paths emit the RSLinx-exact logical
+    /// binary address (mask 0x0F / 0x07 with the section level present). When false they
+    /// emit the compact form (mask 0x06, section/sub-element omitted). Both address the
+    /// same location on PLC-5 firmware that applies level defaults; RSLinx form is chosen
+    /// as default for widest firmware compatibility.
+    /// </summary>
+    public bool UseRSLinxAddressForm { get; set; } = true;
+
+    private static void AppendLevel(List<byte> b, int value)
+    {
+        // 0xFF is the extended-form marker, so a value of exactly 255 must also use the
+        // 3-byte form (same reasoning as EncodePlc5LogicalAddress).
+        if (value < 255)
+            b.Add((byte)value);
+        else
+        {
+            b.Add(0xFF);
+            b.Add((byte)(value & 0xFF));
+            b.Add((byte)((value >> 8) & 0xFF));
+        }
+    }
+
+    /// <summary>RSLinx-exact READ address: mask 0x0F, [section=0, file, element, sub=0].</summary>
+    public static byte[] EncodePlc5ReadAddress(int fileNumber, int element)
+    {
+        var b = new List<byte> { 0x0F, 0x00 };
+        AppendLevel(b, fileNumber);
+        AppendLevel(b, element);
+        b.Add(0x00); // sub-element level 0
+        return b.ToArray();
+    }
+
+    /// <summary>RSLinx-exact WRITE address: mask 0x07, [section=0, file, element].</summary>
+    public static byte[] EncodePlc5WriteAddress(int fileNumber, int element)
+    {
+        var b = new List<byte> { 0x07, 0x00 };
+        AppendLevel(b, fileNumber);
+        AppendLevel(b, element);
+        return b.ToArray();
+    }
+
+    private byte[] EncodeReadAddr(int fileNumber, int element)
+        => UseRSLinxAddressForm ? EncodePlc5ReadAddress(fileNumber, element)
+                                : EncodePlc5LogicalAddress(fileNumber, element);
+
+    private byte[] EncodeWriteAddr(int fileNumber, int element)
+        => UseRSLinxAddressForm ? EncodePlc5WriteAddress(fileNumber, element)
+                                : EncodePlc5LogicalAddress(fileNumber, element);
+
+    // ---------------------------------------------------------------------
     // Chunked read/write helpers using Word Range Read/Write
     // ---------------------------------------------------------------------
 
@@ -159,8 +224,8 @@ public class Plc5Handler : IPlcHandler
                 int chunkWords = chunkBytes / 2;
                 int currentElement = addr.Element + (filePosition / bytesPerElem);
                 
-                // Encode 2-level logical address (file + element)
-                byte[] logicalAddress = EncodePlc5LogicalAddress(addr.FileNumber, currentElement);
+                // Encode logical address (RSLinx-exact 4-level read form by default)
+                byte[] logicalAddress = EncodeReadAddr(addr.FileNumber, currentElement);
                 
                 // Use WordRangeRead (FNC 0x01)
                 var req = PCCCMessage.CreateWordRangeReadRequest(
@@ -220,7 +285,7 @@ public class Plc5Handler : IPlcHandler
             
             int currentElement = addr.Element + (filePosition / bytesPerElem);
             
-            byte[] logicalAddress = EncodePlc5LogicalAddress(addr.FileNumber, currentElement);
+            byte[] logicalAddress = EncodeWriteAddr(addr.FileNumber, currentElement);
             
             byte[] chunkData = new byte[chunkBytes];
             Array.Copy(dataToWrite, filePosition, chunkData, 0, chunkBytes);
@@ -701,7 +766,9 @@ public string WriteData(string startAddress, int dataToWrite)
             if (dataToWrite != 0)
                 orMask[byteIndex] = (byte)(1 << bitIndex);
 
-            byte[] logicalAddress = EncodePlc5LogicalAddress(p.FileNumber, p.Element);
+            // No live PLC-5 RMW (FNC 0x26) capture yet; use the write-form (3-level)
+            // address by analogy to word range write. Revisit if a capture shows otherwise.
+            byte[] logicalAddress = EncodeWriteAddr(p.FileNumber, p.Element);
             _protocol.ReadModifyWritePlc5(logicalAddress, andMask, orMask, out int status,
                 (byte)MyNode, (byte)TargetNode);
 
