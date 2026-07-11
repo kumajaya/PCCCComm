@@ -1441,6 +1441,48 @@ public class PCCCEmulator : IDisposable
     private const byte TypedSuccessReply = 0x4F; // CMD reply = 0x0F | 0x40
 
     /// <summary>
+    /// <summary>
+    /// Advances <paramref name="idx"/> past a PLC-5 type/data parameter, which is a
+    /// variable-length, self-describing field per AB 1770-6.5.16 §7-36/7-37.
+    /// Flag byte: MSB of the high nibble (bit 7) set => type ID is in the next (bits 6-4)
+    /// bytes (LS first), else type ID = bits 6-4. MSB of the low nibble (bit 3) set =>
+    /// size is in the next (bits 2-0) bytes, else size = bits 2-0. An array type
+    /// (ID 9) is followed by a nested element descriptor (another type/data parameter).
+    /// Returns false if the buffer ends prematurely.
+    /// </summary>
+    private static bool SkipTypeDataParam(byte[] p, ref int idx)
+    {
+        if (idx >= p.Length) return false;
+        byte flag = p[idx++];
+
+        int typeId;
+        if ((flag & 0x80) != 0)
+        {
+            int n = (flag >> 4) & 0x07;          // type ID carried in next n bytes (LS first)
+            if (idx + n > p.Length) return false;
+            typeId = 0;
+            for (int i = 0; i < n; i++) typeId |= p[idx++] << (8 * i);
+        }
+        else
+        {
+            typeId = (flag >> 4) & 0x07;
+        }
+
+        if ((flag & 0x08) != 0)
+        {
+            int m = flag & 0x07;                 // size carried in next m bytes (LS first)
+            if (idx + m > p.Length) return false;
+            idx += m;
+        }
+        // else: size is bits 2-0, no extra bytes
+
+        // Array (ID 9) carries a nested element descriptor (another type/data parameter).
+        if (typeId == 9)
+            return SkipTypeDataParam(p, ref idx);
+
+        return true;
+    }
+
     /// Handles Typed Write (CMD=0x0F, FNC=0x67) for PLC-5.
     /// Request payload per 1770-6.5.16 §7-30:
     ///   [PktOff 2B LE] [TotTrans 2B LE] [logical binary address (variable)] [typeDataParam 1B] [data...]
@@ -1485,14 +1527,18 @@ public class PCCCEmulator : IDisposable
             actualFileType = Plc5AddressDecoder.Plc5ToSlcFileType(fileType);
         }
 
-        // Expect typeDataParam (0x31) but we don't need to validate unless desired
-        if (idx >= payload.Length)
+        // Consume the type/data parameter. It is a VARIABLE-length, self-describing
+        // field (AB 1770-6.5.16 §7-36/7-37), not a fixed single byte: the MSB of each
+        // nibble of the flag byte says whether the type-ID / size are carried in extra
+        // trailing bytes, and an array type (ID 9) carries a nested element descriptor.
+        // RSLinx OPC Server sends a 5-byte array descriptor for a float write
+        // (99 09 06 94 08); assuming 1 byte here left "09 06 94 08" mis-read as element-0
+        // data, shifting the real value into the next element.
+        if (idx >= payload.Length || !SkipTypeDataParam(payload, ref idx))
         {
             SendErrorResponse(src, tns, 0x0F, 0x67, 0x01, clientContext);
             return;
         }
-        // Optionally check that the byte equals TypedTypeDataParamByteArray
-        idx += 1;
 
         int bpe = _memory.GetBytesPerElement(actualFileType, fileNumber);
         // Align data length to element boundaries
