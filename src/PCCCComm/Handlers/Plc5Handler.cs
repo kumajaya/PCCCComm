@@ -38,7 +38,7 @@ namespace PCCCComm.Handlers;
 ///   - Chapter 10: Diagnostic status information (PLC‑5 status bytes, pages 10-20 to 10-23)
 ///   - Chapter 12: Uploading and downloading with PLC‑5 (pages 12-3 to 12-5, 12-8 to 12-10)
 ///   - Chapter 13: PLC‑5 logical binary addressing (pages 13-11 to 13-14)
-///   - Word Range Read (FNC 0x01) and Word Range Write (FNC 0x00), page 14-6/14-7
+///   - Word Range Read (FNC 0x01) page 7-34; Word Range Write (FNC 0x00) page 7-35
 /// 
 /// This implementation provides full data read/write access using Word Range Read/Write
 /// with logical binary addressing, supporting all PLC-5 file types (N, B, F, T, C, R, ST, etc.)
@@ -85,9 +85,12 @@ public class Plc5Handler : IPlcHandler
     // ---------------------------------------------------------------------
 
     /// <summary>
-    /// Encodes a PLC-5 logical binary address with 2 levels (file number + element).
-    /// Format: [mask=0x06][fileNumber][element].
-    /// Reference: AB Publication 1770-6.5.16, Chapter 13, page 13-12.
+    /// Encodes the COMPACT PLC-5 logical binary address: leading byte 0x06 is a
+    /// level-presence bitmask (bits 1,2 = file + element present; the section and
+    /// sub-element levels are omitted and default to 0). A real PLC-5 accepts this
+    /// (verified on a 1785-L40E). For the byte-exact RSLinx form (mask 0x0F read /
+    /// 0x07 write, section level present) use EncodePlc5ReadAddress / EncodePlc5WriteAddress.
+    /// Reference: AB Publication 1770-6.5.16, Chapter 13, "PLC-5 Logical Binary Addressing" (p.13-11).
     /// </summary>
     public static byte[] EncodePlc5LogicalAddress(int fileNumber, int element)
     {
@@ -644,7 +647,7 @@ public class Plc5Handler : IPlcHandler
             {
                 case (byte)PCCCConstants.SlcFileTypeCode.Float:
                     // Word Range Read transmits Float/Long as HIGH word then LOW word
-                    // (AB Pub. 1770-6.5.16 p.13-17 "PLC5 word range read" example) —
+                    // (AB Pub. 1770-6.5.16 p.13-17 "PLC5 Floating Point") —
                     // the opposite order from Typed Read. Swap accordingly.
                     result[i] = WordConverter.WordsToFloat(rawWords[offset + 1], rawWords[offset])
                         .ToString(CultureInfo.InvariantCulture);
@@ -978,9 +981,9 @@ public string WriteData(string startAddress, int dataToWrite)
     /// from the given logical address, automatically splitting the request into multiple
     /// Word Range Read packets if it exceeds the AB protocol's per-packet limit (244 bytes /
     /// 122 words per AB Pub. 1770-6.5.16 p.7-34). Successive packets reuse the same logical
-    /// address and advance the PACKET OFFSET field, exactly as shown in the multi-packet
-    /// "word range read" example on p.14-6/14-7 of that spec — so results are byte-for-byte
-    /// identical to what a single (hypothetically unlimited) request would return.
+    /// address and advance the PACKET OFFSET field while TOTAL TRANS stays constant, per the
+    /// Word Range Read command definition (p.7-34) — so results are byte-for-byte identical
+    /// to what a single (hypothetically unlimited) request would return.
     /// </summary>
     public byte[] WordRangeRead(byte[] logicalAddress, int wordOffset, int sizeWords)
     {

@@ -577,8 +577,8 @@ namespace PCCCComm.Pccc
             ushort tns, byte myNode, byte targetNode, int totalTransWords = -1)
         {
             // totalTransWords: the size (in words) of the OVERALL multi-packet transaction this
-            // request is part of. Per AB Pub. 1770-6.5.16 p.14-6/14-7 (multi-packet "word range
-            // read" example), TOTAL TRANS stays constant across every packet of a transaction
+            // request is part of. Per the Word Range Read command definition (AB Pub.
+            // 1770-6.5.16 p.7-34), TOTAL TRANS stays constant across every packet of a transaction
             // while PACKET OFFSET advances and each packet's own SIZE is just that packet's byte
             // count. The PLC validates "packet offset + size (words) <= total trans" and rejects
             // (STS 0xF0) requests where a smaller, per-packet total trans is sent instead.
