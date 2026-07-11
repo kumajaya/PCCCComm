@@ -1593,6 +1593,9 @@ class Program
     /// PLC-5 logical binary addressing with AND/OR masks sized to the target element. Without
     /// this test, that path had no automated coverage: both SelfTest_BitReadWrite and
     /// SelfTest_ReadModifyWrite skip entirely on PLC-5 via ctx.SupportsSlcRmw.
+    /// Also covers the multi-address PCCCComm.ReadModifyWrite() facade, which now routes to
+    /// Plc5Handler.ReadModifyWrite (one logical-binary FNC 0x26 per set) on PLC-5 instead of
+    /// throwing NotSupported.
     /// </summary>
     private static void SelfTest_Plc5ReadModifyWrite(Comm.PCCCComm pccc, SelfTestContext ctx)
     {
@@ -1628,6 +1631,19 @@ class Program
         bool bothSurvived = okClr && cv == expClrSigned;
         TestResult("PLC-5 RMW mask width covers full element (bits 0 and 15 both survived)",
                    bothSurvived, bothSurvived ? "" : $"expected {expClrSigned}, got {cv}");
+
+        // Coverage for the multi-address facade PCCCComm.ReadModifyWrite -> Plc5Handler.
+        // ReadModifyWrite (one logical-binary FNC 0x26 per set) — a distinct entry point from
+        // the WriteData bit path above. Word-level masks: AND 0xFFFF keeps all bits, OR sets
+        // bits 0, 4, 15.
+        TryWrite(() => pccc.WriteData("N7:0", 0));
+        int facSts = -1;
+        TryWrite(() => facSts = pccc.ReadModifyWrite(
+            new[] { "N7:0" }, new ushort[] { 0xFFFF }, new ushort[] { (ushort)expSet }));
+        string? rawFac = TryTest(() => pccc.ReadAny("N7:0"), out string errFac);
+        bool okFac = facSts == 0 && int.TryParse(rawFac, out int fv) && fv == expSetSigned;
+        TestResult($"PLC-5 RMW via ReadModifyWrite() facade -> N7:0 = {expSetSigned}", okFac,
+                   okFac ? "" : $"status 0x{facSts:X2}, got '{rawFac ?? errFac}'");
     }
 
     // ── Test group 12: String read/write ─────────────────────────────────────
