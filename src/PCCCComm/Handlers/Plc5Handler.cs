@@ -789,10 +789,42 @@ public class Plc5Handler : IPlcHandler
     /// <summary>Reads a single numeric element from the specified address.</summary>
     public double ReadAnyValues(string startAddress) => ReadAnyValues(startAddress, 1)[0];
 
+    /// <summary>
+    /// Read-Modify-Write for PLC-5 (FNC 0x26). Each (address, andMask, orMask) set is sent
+    /// as its own single-set request using PLC-5 logical binary addressing — the byte-exact
+    /// form RSLinx uses (address = write-form [section,file,elem]; masks = 2 bytes LE;
+    /// result = (current AND andMask) OR orMask). Multi-set-per-packet (FNC 0x79,
+    /// "read-modify-write N") is not implemented. Returns the STS of the last set, or the
+    /// first non-zero (error) STS encountered.
+    /// Reference: AB Publication 1770-6.5.16, page 7-20.
+    /// </summary>
     public int ReadModifyWrite(string[] addresses, ushort[] andMasks, ushort[] orMasks)
-        => throw new NotSupportedException(
-            "ReadModifyWrite for PLC-5 requires PLC-5 logical binary addressing. " +
-            "SLC-style addressing is not supported. See 1770-6.5.16 page 7-20.");
+    {
+        if (addresses == null || addresses.Length == 0)
+            throw new PCCCException("ReadModifyWrite: number of sets must be non-zero.");
+        if (andMasks == null || orMasks == null)
+            throw new PCCCException("ReadModifyWrite: andMasks and orMasks cannot be null.");
+        if (addresses.Length != andMasks.Length || addresses.Length != orMasks.Length)
+            throw new PCCCException("ReadModifyWrite: addresses, andMasks, and orMasks must have the same length.");
+
+        int sts = 0;
+        for (int i = 0; i < addresses.Length; i++)
+        {
+            DataAddress p = ParseAddress(addresses[i]);
+            if (p.FileType == 0)
+                throw new PCCCException($"ReadModifyWrite: invalid address '{addresses[i]}'.");
+
+            byte[] logicalAddress = EncodeWriteAddr(p.FileNumber, p.Element);
+            byte[] andMask = { (byte)(andMasks[i] & 0xFF), (byte)((andMasks[i] >> 8) & 0xFF) };
+            byte[] orMask  = { (byte)(orMasks[i] & 0xFF),  (byte)((orMasks[i] >> 8) & 0xFF)  };
+
+            _protocol.ReadModifyWritePlc5(logicalAddress, andMask, orMask, out sts,
+                (byte)MyNode, (byte)TargetNode);
+            if (sts != PCCCConstants.Sts.Success)
+                return sts; // stop on first PLC-side error
+        }
+        return sts;
+    }
 
 public string WriteData(string startAddress, int dataToWrite)
     {
@@ -825,8 +857,8 @@ public string WriteData(string startAddress, int dataToWrite)
             if (dataToWrite != 0)
                 orMask[byteIndex] = (byte)(1 << bitIndex);
 
-            // No live PLC-5 RMW (FNC 0x26) capture yet; use the write-form (3-level)
-            // address by analogy to word range write. Revisit if a capture shows otherwise.
+            // Write-form (3-level) address, verified byte-exact against a live RSLinx
+            // bit-write (FNC 0x26): 07 00 <file> <elem> + AND mask + OR mask (2 bytes LE).
             byte[] logicalAddress = EncodeWriteAddr(p.FileNumber, p.Element);
             _protocol.ReadModifyWritePlc5(logicalAddress, andMask, orMask, out int status,
                 (byte)MyNode, (byte)TargetNode);

@@ -815,7 +815,8 @@ public class SlcHandler : IPlcHandler
     /// Reads each specified word, applies AND mask (resets bits where mask bit = 0),
     /// then OR mask (sets bits where mask bit = 1), and writes back.
     /// 
-    /// Supported only on SLC processors. Not implemented for PLC-5 due to different address format.
+    /// SLC uses a single multi-set request; PLC-5 sends one logical-binary RMW per set
+    /// (see Plc5Handler.ReadModifyWrite).
     /// 
     /// Reference: AB Publication 1770-6.5.16, page 7-20
     /// </summary>
