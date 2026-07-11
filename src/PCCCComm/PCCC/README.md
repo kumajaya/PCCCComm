@@ -14,7 +14,7 @@ The table below follows the naming and grouping conventions of the official AB s
 | # | Command | CMD | FNC | Implemented | Notes |
 |---|---------|-----|-----|-------------|-------|
 | 1 | Apply Port Configuration | 0x0F | 0x8F | ✅ | |
-| 2 | Bit Write (Write Bit) | 0x0F | 0xAB | ⚠️ | SLC only; PLC‑5 uses read‑modify‑write workaround |
+| 2 | Bit Write (Write Bit) | 0x0F | 0xAB | ⚠️ | SLC only; PLC-5 bit writes use Read-Modify-Write (FNC 0x26) |
 | 3 | Change Mode (SLC 5/03+) | 0x0F | 0x80 | ✅ | |
 | 4 | Change Mode (MicroLogix) | 0x0F | 0x3A | ✅ | Also used for PLC‑5 Set CPU Mode |
 | 5 | Close File | 0x0F | 0x82 | ✅ | |
@@ -48,9 +48,9 @@ The table below follows the naming and grouping conventions of the official AB s
 | 33 | Read Bytes Physical | 0x0F | 0x17 | ✅ | PLC‑5 upload (see #25) |
 | 34 | Read Diagnostic Counters | 0x06 | 0x01 | ✅ | |
 | 35 | Read Link Parameters | 0x06 | 0x09 | ✅ | |
-| 36 | Read‑Modify‑Write | 0x0F | 0x26 | ⚠️ | SLC only; PLC‑5 requires logical binary addressing |
+| 36 | Read-Modify-Write | 0x0F | 0x26 | ✅ | SLC and PLC-5 (PLC-5 uses logical binary addressing; verified byte-exact vs RSLinx) |
 | 37 | Read‑Modify‑Write N | 0x0F | 0x79 | ❌ | |
-| 38 | Read Section Size | 0x0F | 0x29 | ❌ | |
+| 38 | Read Section Size | 0x0F | 0x29 | ✅ | PLC-5 data-file enumeration (GetDataMemory) |
 | 39 | Reset Diagnostic Counters | 0x06 | 0x07 | ✅ | |
 | 40 | Restart Request (Restart) | 0x0F | 0x0A | ❌ | |
 | 41 | Return Edit Resource | 0x0F | 0x12 | ✅ | |
@@ -62,23 +62,23 @@ The table below follows the naming and grouping conventions of the official AB s
 | 47 | Set Timeout | 0x06 | 0x04 | ❌ | |
 | 48 | Set Variables | 0x06 | 0x02 | ❌ | |
 | 49 | Shutdown | 0x0F | 0x07 | ❌ | |
-| 50 | Typed Read (Read Block) | 0x0F | 0x68 | ✅ | For PLC‑5 |
-| 51 | Typed Write (Write Block) | 0x0F | 0x67 | ✅ | For PLC‑5 |
+| 50 | Typed Read (Read Block) | 0x0F | 0x68 | ✅ | PLC-5 secondary path (primary data access = Word Range Read 0x01) |
+| 51 | Typed Write (Write Block) | 0x0F | 0x67 | ✅ | PLC-5 secondary path (primary data access = Word Range Write 0x00) |
 | 52 | Unprotected Bit Write | 0x05 | – | ❌ | Legacy |
 | 53 | Unprotected Read | 0x01 | – | ❌ | Legacy |
 | 54 | Unprotected Write | 0x08 | – | ❌ | Legacy |
 | 55 | Upload All Request (Upload) | 0x0F | 0x53 | ✅ | |
 | 56 | Upload Completed | 0x0F | 0x55 | ✅ | |
 | 57 | Upload | 0x0F | 0x06 | ❌ | |
-| 58 | Word Range Read (Read Block) | 0x0F | 0x01 | ✅ | PLC‑5 only, logical binary addressing |
-| 59 | Word Range Write (Write Block) | 0x0F | 0x00 | ✅ | PLC‑5 only, logical binary addressing |
+| 58 | Word Range Read (Read Block) | 0x0F | 0x01 | ✅ | PLC-5 PRIMARY data access (logical binary addressing) |
+| 59 | Word Range Write (Write Block) | 0x0F | 0x00 | ✅ | PLC-5 PRIMARY data access (logical binary addressing) |
 | 60 | Write Bytes Physical (Physical Write) | 0x0F | 0x18 | ✅ | PLC‑5 download (see #26) |
 
 > **Notes:**  
 > - Commands marked with ✅ are fully implemented, tested, and ready for use.  
 > - Commands marked with ⚠️ have limitations or are implemented via workarounds (see details below).  
 > - Commands marked with ❌ are either planned for future releases or are specific to legacy PLC families (PLC‑2, 1774‑PLC, early PLC‑3) which are not the primary target of PCCCComm.  
-> - All read/write operations for **SLC 500, MicroLogix, and PLC‑5** are supported. For PLC‑5, data access uses **Typed Read (0x68)** and **Typed Write (0x67)** with logical binary addressing.  
+> - All read/write operations for **SLC 500, MicroLogix, and PLC-5** are supported. For PLC-5, the PRIMARY data path is **Word Range Read (0x01)** and **Word Range Write (0x00)** with logical binary addressing; **Typed Read (0x68) / Typed Write (0x67)** are implemented as a secondary path.  
 > - `GetDataMemory()` is implemented for both SLC (via FNC 0x94) and PLC‑5 (via WordRangeRead FNC 0x01 with chunking).  
 > - PLC‑5 upload/download uses `ReadBytesPhysical` / `WriteBytesPhysical` (FNC 0x17/0x18) with physical addresses from `UploadAllRequest` reply.  
 > - The “Legacy” note indicates commands that are rarely used in modern applications and may be added upon request.
@@ -121,22 +121,38 @@ The following sections describe the implemented commands in more detail, grouped
 | `WriteData(string)` | 0x0F | 0xAA | Write string (ST file or word‑packed) |
 | `ReadModifyWrite()` | 0x0F | 0x26 | Atomic read‑modify‑write (bitwise AND/OR) |
 
-#### PLC‑5 (Typed Read / Typed Write)
+#### PLC-5 — primary path: Word Range Read / Write
+
+Data access for PLC-5 uses **Word Range Read (FNC 0x01)** and **Word Range Write
+(FNC 0x00)** with logical binary addressing.
 
 | Method | CMD | FNC | Description |
 |--------|-----|-----|-------------|
-| `ReadAny()` | 0x0F | 0x68 | Read any data type using logical binary addressing |
-| `ReadInt()` | 0x0F | 0x68 | Read integer array |
-| `WriteData(int)` | 0x0F | 0x67 | Write single integer |
-| `WriteData(int[])` | 0x0F | 0x67 | Write integer array |
-| `WriteData(float)` | 0x0F | 0x67 | Write single float |
-| `WriteData(float[])` | 0x0F | 0x67 | Write float array |
-| `WriteData(string)` | 0x0F | 0x67 | Write string |
-| `ReadModifyWrite()` | – | – | Not implemented (requires logical binary addressing) |
+| `ReadAny()` / `ReadAnyValues()` | 0x0F | 0x01 | Read any data type (int, float, long, timer, counter, bit) |
+| `ReadInt()` | 0x0F | 0x01 | Read integer array |
+| `WriteData(int)` / `WriteData(int[])` | 0x0F | 0x00 | Write integer(s) |
+| `WriteData(float)` / `WriteData(float[])` | 0x0F | 0x00 | Write float(s) |
+| `WriteData(string)` | 0x0F | 0x00 | Write string (ST file, 88-byte element) |
+| `WriteData(string, int)` with bit address | 0x0F | 0x26 | Single-bit write via atomic Read-Modify-Write |
+| `ReadModifyWrite(string[], ...)` | – | – | Multi-address form not implemented for PLC-5 |
 
-**Important:**  
-- Bit-level writes on PLC‑5 are implemented via **read‑modify‑write workaround** (read whole word, modify bit, write back). This requires two transactions and is **not atomic**, but sufficient for most applications.  
-- For multi‑bit writes or atomic operations, use `WriteData` on the word address directly.
+**Word order:** Word Range transmits Float/Long **high word first** (the library swaps
+accordingly). The Typed path below uses standard little-endian.
+
+**Bit writes:** `WriteData(string, int)` with a bit address (e.g. `B3:0/5`) performs a
+**server-side atomic Read-Modify-Write (FNC 0x26)** — a single transaction. The on-wire
+format (`07 00 <file> <elem>` + AND mask + OR mask, both 2 bytes LE) matches RSLinx
+byte-for-byte. (The `WriteData(string, int, float[])` overload instead does a client-side
+read-modify-write via Word Range — two transactions, non-atomic.)
+
+#### PLC-5 — secondary path: Typed Read / Typed Write
+
+Typed Read (0x68) / Typed Write (0x67) build proper per-type type/data parameters per
+1770-6.5.16 §7-36 (integer `0x42` = ID 4/size 2; float `0x94 0x08` = ID 8/size 4) and use
+**standard little-endian** byte order (no word swap). Exposed as `PCCCComm.TypedRead` /
+`PCCCComm.TypedWrite`; exercised via the Example CLI `typedread` / `typedwrite`. Spec +
+emulator verified.
+
 
 ### PLC‑5 Word Range Read / Write
 
@@ -147,10 +163,14 @@ The following sections describe the implemented commands in more detail, grouped
 
 **Addressing:**  
 Only **logical binary addressing** is supported (per AB 1770‑6.5.16 Chapter 13).  
-Use `EncodePlc5LogicalAddress()` helper in `Plc5Handler` to build the address byte array.
+`Plc5Handler` builds addresses in the byte-exact **RSLinx form by default**
+(`EncodePlc5ReadAddress`, mask 0x0F; `EncodePlc5WriteAddress`, mask 0x07). A compact form
+(`EncodePlc5LogicalAddress`, mask 0x06, section/sub-element omitted) is also accepted by
+real PLC-5 firmware and selectable via `UseRSLinxAddressForm = false`. Both verified on a
+live PLC-5/40E (1785-L40E).
 
 **Constraints:**  
-- Maximum data size is constrained by the link‑layer payload limits (`MaxWritePayloadBytes` = 164 bytes, i.e., 82 words).  
+- Per-packet payload is bounded by `MaxReadPayloadPlc5` / `MaxWritePayloadPlc5` (236 bytes); larger transfers are auto-chunked.  
 - The emulator supports this command in PLC‑5 mode.  
 
 **Example (from Example client CLI):**  
@@ -159,6 +179,12 @@ PCCC> wordread N 7 0 0 5
 Read 10 bytes: 11 22 33 44 55 66 00 00 00 00
 PCCC> wordwrite N 7 0 0 1122 3344 5566
 Wrote 3 word(s) successfully.
+PCCC> typedwrite F 8 0 123.5
+Typed write successful.
+PCCC> typedread F 8 0
+Result: 123.5
+PCCC> write B3:0/5 1          # bit write -> Read-Modify-Write (FNC 0x26)
+Write successful.
 ```
 
 ### Bulk Upload/Download (PLC‑5)
