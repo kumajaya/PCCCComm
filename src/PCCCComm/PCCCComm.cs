@@ -646,12 +646,6 @@ public class PCCCComm : IDisposable, IHandlerContext
     public DataFileDetails[] GetDataMemory()
     {
         EnsureHandler();
-
-        // ML1400 uses pre-loaded file list (from filelist.xml)
-        if (_processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1400)
-            return _ml1400FileList ?? Array.Empty<DataFileDetails>();
-
-        // Other processors: use handler (SLC/PLC-5 directory parsing)
         return _handler!.GetDataMemory();
     }
 

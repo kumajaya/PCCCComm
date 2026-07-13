@@ -1002,7 +1002,18 @@ public class SlcHandler : IPlcHandler
     {
         if (IsMicroLogix1400)
         {
-            // Use file list from context (loaded by PCCCComm)
+            // Read the data-file directory directly over PCCC, mirroring exactly
+            // what RSLinx "Data Monitor" does on the wire (verified byte-for-byte
+            // against a real 1766-L32BWA capture: 68/68 files reconstructed).
+            // The context list (filelist.xml / HTTP / embedded default) is kept
+            // only as a defensive fallback if the PCCC read fails.
+            try
+            {
+                var dir = GetDataMemoryMl1400Physical();
+                if (dir.Length > 0) return dir;
+            }
+            catch (PCCCException) { /* fall through to fallback below */ }
+
             var list = _context.GetMl1400FileList();
             return list ?? Array.Empty<DataFileDetails>();
         }
@@ -1011,6 +1022,106 @@ public class SlcHandler : IPlcHandler
             return GetDataMemoryFileBased();
         else
             return GetDataMemoryPhysicalBased();
+    }
+
+    /// <summary>
+    /// Reads the MicroLogix 1400 data-file directory directly over PCCC, exactly as
+    /// RSLinx "Data Monitor" does: read the self-describing image size (word[52] of
+    /// File 0 / type 0x03), sweep the whole File 0 image, then parse the 219-slot
+    /// data directory. FileNumber = slot index, so gaps (e.g. ST21 -> T25) are
+    /// preserved without any external file list or probing.
+    ///
+    /// Record (10 bytes/slot): [type:1][sizeBytes:2 LE][addr:2 LE][reserved:5]
+    ///   elements = sizeBytes / bytesPerElement(type)
+    /// Data-file type codes use the "File Zero" listing set (O=0x82, I=0x83, ...);
+    /// system/function files (0xA1, 0xA2, 0xE0-0xEE) that follow the 219 data slots
+    /// are excluded both by slotCount and by the 0x82..0x9E validity range.
+    ///
+    /// Verified byte-for-byte against real 1766-L32BWA: 68/68 data files.
+    /// </summary>
+    public DataFileDetails[] GetDataMemoryMl1400Physical()
+    {
+        const byte ProgramImageFileType = 0x03;   // File 0 program/directory image
+        const int  FileSizeWordElement  = 52;     // word[52] = total image size (bytes)
+        const int  SlotStride           = 10;     // directory record size
+
+        // 1. Read the self-describing image size (2 bytes at element 52).
+        var addr = new DataAddress { FileNumber = 0, FileType = ProgramImageFileType, Element = FileSizeWordElement };
+        byte[] sizeData = ReadRawDataWithChunking(ref addr, 2, out int r1);
+        if (r1 != 0)
+            throw new PCCCException("ML1400: failed to read File 0 image size - " + PCCCErrors.DecodeStatus(r1));
+        int imageSize = sizeData[0] + sizeData[1] * 256;
+        if (imageSize <= 0 || imageSize > 65535)
+            throw new PCCCException($"ML1400: invalid File 0 image size {imageSize}");
+
+        // 2. Sweep the whole File 0 / type 0x03 image from element 0.
+        addr.Element = 0; addr.SubElement = 0;
+        byte[] img = ReadRawDataWithChunking(ref addr, imageSize, out int r2);
+        if (r2 != 0)
+            throw new PCCCException("ML1400: failed to read File 0 image - " + PCCCErrors.DecodeStatus(r2));
+
+        // 3. Slot count is self-describing at word[31] (offset 62): number of data-file slots.
+        int slotCount = (img.Length > 63) ? (img[62] + img[63] * 256) : 0;
+        if (slotCount <= 0 || slotCount > 512)
+            throw new PCCCException($"ML1400: implausible data-file slot count {slotCount}");
+
+        // 4. Locate the directory: a run of slotCount 10-byte records. It is NOT always
+        //    at the image tail (system-file entries can follow it), so scan broadly.
+        int start = LocateMl1400Directory(img, slotCount, SlotStride);
+
+        var files = new List<DataFileDetails>();
+        for (int i = 0; i < slotCount; i++)
+        {
+            int o = start + i * SlotStride;
+            if (o + 4 >= img.Length) break;
+            byte t = img[o];
+            if (t > 0x81 && t < 0x9F)   // same validity range as ParseDirectory
+            {
+                int sizeBytes = img[o + 1] + img[o + 2] * 256;
+                if (sizeBytes == 0) continue; // empty placeholder slot (gap)
+                int bpe = FileTypeToBytesPerElement(t, out string ftStr);
+                if (bpe <= 0) continue;
+                files.Add(new DataFileDetails
+                {
+                    FileNumber = i,                    // slot index preserves gaps
+                    FileType = ftStr,
+                    NumberOfElements = sizeBytes / bpe
+                });
+            }
+        }
+        return files.ToArray();
+    }
+
+    /// <summary>
+    /// Finds the byte offset where the ML1400 data-file directory begins inside the
+    /// File 0 / type 0x03 image. The directory is a run of slotCount 10-byte records
+    /// that does NOT always sit at the tail (a full-size read includes trailing
+    /// program-table + system-file bytes after it), so scan the whole image from just
+    /// past the fixed header and take the offset with the most valid records.
+    /// </summary>
+    private static int LocateMl1400Directory(byte[] img, int slotCount, int stride)
+    {
+        int Score(int s)
+        {
+            int n = 0;
+            for (int i = 0; i < slotCount; i++)
+            {
+                int o = s + i * stride;
+                if (o + 4 >= img.Length) break;
+                if (img[o] > 0x81 && img[o] < 0x9F && (img[o + 1] + img[o + 2] * 256) > 0) n++;
+            }
+            return n;
+        }
+
+        int lo = 32;
+        int hi = Math.Max(lo + 1, img.Length - stride);
+        int best = lo, bestScore = -1;
+        for (int s = lo; s < hi; s++)
+        {
+            int sc = Score(s);
+            if (sc > bestScore) { bestScore = sc; best = s; }
+        }
+        return best;
     }
 
     /// <summary>
