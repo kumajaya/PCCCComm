@@ -119,10 +119,6 @@ class Program
         public bool   ScanNodes          { get; init; } = false;
         public int    ScanFrom           { get; init; } = 1;
         public int    ScanTo             { get; init; } = 31;
-        public string? WebUsername       { get; init; } = null;
-        public string? WebPassword       { get; init; } = null;
-        /// <summary>HTTP port for ML1400 /filelist.xml. Default 80 (real hardware). Use 8080 for emulator.</summary>
-        public int    Ml1400HttpPort     { get; init; } = 80;
     }
 
     // ── SelfTestContext — built once, passed to all test methods ──────────────
@@ -224,12 +220,11 @@ class Program
         string transport = "df1", portName = "COM1", remoteHost = "", rs485Mode = "auto", checksum = "crc";
         int baud = 19200, eipPort = 44818, cspPort = 2222, timeoutMs = 5000;
         int targetNode = 1, myNode = 0, rs485AssertDelay = 1, rs485DeassertDelay = 5;
-        int stressLoopCount = 0, scanFrom = 1, scanTo = 31, ml1400HttpPort = 80;
+        int stressLoopCount = 0, scanFrom = 1, scanTo = 31;
         Parity parity = Parity.None;
         byte lsapControl = 0x00;
         bool echoSuppression = false, interactiveOnly = false, noInteractive = false;
         bool runDemo = false, stressTest = false, scanNodes = false;
-        string? webUsername = null, webPassword = null;
 
         cfg = new Config();
 
@@ -244,9 +239,6 @@ class Program
                 case "--target"  when i+1 < args.Length: if (int.TryParse(args[++i], out var n))  targetNode = n; break;
                 case "--mynode"  when i+1 < args.Length: if (int.TryParse(args[++i], out var mn)) myNode     = mn; break;
                 case "--host"    when i+1 < args.Length: remoteHost  = args[++i]; break;
-                case "--web-user"         when i+1 < args.Length: webUsername  = args[++i]; break;
-                case "--web-password"     when i+1 < args.Length: webPassword  = args[++i]; break;
-                case "--ml1400-http-port" when i+1 < args.Length: if (int.TryParse(args[++i], out var mhp)) ml1400HttpPort = mhp; break;
                 case "--eip-port"  when i+1 < args.Length: if (int.TryParse(args[++i], out var p)) eipPort   = p; break;
                 case "--csp-port"  when i+1 < args.Length: if (int.TryParse(args[++i], out var c)) cspPort   = c; break;
                 case "--timeout"   when i+1 < args.Length: if (int.TryParse(args[++i], out var t)) timeoutMs = t; break;
@@ -294,7 +286,6 @@ class Program
             InteractiveOnly = interactiveOnly, NoInteractive = noInteractive,
             RunDemo = runDemo, StressTest = stressTest, StressLoopCount = stressLoopCount,
             ScanNodes = scanNodes, ScanFrom = scanFrom, ScanTo = scanTo,
-            WebUsername = webUsername, WebPassword = webPassword, Ml1400HttpPort = ml1400HttpPort,
         };
         return true;
     }
@@ -371,8 +362,8 @@ class Program
         {
             case "eip":
                 if (string.IsNullOrEmpty(cfg.RemoteHost)) throw new Exception("EIP mode requires --host <IP>");
-                pccc = Comm.PCCCComm.ForEip(cfg.RemoteHost, cfg.EipPort, cfg.TimeoutMs, cfg.WebUsername, cfg.WebPassword);
-                pccc.TargetNode = cfg.TargetNode; pccc.MyNode = cfg.MyNode; pccc.Ml1400HttpPort = cfg.Ml1400HttpPort;
+                pccc = Comm.PCCCComm.ForEip(cfg.RemoteHost, cfg.EipPort, cfg.TimeoutMs);
+                pccc.TargetNode = cfg.TargetNode; pccc.MyNode = cfg.MyNode;
                 Console.WriteLine($"EIP: Connecting to {cfg.RemoteHost}:{cfg.EipPort} (timeout {cfg.TimeoutMs} ms)");
                 break;
             case "csp":
@@ -1873,7 +1864,6 @@ class Program
         Console.WriteLine("  --csp-port <n>               CSPv4 TCP port (default: 2222)");
         Console.WriteLine("  --lsap-control <hex>         LSAP control byte for CSPv4 (default: 00)");
         Console.WriteLine("  --timeout <ms>               Network timeout in ms (default: 5000)");
-        Console.WriteLine("  --ml1400-http-port <n>       HTTP port for ML1400 filelist.xml (default: 80, use 8080 for PCCCEmulator)");
         Console.WriteLine();
         Console.WriteLine("DF1 Serial:");
         Console.WriteLine("  --baud <n>                   Baud rate (default: 19200)");

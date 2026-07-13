@@ -20,7 +20,6 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 using System.Collections.ObjectModel;
-using System.Net.Http;
 using System.Threading;
 using System.Text;
 using System.Xml;
@@ -69,26 +68,6 @@ public class PCCCComm : IDisposable, IHandlerContext
     // PCCC engine
     private PCCCProtocol? _protocol;
     private IPlcHandler? _handler;
-
-    // ML1400 web server credentials for filelist.xml access.
-    // Default: administrator / ml1400 (factory default per AB documentation).
-    // Override via ForEip(..., webUsername, webPassword) if password has been changed.
-    private const string DefaultWebUsername = "administrator";
-    private const string DefaultWebPassword = "ml1400";
-
-    private readonly string _webUsername = DefaultWebUsername;
-    private readonly string _webPassword = DefaultWebPassword;
-
-    /// <summary>
-    /// HTTP port used to fetch /filelist.xml from a MicroLogix 1400.
-    /// Real ML1400 uses port 80 (default). Set to 8080 when connecting
-    /// to the PCCCEmulator which listens on 8080 to avoid requiring admin privileges.
-    /// </summary>
-    public int Ml1400HttpPort { get; set; } = 80;
-
-    private DataFileDetails[]? _ml1400FileList;
-    public string? Ml1400FileListPath { get; set; }
-    DataFileDetails[]? IHandlerContext.GetMl1400FileList() => _ml1400FileList;
 
     // ─── Properties (exactly as original) ──────────────────────────────────
     public int MyNode { get; set; }
@@ -314,15 +293,13 @@ public class PCCCComm : IDisposable, IHandlerContext
         }
     }
 
-    private PCCCComm(NetworkTransportType networkType, string host, int port, int timeoutMs, byte lsapControlByte, string? webUsername = null, string? webPassword = null)
+    private PCCCComm(NetworkTransportType networkType, string host, int port, int timeoutMs, byte lsapControlByte)
     {
         _responseTimeoutMs = timeoutMs;
         _remoteHost = host;
         _remotePort = port;
         _networkType = networkType;
         _lsapControlByte = lsapControlByte;
-        _webUsername = webUsername ?? DefaultWebUsername;
-        _webPassword = webPassword ?? DefaultWebPassword;
     }
 
     /// <summary>Creates a PCCCComm instance for EtherNet/IP communication.
@@ -331,19 +308,8 @@ public class PCCCComm : IDisposable, IHandlerContext
     /// <param name="host">IP address or hostname of the EIP device.</param>
     /// <param name="port">EIP TCP port (default 44818).</param>
     /// <param name="timeoutMs">Response timeout in milliseconds.</param>
-    /// <param name="webUsername">
-    /// Username for ML1400 built-in web server (used by GetDataMemory).
-    /// Defaults to "administrator" if not specified.
-    /// </param>
-    /// <param name="webPassword">
-    /// Password for ML1400 built-in web server (used by GetDataMemory).
-    /// Defaults to "ml1400" (factory default) if not specified.
-    /// Supply the actual password if it has been changed in RSLogix 500.
-    /// </param>
-    public static PCCCComm ForEip(string host, int port = 44818, int timeoutMs = 5000,
-        string? webUsername = null, string? webPassword = null)
-        => new(NetworkTransportType.EIP, host, port, timeoutMs, lsapControlByte: 0x00,
-               webUsername, webPassword);
+    public static PCCCComm ForEip(string host, int port = 44818, int timeoutMs = 5000)
+        => new(NetworkTransportType.EIP, host, port, timeoutMs, lsapControlByte: 0x00);
 
     /// <summary>
     /// Creates a PCCCComm instance for CSPv4 (Client Server Protocol) communication.
@@ -640,8 +606,8 @@ public class PCCCComm : IDisposable, IHandlerContext
 
     /// <summary>
     /// Returns a list of data files present in the processor.
-    /// For MicroLogix 1400, the file list is loaded from filelist.xml (local file, HTTP, or default)
-    /// during OpenComms() and cached. For other processors, delegates to the protocol handler.
+    /// For MicroLogix 1400 the directory is read directly over PCCC (like RSLinx Data
+    /// Monitor); other processors delegate to the protocol handler's directory parsing.
     /// </summary>
     public DataFileDetails[] GetDataMemory()
     {
@@ -702,7 +668,6 @@ public class PCCCComm : IDisposable, IHandlerContext
                 _currentTransport.Open();
             EnsureProtocol();
             EnsureHandler();
-            LoadMl1400FileListIfNeeded();
             return 0;
         }
 
@@ -722,7 +687,6 @@ public class PCCCComm : IDisposable, IHandlerContext
                 transport.Open();
                 EnsureProtocol();
                 EnsureHandler();
-                LoadMl1400FileListIfNeeded();
                 return 0;
             }
             catch (Exception ex)
@@ -777,7 +741,6 @@ public class PCCCComm : IDisposable, IHandlerContext
             // fine and only the PLC was unresponsive).
             EnsureProtocol();
             EnsureHandler();
-            LoadMl1400FileListIfNeeded();
             return 0;
         }
         catch (PCCCException)
@@ -807,23 +770,6 @@ public class PCCCComm : IDisposable, IHandlerContext
         _handler = null; // handler also depends on protocol and transport
         // _processorFamily and _processorType are NOT reset —
         // The hardware is unchanged, so re-detection is not required upon reconnection.
-    }
-
-    private bool IsMicroLogix1400 => _processorType == (byte)PCCCConstants.ProcessorTypeCode.ML1400;
-
-    private void LoadMl1400FileListIfNeeded()
-    {
-        if (!IsMicroLogix1400) return;
-        
-        string? localPath = Ml1400FileListPath;
-        string? remoteHost = _networkType == NetworkTransportType.EIP ? _remoteHost : null;
-        _ml1400FileList = Ml1400FileList.GetFileList(
-            localPath,
-            remoteHost,
-            Ml1400HttpPort,
-            _webUsername,
-            _webPassword
-        );
     }
 
     public int DetectCommSettings()

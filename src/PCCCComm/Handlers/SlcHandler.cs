@@ -1005,17 +1005,13 @@ public class SlcHandler : IPlcHandler
             // Read the data-file directory directly over PCCC, mirroring exactly
             // what RSLinx "Data Monitor" does on the wire (verified byte-for-byte
             // against a real 1766-L32BWA capture: 68/68 files reconstructed).
-            // The context list (filelist.xml / HTTP / embedded default) is kept
-            // only as a defensive fallback if the PCCC read fails.
+            // On failure, falls through to the generic directory-parse path below.
             try
             {
                 var dir = GetDataMemoryMl1400Physical();
                 if (dir.Length > 0) return dir;
             }
             catch (PCCCException) { /* fall through to fallback below */ }
-
-            var list = _context.GetMl1400FileList();
-            return list ?? Array.Empty<DataFileDetails>();
         }
 
         if (SupportsFileBasedTransfer())
@@ -1155,64 +1151,6 @@ public class SlcHandler : IPlcHandler
             if (fzd[filePosition] > 0x81 && fzd[filePosition] < 0x95) { list.Add(df); idx++; }
             filePosition += 10;
         }
-        return list.ToArray();
-    }
-
-    /// <summary>
-    /// Enumerates data files on MicroLogix 1400 by probing all file numbers 0..255
-    /// for each known file type. Uses chunked element counting for speed.
-    /// </summary>
-    private DataFileDetails[] GetDataMemoryMl1400()
-    {
-        var list = new List<DataFileDetails>();
-
-        foreach (PCCCConstants.SlcFileTypeCode fileType in Enum.GetValues(typeof(PCCCConstants.SlcFileTypeCode)))
-        {
-            int bytesPerElement = PCCCConstants.SlcFileTypeInfo.GetBytesPerElement(fileType);
-            int fileTypeCode = (int)fileType;
-
-            // Only file 0 for O and I
-            int maxFileNumber = (fileTypeCode == 0x82 || fileTypeCode == 0x83) ? 0 : 255;
-
-            for (int fileNumber = 0; fileNumber <= maxFileNumber; fileNumber++)
-            {
-                var addr = new DataAddress
-                {
-                    FileNumber = fileNumber,
-                    FileType = fileTypeCode
-                };
-
-                // Probe: read first element
-                byte[] probe = ReadRawDataWithChunking(ref addr, bytesPerElement, out int probeSts);
-                if (probeSts != 0 || probe == null || probe.Length < bytesPerElement)
-                    continue; // File doesn't exist — continue to next number
-
-                // File exists — count elements in chunks (16 elements at a time)
-                int elementCount = 0;
-                const int chunkElements = 16;
-                while (true)
-                {
-                    int chunkBytes = chunkElements * bytesPerElement;
-                    addr.Element = elementCount;
-                    byte[] chunk = ReadRawDataWithChunking(ref addr, chunkBytes, out int sts);
-                    if (sts != 0) break;
-                    elementCount += chunk.Length / bytesPerElement;
-                    if (elementCount > 1000) break; // safety limit
-                }
-
-                if (elementCount > 0)
-                {
-                    string typeName = PCCCConstants.SlcFileTypeInfo.GetTypeName(fileType);
-                    list.Add(new DataFileDetails
-                    {
-                        FileNumber = fileNumber,
-                        FileType = typeName,
-                        NumberOfElements = elementCount
-                    });
-                }
-            }
-        }
-
         return list.ToArray();
     }
 
@@ -2005,7 +1943,7 @@ public class SlcHandler : IPlcHandler
     private int _ml1400UploadFilesCompleted;
 
     /// <summary>
-    /// Uploads ML1400 program. Uses file list from context (filelist.xml or default).
+    /// Uploads ML1400 program. Data-file list is read directly over PCCC (GetDataMemory).
     /// Reads exact byte counts per file — does not read beyond the mapped size.
     /// </summary>
     private Collection<PLCFileDetails> UploadProgramDataMl1400()
@@ -2019,7 +1957,7 @@ public class SlcHandler : IPlcHandler
         // GrandTotalBytes from data files (known size). TotalFiles covers all phases
         // so the progress bar moves smoothly from the start.
         // Phase counts: 1 (ft=0x63) + 1 (LAD) + 1 (ProgramDir) + 49 (SYS fn=2..50) + 24 (system files).
-        DataFileDetails[] fileList = _context.GetMl1400FileList() ?? Array.Empty<DataFileDetails>();
+        DataFileDetails[] fileList = GetDataMemory();
         int dataFileCount = 0;
         long grandTotalBytes = 0;
         foreach (var fi in fileList)
@@ -2041,7 +1979,7 @@ public class SlcHandler : IPlcHandler
             ReadChunkedSubElement(progressFiles, FileTypeSystemConfig, fn, totalFiles, grandTotalBytes);
 
         // ── Phase 5: Read system files (ft=0x4x and others) ────────
-        // These files are not in filelist.xml but are present on all ML1400 units.
+        // These files are not in the data-file directory but are present on all ML1400 units.
         // ReadChunkedSubElement reads until EOF so no element count needed.
         // Order matches upload capture.
         int[] systemFts = { 0x47, 0x49, 0x47, 0x4D, 0x60, 0x69, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x6C,
