@@ -2035,6 +2035,22 @@ public class SlcHandler : IPlcHandler
             });
         }
 
+        // ── Final progress: clamp totals to what was actually transferred ─────
+        // Phase counts for SysConfig/system files are upper-bound estimates; whether a
+        // program/system slot exists is only known after reading it (EOF-driven), so the
+        // running counters are the source of truth. Emit one final event so the progress
+        // bar closes cleanly at 100% instead of stalling below the estimated total.
+        OnFileProgress(new PCCCComm.FileProgressEventArgs
+        {
+            FileNumber = 0,
+            FileType = 0,
+            FileSizeBytes = 0,
+            FilesCompleted = _ml1400UploadFilesCompleted,
+            TotalFiles = _ml1400UploadFilesCompleted,
+            TotalBytesTransferred = _ml1400UploadBytesTransferred,
+            GrandTotalBytes = _ml1400UploadBytesTransferred
+        });
+
         // ── Build result ──────────────────────────────────────────────────────
         var result = new Collection<PLCFileDetails>();
         foreach (var pf in progressFiles)
