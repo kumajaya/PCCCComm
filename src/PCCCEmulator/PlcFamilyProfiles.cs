@@ -414,6 +414,29 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x24, 0x40, 0x00,
             };
             Array.Copy(progHdr, 0, file03, 44, progHdr.Length);
+
+            // ── ML1400 data-file directory embedded at offset 753 ──────────────
+            // RSLinx "Data Monitor" and PCCCComm.GetDataMemoryMl1400Physical enumerate
+            // data files by sweeping this image and parsing a 219-slot directory near
+            // the tail. Real 1766-L32BWA lays it at byte 753; each slot is 10 bytes:
+            //   [type][sizeBytes:2 LE][addr:2 LE][5×00],  FileNumber = slot index.
+            // Gaps stay all-zero. Type codes use the "File Zero" listing set: O=0x82,
+            // I=0x83 (BuildMemoryConfig uses 0x8B/0x8C for normal O/I read requests).
+            // Verified byte-for-byte vs hardware (68/68).
+            const int DataDirOffset = 753;
+            int flatAddr = 0x4000;                 // synthetic flat address; clients ignore it
+            foreach (var f in BuildMemoryConfig().DataFiles)
+            {
+                int o = DataDirOffset + f.FileNumber * 10;
+                if (o + 5 > file03.Length) continue;
+                file03[o]     = f.FileType switch { 0x8B => (byte)0x82, 0x8C => (byte)0x83, _ => f.FileType };
+                file03[o + 1] = (byte)(f.SizeBytes & 0xFF);
+                file03[o + 2] = (byte)((f.SizeBytes >> 8) & 0xFF);
+                file03[o + 3] = (byte)(flatAddr & 0xFF);
+                file03[o + 4] = (byte)((flatAddr >> 8) & 0xFF);
+                flatAddr += f.SizeBytes / 2;
+            }
+
             memory.CreateAndInitRawFile(0x00, 0, file03);
             memory.AliasRawFile(0x00, 0, 0x03, 0);
         }
