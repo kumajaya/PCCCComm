@@ -618,6 +618,9 @@ public class PCCCEmulator : IDisposable
             // Acknowledged commands (no processing required)
             case 0x11:  // Get Edit Resource
             case 0x12:  // Return Edit Resource
+                SendEmptyResponse(src, tns, 0x4F, func, clientContext);
+                break;
+
             case 0x29:  // Read Section Size (PLC-5 upload/download procedure)
                 HandleReadSectionSize(src, tns, data, clientContext);
                 break;

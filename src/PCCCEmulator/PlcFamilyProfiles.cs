@@ -75,7 +75,8 @@ file static class PayloadHelper
 // ─── SLC / MicroLogix ─────────────────────────────────────────────────────────
 
 /// <summary>
-/// SLC 500 / MicroLogix family profile (SLC 5/04 defaults).
+/// SLC 5/04 family profile (1747-L541C, 16K words / 32 KB RAM, OS401 Series C FRN 3-8).
+/// Memory layout derived from DBU550_504.pdf project report.
 /// </summary>
 public sealed class SlcFamilyProfile : IPlcFamilyProfile
 {
@@ -83,8 +84,13 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
     public PCCCEmulator.EmulationFamily FamilyType => PCCCEmulator.EmulationFamily.SlcMicroLogix;
     public bool WritesModeToStatusFile => true;
     public bool UsesPlc5UploadProtocol => false;
-    public bool NeedsHttpServer        => false;
+    public bool NeedsHttpServer => false;
 
+    /// <summary>
+    /// Builds the 24-byte diagnostic status payload.
+    /// Processor type = 0x5B (SLC 5/04), RAM size = 0x20 (32 KB / 16K words).
+    /// Catalog string = "5/04".
+    /// </summary>
     public byte[] BuildGetStatusPayload(ProcessorMode mode)
     {
         byte[] p = new byte[24];
@@ -97,7 +103,7 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
         p[16] = 0x00; p[17] = 0x00;            // major error word
         p[18] = (byte)mode;                     // processor mode
         p[19] = 0x00; p[20] = 0x00; p[21] = 0x00;
-        p[22] = 0x40;                           // RAM size (64 KB)
+        p[22] = 0x20;                           // RAM size: 32 KB (16K words)
         p[23] = 0x3F;                           // flags
         return p;
     }
@@ -105,42 +111,48 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
     public void PatchModeInPayload(byte[] payload, ProcessorMode mode)
         => payload[18] = (byte)mode;
 
+    /// <summary>
+    /// Builds the memory configuration for SLC 5/04 (1747-L541C).
+    /// Data files: 21 active files (O0, I1, S2, B3, T4, C5, R6, N7, F8, B9..B16,
+    /// N17, B29..B31). Slots 18-28 are inactive (empty).
+    /// Program files: 12 active (SYS0, SYS1, LAD2, LAD3, LAD5, LAD8, LAD12,
+    /// LAD15, LAD18, LAD19, LAD22, LAD23).
+    /// Directory size: 79 + (32 + 24) * 10 = 639 bytes.
+    /// </summary>
     public PlcMemoryConfig BuildMemoryConfig()
     {
-        // numDataFiles = 32: file numbers 0-31 (slots 20-28 are empty/inactive gaps)
-        const int numDataFiles    = 32;
-        const int numProgramFiles = 24;  // slots 0-23 (12 active), from hardware
-        const int dirSize         = 79 + (numDataFiles + numProgramFiles) * 10;  // = 639
+        const int numDataFiles = 32;     // slots 0-31
+        const int numProgramFiles = 24;  // slots 0-23
+        const int dirSize = 79 + (numDataFiles + numProgramFiles) * 10;
 
         var files = new List<DataFileSpec>
         {
-            new(0x8B,   0,  12),       // O0  — 6 words
-            new(0x8C,   1,  42),       // I1  — 21 words
-            new(0x84,  2, 328),       // S2  — 164 words
-            new(0x85,  3,  28),       // B3  — 14 words
-            new(0x86,  4, 468, 6),    // T4  — 78 timers
-            new(0x87,  5,   6, 6),    // C5  — 1 counter
-            new(0x88,  6,  12, 6),    // R6  — 2 controls
-            new(0x89,  7, 148),       // N7  — 74 words
-            new(0x8A,  8, 152, 4),    // F8  — 38 floats
-            new(0x85,  9,  20),       // B9  — 10 words
-            new(0x85, 10, 142),       // B10 — 71 words
-            new(0x85, 11,  18),       // B11 — 9 words
-            new(0x85, 12,   2),       // B12 — 1 word
-            new(0x85, 13,   4),       // B13 — 2 words
-            new(0x85, 14,   2),       // B14 — 1 word
-            new(0x85, 15,  82),       // B15 — 41 words
-            new(0x85, 16,  82),       // B16 — 41 words
-            new(0x89, 17,  52),       // N17 — 26 words
-            new(0x8D, 18, 840, 84),   // ST18 — 10 strings × 84 bytes
-            new(0xA4, 19, 400, 40),   // Data Monitor File
-            new(0x85, 29,  52),       // B29 — 26 words
-            new(0x85, 30,  52),       // B30 — 26 words
-            new(0x85, 31,  52),       // B31 — 26 words
+            // Data files present in the project (21 active files).
+            new(0x8B,   0,  12),       // O0   — 6 words
+            new(0x8C,   1,  42),       // I1   — 21 words
+            new(0x84,   2, 328),       // S2   — 164 words
+            new(0x85,   3,  28),       // B3   — 14 words
+            new(0x86,   4, 468, 6),    // T4   — 78 timers
+            new(0x87,   5,   6, 6),    // C5   — 1 counter
+            new(0x88,   6,  12, 6),    // R6   — 2 controls
+            new(0x89,   7, 148),       // N7   — 74 words
+            new(0x8A,   8, 152, 4),    // F8   — 38 floats
+            new(0x85,   9,  20),       // B9   — 10 words
+            new(0x85,  10, 142),       // B10  — 71 words
+            new(0x85,  11,  18),       // B11  — 9 words
+            new(0x85,  12,   2),       // B12  — 1 word
+            new(0x85,  13,   4),       // B13  — 2 words
+            new(0x85,  14,   2),       // B14  — 1 word
+            new(0x85,  15,  82),       // B15  — 41 words
+            new(0x85,  16,  82),       // B16  — 41 words
+            new(0x89,  17,  52),       // N17  — 26 words
+            new(0x85,  29,  52),       // B29  — 26 words
+            new(0x85,  30,  52),       // B30  — 26 words
+            new(0x85,  31,  52),       // B31  — 26 words
         };
 
-        // SLC 5/04 program files from real hardware.
-        // File numbers non-sequential; gaps = unused slots.
+        // Program files: 12 active files, slots 0 and 1 are SYS, slots 2-23 are LAD.
+        // File numbers are non-sequential; gaps represent unused slots.
         var progFiles = new List<ProgramFileSpec>
         {
             new(0x01,  0,    2),  // SYS — system file
@@ -156,40 +168,44 @@ public sealed class SlcFamilyProfile : IPlcFamilyProfile
             new(0x20, 22,  805),  // LAD22 — 14 rungs
             new(0x20, 23,  358),  // LAD23 —  9 rungs
         };
+
         return new PlcMemoryConfig(dirSize, numDataFiles, numProgramFiles, files,
             ProgramFiles: progFiles);
     }
 
+    /// <summary>
+    /// Seeds initial values for data files.
+    /// These values are used when no embedded .bin backup is available.
+    /// For SLC 5/04, values are derived from the DBU550_504 project report.
+    /// </summary>
     public void SeedInitialValues(PlcMemory memory)
     {
         // B3: pattern values
         memory.WriteU16Direct(0x85, 3, 0, 0xAA55);
         memory.WriteU16Direct(0x85, 3, 2, 0x0FF0);
+
         // N7: sample integers
-        memory.WriteU16Direct(0x89, 7, 0,  123);
-        memory.WriteU16Direct(0x89, 7, 2,  456);
+        memory.WriteU16Direct(0x89, 7, 0, 123);
+        memory.WriteU16Direct(0x89, 7, 2, 456);
         memory.WriteU16Direct(0x89, 7, 4, unchecked((ushort)-789));
+
         // F8: sample floats
         memory.WriteFloatDirect(0x8A, 8, 0, 1.23f);
         memory.WriteFloatDirect(0x8A, 8, 4, 4.56f);
-        // ST18:0 — default string
-        memory.WriteStStringDirect(0x8D, 18, 0, "EMULATOR OK", FamilyType);
 
-        // S2: Status file — static fields only (dynamic fields updated by UpdateDateTime/scan timers)
-        // Derived from real SLC 5/03 hardware project report scaled to SLC 5/04.
-        // Field definitions per AB RSLogix 500 Address/Symbol Database.
-        memory.WriteU16Direct(0x84, 2, 15*2, 0x4B01); // S2:15 — Node=1 / Baud=19200 (0x4B)
-        // Processor identification — SLC 5/04 (1747-L541E), derived from 5/03 (1747-L531E) pattern
-        memory.WriteU16Direct(0x84, 2, 57*2, 401);     // S2:57 — OS Catalog Number (OS401, cf. OS302 on 5/03)
-        memory.WriteU16Direct(0x84, 2, 58*2, 401);     // S2:58 — mirrors S2:57 per hardware pattern
-        memory.WriteU16Direct(0x84, 2, 59*2, 10);      // S2:59 — OS FRN
-        memory.WriteU16Direct(0x84, 2, 60*2, 541);     // S2:60 — Processor Catalog (1747-L541E, cf. L531E on 5/03)
-        memory.WriteU16Direct(0x84, 2, 61*2, 4);       // S2:61 — Processor Series
-        memory.WriteU16Direct(0x84, 2, 62*2, 8);       // S2:62 — Processor FRN
-        memory.WriteU16Direct(0x84, 2, 63*2, 1);       // S2:63 — User Program Type
-        memory.WriteU16Direct(0x84, 2, 64*2, 95);      // S2:64 — User Program Functional Index
-        memory.WriteU16Direct(0x84, 2, 65*2, 16);      // S2:65 — User RAM Size (16K words for 5/04)
-        memory.WriteU16Direct(0x84, 2, 66*2, 480);     // S2:66 — Flash EEPROM Size
+        // S2: Status file — static fields only (dynamic fields updated by timers)
+        // Values derived from DBU550_504.pdf project report.
+        memory.WriteU16Direct(0x84, 2, 15 * 2, 0x4B01); // S2:15 — Node=1 / Baud=19200
+        memory.WriteU16Direct(0x84, 2, 57 * 2, 401);    // S2:57 — OS Catalog (OS401)
+        memory.WriteU16Direct(0x84, 2, 58 * 2, 401);    // S2:58 — mirrors S2:57
+        memory.WriteU16Direct(0x84, 2, 59 * 2, 10);     // S2:59 — OS FRN
+        memory.WriteU16Direct(0x84, 2, 60 * 2, 541);    // S2:60 — Processor Catalog (1747-L541C)
+        memory.WriteU16Direct(0x84, 2, 61 * 2, 4);      // S2:61 — Processor Series
+        memory.WriteU16Direct(0x84, 2, 62 * 2, 8);      // S2:62 — Processor FRN
+        memory.WriteU16Direct(0x84, 2, 63 * 2, 1);      // S2:63 — User Program Type
+        memory.WriteU16Direct(0x84, 2, 64 * 2, 95);     // S2:64 — User Program Functional Index
+        memory.WriteU16Direct(0x84, 2, 65 * 2, 16);     // S2:65 — User RAM Size (16K words)
+        memory.WriteU16Direct(0x84, 2, 66 * 2, 480);    // S2:66 — Flash EEPROM Size
     }
 }
 

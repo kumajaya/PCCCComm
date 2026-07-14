@@ -188,16 +188,6 @@ This format is **not compatible** with `.RSS` files from RSLogix; it is intended
 The file includes both CRC32 and SHA256 checksums to detect accidental corruption and intentional tampering.  
 During download, the tool validates the processor type and bulletin against the target PLC to prevent mismatched downloads.
 
-## Creating Backup Files from APS Archives
-
-PCCCImageTool reads/writes `.bin` files in its own format.  
-To convert an existing **APS .ACH archive** to this format, use the external converter:
-
-```bash
-python Tools/ach_to_pccc.py DBU550.ACH --out DBU550.bin
-```
-The resulting `.bin` file can be downloaded to a real PLC or the PCCCEmulator.
-
 ## Troubleshooting
 
 | Issue | Likely solution |
