@@ -220,7 +220,7 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
         byte[] p = new byte[25];
         p[0]  = 0x00;
         p[1]  = 0xEE;                           // type extender (SLC/ML family)
-        p[2]  = 0x34;                           // extended interface type
+        p[2]  = 0x4A;                           // extended interface type — verified byte-for-byte from real 1766-L32BWA/1766-LEC EIP capture
         p[3]  = 0x9F;                           // processor type = ML1400
         p[4]  = 0x23;                           // series/revision
         PayloadHelper.WriteCatalog(p, "1766-LEC");
@@ -343,13 +343,22 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
 
     public void SeedInitialValues(PlcMemory memory)
     {
-        memory.WriteU16Direct(0x89,  7, 0,  123);
-        memory.WriteU16Direct(0x89,  7, 2,  456);
-        memory.WriteU16Direct(0x89,  7, 4, unchecked((ushort)-789));
-        memory.WriteFloatDirect(0x8A,  8, 0, 1.23f);
-        memory.WriteFloatDirect(0x8A,  8, 4, 4.56f);
-        memory.WriteFloatDirect(0x8A, 18, 0, 1.23f);
-        memory.WriteStStringDirect(0x8D, 21, 0, "EMULATOR OK", FamilyType);
+        // ── S2: Status file — static fields only (dynamic fields updated by UpdateDateTime/scan timers) ──
+        // All values verified byte-by-byte against real 1766-L32BWA hardware (June 2026).
+        // Field definitions per AB 1766-RM001 MicroLogix 1400 Reference Manual.
+        memory.WriteU16Direct(0x84, 2,  1*2, 0x043E); // S2:1  — FRN word (major=0x3E, minor=0x04)
+        memory.WriteU16Direct(0x84, 2, 57*2, 1400);   // S2:57 — Model display (informational, not processor type)
+        memory.WriteU16Direct(0x84, 2, 58*2, 1);       // S2:58 — Series
+        memory.WriteU16Direct(0x84, 2, 59*2, 15);      // S2:59 — FRN display (15)
+        memory.WriteU16Direct(0x84, 2, 60*2, 0x4345); // S2:60 — Catalog suffix "CE" (ASCII)
+        memory.WriteU16Direct(0x84, 2, 61*2, 1);       // S2:61
+        memory.WriteU16Direct(0x84, 2, 62*2, 3);       // S2:62 — Sub-revision
+        memory.WriteU16Direct(0x84, 2, 63*2, unchecked((ushort)-28408)); // S2:63 — Serial# low
+        memory.WriteU16Direct(0x84, 2, 64*2, 1334);    // S2:64 — Serial# high
+
+        // ── Critical system files (fallback for when no .bin is loaded) ────────────
+        // These are overwritten by LoadEmbeddedProgram if ML1400.bin is present,
+        // but are essential for the emulator to function without an embedded backup.
 
         // ── Program slot directory (fileType=0x00, fileNum=0, 44 bytes) ─────────
         // Accessed via FNC 0xA2 fileType=0x00 fileNum=0 by RSLogix during connection.
@@ -374,10 +383,6 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
             0x71, 0x43,
         });
 
-        // ── SYS data file (fileType=0x63, fileNum=0) ────────────────────────────
-        // Value 0x9108 is seeded directly in BuildDownloadSeed() to ensure it is
-        // set before SeedInitialValues runs. No action needed here.
-
         // ── Program header file (fileType=0x03, fileNum=0, 3022 bytes) ─────────
         // RSLogix reads this file in 80-byte chunks (sub+=40) until STS=0x10 (EOF).
         // Critical checks:
@@ -398,7 +403,7 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
                 0x55, 0x4E, 0x54, 0x49, 0x54, 0x4C, 0x45, 0x44,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x3F, 0x00,  // [18..19] word[9] = 0x003F
-                0x36, 0x05,  // [20..21] word[10] = 0x0536
+                0x38, 0x05,  // [20..21] word[10] = 0x0538 — verified from real EIP capture (July 2026)
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // [22..31] owner
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // [32..41] confirm
                 0x71, 0x43,  // [42..43] checksum = 0x4371
@@ -462,18 +467,26 @@ public sealed class Ml1400FamilyProfile : IPlcFamilyProfile
         // content is zero/empty. Zeroed content is safer for an empty program.
         memory.CreateAndInitRawFile(0x24, 0, new byte[64]);
 
-        // S2: Status file — static fields only (RTC updated by UpdateDateTime every second)
-        // All values verified byte-by-byte against real 1766-L32BWA hardware (June 2026).
-        // Field definitions per AB 1766-RM001 MicroLogix 1400 Reference Manual.
-        memory.WriteU16Direct(0x84, 2,  1*2, 0x043E); // S2:1  — FRN word (major=0x3E, minor=0x04)
-        memory.WriteU16Direct(0x84, 2, 57*2, 1400);   // S2:57 — Model display (informational, not processor type)
-        memory.WriteU16Direct(0x84, 2, 58*2, 1);       // S2:58 — Series
-        memory.WriteU16Direct(0x84, 2, 59*2, 15);      // S2:59 — FRN display (15)
-        memory.WriteU16Direct(0x84, 2, 60*2, 0x4345); // S2:60 — Catalog suffix "CE" (ASCII)
-        memory.WriteU16Direct(0x84, 2, 61*2, 1);       // S2:61
-        memory.WriteU16Direct(0x84, 2, 62*2, 3);       // S2:62 — Sub-revision
-        memory.WriteU16Direct(0x84, 2, 63*2, unchecked((ushort)-28408)); // S2:63 — Serial# low
-        memory.WriteU16Direct(0x84, 2, 64*2, 1334);    // S2:64 — Serial# high
+        // ── Download seed file (fileType=0x63, fileNum=0, 4 bytes) ──────────────
+        // DF1Comm.DownloadProgramData reads 4 bytes from this file and copies them
+        // into the FNC=0x88 init packet.
+        // Value 0x9108 verified from real 1766-L32BWA via:
+        //   sendhex 01 0F A2 04 00 63 00 00  → RX: 08 91 00 00
+        memory.CreateAndInitRawFile(0x63, 0, new byte[] { 0x08, 0x91, 0x00, 0x00 });
+
+        // ── Data file seeds (N7, F8, ST21, etc.) ──────────────────────────────────
+        // These values are fully supplied by the embedded .bin backup
+        // (LoadEmbeddedProgram overwrites them). Keeping them as commented
+        // fallbacks for reference or manual testing without a .bin.
+        /*
+        memory.WriteU16Direct(0x89,  7, 0,  123);
+        memory.WriteU16Direct(0x89,  7, 2,  456);
+        memory.WriteU16Direct(0x89,  7, 4, unchecked((ushort)-789));
+        memory.WriteFloatDirect(0x8A,  8, 0, 1.23f);
+        memory.WriteFloatDirect(0x8A,  8, 4, 4.56f);
+        memory.WriteFloatDirect(0x8A, 18, 0, 1.23f);
+        memory.WriteStStringDirect(0x8D, 21, 0, "EMULATOR OK", FamilyType);
+        */
     }
 }
 
