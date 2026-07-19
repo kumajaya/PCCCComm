@@ -392,7 +392,7 @@ class Program
                 pccc = new Comm.PCCCComm(cfg.PortName, cfg.Baud, cfg.SerialParity)
                 {
                     TargetNode = cfg.TargetNode, MyNode = cfg.MyNode,
-                    CheckSum = cfg.Checksum == "crc" ? Comm.Pccc.CheckSumOptions.Crc : Comm.Pccc.CheckSumOptions.Bcc,
+                    CheckSum = cfg.Checksum == "crc" ? Comm.Core.CheckSumOptions.Crc : Comm.Core.CheckSumOptions.Bcc,
                 };
                 Console.WriteLine($"DF1: Connecting to {cfg.PortName} @ {cfg.Baud} baud, {cfg.SerialParity} parity, checksum={pccc.CheckSum}");
                 Console.WriteLine($"MyNode={cfg.MyNode}, TargetNode={cfg.TargetNode}");

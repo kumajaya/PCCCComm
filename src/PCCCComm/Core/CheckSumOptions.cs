@@ -19,12 +19,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-namespace PCCCComm.Pccc;
+namespace PCCCComm.Core;
 
 /// <summary>
-/// Checksum selection for DF1 frames.
-/// CRC-16/ARC (init=0x0000, poly=0xA001) as AB DF1 spec
-/// BCC uses two's complement of sum.
+/// DF1 checksum algorithm selection.
 /// </summary>
 public enum CheckSumOptions
 {

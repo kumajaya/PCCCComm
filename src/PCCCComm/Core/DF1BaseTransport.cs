@@ -19,18 +19,36 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-using System;
-using System.Collections.Generic;
-using System.Threading;
-using PCCCComm.Pccc;
+using System.Diagnostics;
+using System.Threading.Channels;
 
 namespace PCCCComm.Core;
 
 /// <inheritdoc cref="ITransport"/>
 /// <summary>
 /// Abstract base class for DF1 transport implementations (full‑duplex and half‑duplex master).
-/// Provides common DF1 framing services: DLE stuffing, checksum calculation, control byte
-/// transmission, and raw frame events. Derived classes must implement <see cref="SendFrame"/>.
+/// Derived classes must implement <see cref="SendFrame"/>.
+///
+/// <para>Provides three things, of which only the first is about framing:</para>
+/// <list type="number">
+///   <item>
+///     DF1 framing services — DLE stuffing, CRC/BCC checksums, control-byte
+///     transmission, and the raw/decoded frame events.
+///   </item>
+///   <item>
+///     A single write gate: every port write in this hierarchy goes through
+///     <see cref="TryWritePort"/> under <c>_wireLock</c>, because the receive
+///     thread writes link-layer replies while a sender may be writing a data
+///     frame and <see cref="ISerialPort.Write"/> promises no thread safety. The
+///     gate also refuses writes once teardown has begun.
+///   </item>
+///   <item>
+///     A callback executor owned for the lifetime of the transport. Receive-path
+///     events are posted to it instead of raised inline; see the executor notes
+///     below for why, and for which events deliberately bypass it.
+///     <see cref="Dispose"/> drains it.
+///   </item>
+/// </list>
 /// </summary>
 public abstract class DF1BaseTransport : ITransport
 {
@@ -51,6 +69,65 @@ public abstract class DF1BaseTransport : ITransport
     // --- Common fields ---
     /// <summary>Serial port abstraction.</summary>
     protected readonly ISerialPort _port;
+
+    /// <summary>
+    /// Serialises EVERY write to the serial port. Deliberately not _txLock: a
+    /// full-duplex SendFrame holds _txLock while awaiting an ACK that the
+    /// receive thread has to write, so reusing _txLock here would deadlock.
+    /// Held only for the duration of one write, never across a wait.
+    /// </summary>
+    protected readonly object _wireLock = new object();
+
+    /// <summary>
+    /// True whenever writes must be refused: before the first <see cref="Open"/>,
+    /// and again once teardown has begun. Starts true deliberately — a transport
+    /// that was never opened must not put bytes on a port. Guarded by _wireLock.
+    /// </summary>
+    private bool _wireClosed = true;
+
+    /// <summary>
+    /// Set once by the first <see cref="Dispose"/> call to make disposal
+    /// idempotent. Guarded by _wireLock, alongside _wireClosed.
+    /// </summary>
+    private bool _disposed;
+
+    // ─── Public-callback executor ────────────────────────────────────────────
+    //
+    // Events raised from the RECEIVE path go through here instead of being
+    // invoked inline. Inline, they run on the serial callback thread — which is
+    // also the only thread that can parse inbound bytes — so a handler that
+    // calls SendFrame() waits for an ACK that nobody is left to parse, and the
+    // send fails with a timeout every single time.
+    //
+    // Events raised from the CALLER's thread (half-duplex FrameReceived and
+    // RawFrameSent, which fire after SendFrame has released _txLock) keep their
+    // direct invocation: there is no starvation to avoid there, and queuing them
+    // would change the contract that SendFrame has delivered the response by the
+    // time it returns.
+    //
+    // Unbounded on purpose. Bounded-with-blocking would recreate the very
+    // deadlock this removes — a full queue would stall the parser, and the
+    // handler waiting on it would never get its ACK. Bounded-with-drop is not an
+    // option either, since this queue carries FrameReceived, whose loss is
+    // functional rather than diagnostic. A permanently stuck handler therefore
+    // accumulates memory; handlers are expected to return promptly.
+    private enum CallbackKind { Frame, RawSent, RawReceived }
+
+    private readonly Channel<(CallbackKind kind, byte[] data)> _callbacks =
+        Channel.CreateUnbounded<(CallbackKind, byte[])>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,   // the receive path and (later) others may post
+            AllowSynchronousContinuations = false
+        });
+
+    private readonly Task _callbackPump;
+
+    /// <summary>True on the executor thread, so teardown never waits on itself.</summary>
+    private readonly ThreadLocal<bool> _onCallbackThread = new();
+
+    /// <summary>How long Dispose() waits for queued callbacks to drain.</summary>
+    private const int CallbackDrainTimeoutMs = 2000;
 
     private CheckSumOptions _checksumType = CheckSumOptions.Crc;
     private int _sleepDelay = 0;
@@ -101,6 +178,18 @@ public abstract class DF1BaseTransport : ITransport
     protected DF1BaseTransport(ISerialPort port)
     {
         _port = port ?? throw new ArgumentNullException(nameof(port));
+
+        // One executor for the lifetime of the transport, not per session, so
+        // callbacks from two sessions can never overlap and arrival order is
+        // preserved end to end.
+        //
+        // The pump invokes OnFrameReceived and friends, which are virtual — so in
+        // principle it could reach a derived override before that derived
+        // constructor has finished. It cannot in practice: nothing can post until
+        // the derived constructor subscribes to ISerialPort.BytesReceived, which
+        // is the last thing both do. A derived class that posts from its own
+        // constructor would break that, hence this note.
+        _callbackPump = Task.Run(PumpCallbacksAsync);
     }
 
     /// <summary>
@@ -112,10 +201,94 @@ public abstract class DF1BaseTransport : ITransport
     }
 
     /// <inheritdoc/>
-    public virtual void Open() => _port.Open();
+    public virtual void Open()
+    {
+        // Opened outside _wireLock, then the gate is lifted — mirroring Close().
+        // SerialPortWrapper.Open() does not wait for the callback lease today, so
+        // holding the lock across it would not deadlock; keeping the two
+        // symmetrical means it still will not if that ever changes.
+        _port.Open();
+
+        lock (_wireLock)
+            _wireClosed = false;
+    }
 
     /// <inheritdoc/>
-    public virtual void Close() => _port.Close();
+    public virtual void Close()
+    {
+        // The lock is taken to mark the port closed, then RELEASED before
+        // _port.Close(). Do not merge these back into one block.
+        //
+        // Holding _wireLock across _port.Close() deadlocks: SerialPortWrapper.Close()
+        // waits for its active callback to finish, and that callback is very likely
+        // inside SendControl() — every inbound data frame is ACKed — waiting for
+        // this very lock. Neither side yields, and the window is not narrow.
+        //
+        // Releasing first costs nothing. Taking the lock still lets a write already
+        // in progress finish, and once _wireClosed is set TryWritePort refuses, so
+        // no new write can begin while the port is closing.
+        lock (_wireLock)
+            _wireClosed = true;
+
+        _port.Close();
+    }
+
+    /// <summary>
+    /// Refuses all further writes, without closing the port yet.
+    /// </summary>
+    /// <remarks>
+    /// Teardown must shut this gate BEFORE it waits on the send lock, not after.
+    /// Close() sets its own _closing flag and then blocks on _txLock, which an
+    /// in-flight SendFrame holds for the whole transaction — so between those two
+    /// moments the flag says "closing" while the gate still says "open", and a
+    /// send that was mid-backoff writes its frame anyway. The caller then gets an
+    /// exception and concludes nothing was sent, while the PLC has already acted
+    /// on it. For a forwarded write that is the difference between a lost reply
+    /// and a duplicated command.
+    ///
+    /// Checking the flag again just before the write only narrows that window;
+    /// the gate closes it, because TryWritePort tests and writes under one lock.
+    /// </remarks>
+    protected void CloseWireGate()
+    {
+        lock (_wireLock)
+            _wireClosed = true;
+    }
+
+    /// <summary>
+    /// Writes to the serial port under <c>_wireLock</c>. Every port write in
+    /// this class hierarchy must go through here: the receive thread writes
+    /// link-layer replies while a sender may be writing a data frame, and
+    /// <see cref="ISerialPort.Write"/> gives no thread-safety guarantee — two
+    /// concurrent writers would interleave DF1 bytes on the wire.
+    /// </summary>
+    /// <returns>False when the port is already closing; true once written.</returns>
+    /// <remarks>
+    /// Returning a flag rather than throwing matters: <see cref="ISerialPort.Write"/>
+    /// itself raises InvalidOperationException for a genuinely faulted port, and a
+    /// caller that swallowed the exception form would silence both.
+    /// </remarks>
+    protected bool TryWritePort(byte[] buffer, int offset, int count)
+    {
+        lock (_wireLock)
+        {
+            if (_wireClosed)
+                return false;
+            _port.Write(buffer, offset, count);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// As <see cref="TryWritePort"/>, but throws when the port is closing. Used by
+    /// the send paths, where the caller must learn that the frame never went out.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Thrown once the port is closing.</exception>
+    protected void WritePort(byte[] buffer, int offset, int count)
+    {
+        if (!TryWritePort(buffer, offset, count))
+            throw new InvalidOperationException("Serial port is closed.");
+    }
 
     /// <inheritdoc/>
     public abstract void SendFrame(byte[] innerFrame);
@@ -123,7 +296,7 @@ public abstract class DF1BaseTransport : ITransport
     /// <summary>
     /// Applies DLE stuffing to a payload: every 0x10 byte is duplicated.
     /// </summary>
-    protected static byte[] ApplyDleStuffing(byte[] payload)
+    protected internal static byte[] ApplyDleStuffing(byte[] payload)
     {
         var result = new List<byte>(payload.Length * 2);
         foreach (byte b in payload)
@@ -138,7 +311,7 @@ public abstract class DF1BaseTransport : ITransport
     /// <summary>
     /// Removes DLE stuffing from a stuffed payload.
     /// </summary>
-    protected static byte[] RemoveDleStuffing(byte[] stuffed)
+    protected internal static byte[] RemoveDleStuffing(byte[] stuffed)
     {
         var result = new List<byte>(stuffed.Length);
         for (int i = 0; i < stuffed.Length; i++)
@@ -162,7 +335,11 @@ public abstract class DF1BaseTransport : ITransport
         if (controlByte != ACK && controlByte != NAK && controlByte != ENQ)
             throw new ArgumentException("Invalid control byte.", nameof(controlByte));
         var frame = new byte[] { DLE, controlByte };
-        _port.Write(frame, 0, frame.Length);
+
+        // Best-effort: a link-layer reply that loses the race with teardown is not
+        // worth propagating into the receive dispatcher. A real port fault still
+        // throws from Write() and is left to escape.
+        TryWritePort(frame, 0, frame.Length);
     }
 
     /// <summary>
@@ -193,6 +370,70 @@ public abstract class DF1BaseTransport : ITransport
         return frame;
     }
 
+    /// <summary>
+    /// Drains the callback queue, invoking one handler at a time in arrival
+    /// order. Runs for the lifetime of the transport.
+    /// </summary>
+    private async Task PumpCallbacksAsync()
+    {
+        try
+        {
+            await foreach (var item in _callbacks.Reader.ReadAllAsync().ConfigureAwait(false))
+            {
+                _onCallbackThread.Value = true;
+                try
+                {
+                    switch (item.kind)
+                    {
+                        case CallbackKind.Frame: OnFrameReceived(item.data); break;
+                        case CallbackKind.RawSent: OnRawFrameSent(item.data); break;
+                        case CallbackKind.RawReceived: OnRawFrameReceived(item.data); break;
+                    }
+                }
+                catch
+                {
+                    // A throwing subscriber must not take the executor down with
+                    // it; every later callback would be lost.
+                }
+                finally
+                {
+                    _onCallbackThread.Value = false;
+                }
+            }
+        }
+        catch (ChannelClosedException)
+        {
+            // Normal shutdown.
+        }
+    }
+
+    /// <summary>Queues <see cref="FrameReceived"/> for the callback executor.</summary>
+    protected void PostFrameReceived(byte[] innerFrame) =>
+        _callbacks.Writer.TryWrite((CallbackKind.Frame, innerFrame));
+
+    /// <summary>
+    /// Queues <see cref="RawFrameSent"/> for the callback executor.
+    /// </summary>
+    /// <remarks>
+    /// Unused today: both transports raise RawFrameSent on the caller's own
+    /// thread, where there is nothing to starve. Kept so all three events have a
+    /// posted form, and so a future send path on the receive thread has one.
+    /// </remarks>
+    protected void PostRawFrameSent(byte[] rawFrame) =>
+        _callbacks.Writer.TryWrite((CallbackKind.RawSent, rawFrame));
+
+    /// <summary>
+    /// Stops accepting new callbacks. Derived Dispose() implementations must call
+    /// this BEFORE taking their own locks: <see cref="Dispose"/> then waits for the
+    /// executor to drain, and a queued handler that wants _txLock could not finish
+    /// while teardown holds it — turning every disposal into a full drain timeout.
+    /// </summary>
+    protected void CompleteCallbacks() => _callbacks.Writer.TryComplete();
+
+    /// <summary>Queues <see cref="RawFrameReceived"/> for the callback executor.</summary>
+    protected void PostRawFrameReceived(byte[] rawFrame) =>
+        _callbacks.Writer.TryWrite((CallbackKind.RawReceived, rawFrame));
+
     /// <summary>Raises the <see cref="FrameReceived"/> event.</summary>
     protected virtual void OnFrameReceived(byte[] innerFrame)
     {
@@ -211,7 +452,7 @@ public abstract class DF1BaseTransport : ITransport
         RawFrameReceived?.Invoke(this, rawFrame);
     }
 
-    // ─── CRC-16 lookup table (matches VB aCRC16Table) ────────────────────────
+    // ─── CRC-16 lookup table (standard DF1 CRC-16, AB Pub 1770-6.5.16) ────────────────────────
     private static readonly ushort[] CRC16Table =
     {
         0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
@@ -271,7 +512,7 @@ public abstract class DF1BaseTransport : ITransport
         }
         else
         {
-            // BCC: two's complement of sum, same as VB CalculateBCC
+            // BCC: two's complement of the modulo-256 sum (AB DF1, Pub 1770-6.5.16)
             int sum = 0;
             foreach (byte b in data) sum += b;
             sum = sum & 0xFF;
@@ -282,119 +523,50 @@ public abstract class DF1BaseTransport : ITransport
     /// <inheritdoc/>
     public virtual void Dispose()
     {
+        // Idempotency guard: a second Dispose() would re-read _onCallbackThread.Value
+        // below, which throws ObjectDisposedException once the slot has been disposed
+        // at the end of the first call. Set under _wireLock so the flag and the wire
+        // gate close atomically and a concurrent second Dispose() cannot slip past.
+        lock (_wireLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _wireClosed = true;
+        }
         _port.Dispose();
-    }
-}
 
-/// <summary>
-/// Ring buffer implementation for efficient byte stream processing.
-/// Used internally by DF1 transports to avoid List.RemoveAt overhead.
-/// </summary>
-internal sealed class RingBuffer
-{
-    private readonly byte[] _buffer;
-    private int _head; // read index
-    private int _tail; // write index
-    private int _count;
-    private readonly int _capacity;
-
-    /// <summary>Initializes a new ring buffer with the specified capacity.</summary>
-    /// <param name="capacity">Maximum number of bytes the buffer can hold. Default is 4096.</param>
-    public RingBuffer(int capacity = 4096)
-    {
-        _capacity = capacity;
-        _buffer = new byte[capacity];
-        _head = 0;
-        _tail = 0;
-        _count = 0;
-    }
-
-    /// <summary>Number of bytes currently stored in the buffer.</summary>
-    public int Count => _count;
-
-    /// <summary>Maximum capacity of the buffer.</summary>
-    public int Capacity => _capacity;
-
-    /// <summary>
-    /// Adds a range of bytes to the ring buffer. Throws <see cref="InvalidOperationException"/>
-    /// if the buffer does not have enough free space.
-    /// </summary>
-    /// <param name="data">Source byte array.</param>
-    /// <param name="offset">Starting index in <paramref name="data"/>.</param>
-    /// <param name="length">Number of bytes to copy.</param>
-    public void AddRange(byte[] data, int offset, int length)
-    {
-        if (length == 0) return;
-        if (length > _capacity - _count)
-            throw new InvalidOperationException("RingBuffer overflow");
-        int written = 0;
-        while (written < length)
+        // Let queued callbacks finish so a frame that reached the wire still
+        // raises its event. Skipped when Dispose() is itself called from a
+        // handler — the executor cannot wait for the thread it is standing on.
+        //
+        // CompleteCallbacks() is normally already done by the derived class before
+        // it took its locks; calling it again is harmless and covers a derived
+        // class that forgot.
+        CompleteCallbacks();
+        bool pumpStopped = false;
+        if (!_onCallbackThread.Value)
         {
-            int spaceToEnd = _capacity - _tail;
-            int chunk = Math.Min(length - written, spaceToEnd);
-            Array.Copy(data, offset + written, _buffer, _tail, chunk);
-            _tail = (_tail + chunk) % _capacity;
-            written += chunk;
-        }
-        _count += length;
-    }
+            try
+            {
+                pumpStopped = _callbackPump.Wait(CallbackDrainTimeoutMs);
+                if (!pumpStopped)
+                    Debug.WriteLine($"{GetType().Name}: callback executor did not drain within {CallbackDrainTimeoutMs} ms");
+            }
+            catch (AggregateException)
+            {
+                // Pump faulted — it has stopped running, so it will not touch
+                // _onCallbackThread again. Safe to dispose below.
+                pumpStopped = true;
+            }
 
-    /// <summary>
-    /// Copies up to <paramref name="count"/> bytes from the buffer into
-    /// <paramref name="destination"/> without advancing the read pointer.
-    /// </summary>
-    /// <param name="destination">Destination array.</param>
-    /// <param name="destOffset">Starting offset in <paramref name="destination"/>.</param>
-    /// <param name="count">Maximum number of bytes to copy.</param>
-    /// <returns>Actual number of bytes copied (may be less than <paramref name="count"/> if buffer has fewer bytes).</returns>
-    public int Peek(byte[] destination, int destOffset, int count)
-    {
-        int bytesToCopy = Math.Min(count, _count);
-        int tempHead = _head;
-        int copied = 0;
-        while (copied < bytesToCopy)
-        {
-            int spaceToEnd = _capacity - tempHead;
-            int chunk = Math.Min(bytesToCopy - copied, spaceToEnd);
-            Array.Copy(_buffer, tempHead, destination, destOffset + copied, chunk);
-            tempHead = (tempHead + chunk) % _capacity;
-            copied += chunk;
-        }
-        return copied;
-    }
-
-    /// <summary>
-    /// Advances the read pointer by <paramref name="count"/> bytes, effectively
-    /// removing them from the buffer.
-    /// </summary>
-    /// <param name="count">Number of bytes to consume.</param>
-    /// <exception cref="InvalidOperationException">Thrown when <paramref name="count"/> exceeds <see cref="Count"/>.</exception>
-    public void Advance(int count)
-    {
-        if (count > _count) throw new InvalidOperationException("Advance beyond count");
-        _head = (_head + count) % _capacity;
-        _count -= count;
-        if (_count == 0) { _head = 0; _tail = 0; }
-    }
-
-    /// <summary>Resets the buffer to empty state.</summary>
-    public void Clear()
-    {
-        _head = 0;
-        _tail = 0;
-        _count = 0;
-    }
-
-    /// <summary>Indexer to read a byte at a logical offset without advancing the read pointer.</summary>
-    /// <param name="index">Logical index from the current read position (0 = oldest byte).</param>
-    /// <returns>The byte at the specified position.</returns>
-    /// <exception cref="IndexOutOfRangeException">Thrown when <paramref name="index"/> is out of range.</exception>
-    public byte this[int index]
-    {
-        get
-        {
-            if (index >= _count) throw new IndexOutOfRangeException();
-            return _buffer[(_head + index) % _capacity];
+            // Dispose the slot only when the pump has actually stopped — it either
+            // drained (Wait returned true) or faulted. On a timeout the pump is
+            // still live and would hit ObjectDisposedException on its next
+            // _onCallbackThread.Value access, so in that case the slot is left to
+            // the finalizer — as it also is on the on-callback-thread path, where
+            // disposal is skipped entirely because the pump is still running.
+            if (pumpStopped)
+                _onCallbackThread.Dispose();
         }
     }
 }

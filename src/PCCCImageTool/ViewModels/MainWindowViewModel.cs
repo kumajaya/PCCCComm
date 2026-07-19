@@ -415,7 +415,8 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
                 {
                     TargetNode = (int)TargetNode,
                     MyNode     = (int)MyNode,
-                    CheckSum   = SelectedChecksum == "Crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc,
+                    CheckSum   = SelectedChecksum == "Crc" ? PCCCComm.Core.CheckSumOptions.Crc
+                            : PCCCComm.Core.CheckSumOptions.Bcc,
                     Protocol   = "DF1"
                 };
             }
@@ -439,7 +440,8 @@ public class MainWindowViewModel : ReactiveObject, IDisposable
                 {
                     TargetNode = (int)TargetNode,
                     MyNode     = (int)MyNode,
-                    CheckSum   = SelectedChecksum == "Crc" ? CheckSumOptions.Crc : CheckSumOptions.Bcc,
+                    CheckSum   = SelectedChecksum == "Crc" ? PCCCComm.Core.CheckSumOptions.Crc
+                            : PCCCComm.Core.CheckSumOptions.Bcc,
                     Protocol   = "DF1Master",
                     SlaveAddress = (int)TargetNode,
                     Rs485Mode = rs485ModeEnum,

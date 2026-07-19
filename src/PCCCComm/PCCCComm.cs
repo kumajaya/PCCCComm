@@ -106,8 +106,8 @@ public class PCCCComm : IDisposable, IHandlerContext
         }
     }
 
-    private CheckSumOptions _checkSum = CheckSumOptions.Crc;
-    public CheckSumOptions CheckSum
+    private Core.CheckSumOptions _checkSum = Core.CheckSumOptions.Crc;
+    public Core.CheckSumOptions CheckSum
     {
         get => _checkSum;
         set
@@ -782,7 +782,7 @@ public class PCCCComm : IDisposable, IHandlerContext
 
         int[] baudRates = { 38400, 19200, 9600 };
         var parities = new System.IO.Ports.Parity[] { System.IO.Ports.Parity.None, System.IO.Ports.Parity.Even };
-        var checksums = new CheckSumOptions[] { CheckSumOptions.Crc, CheckSumOptions.Bcc };
+        var checksums = new Core.CheckSumOptions[] { Core.CheckSumOptions.Crc, Core.CheckSumOptions.Bcc };
 
         int reply = -1;
         bool portError = false;
