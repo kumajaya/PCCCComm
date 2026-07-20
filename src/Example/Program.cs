@@ -293,7 +293,7 @@ class Program
     // ── Keepalive / auto-reconnect ────────────────────────────────────────────
 
     private static volatile bool _keepaliveRunning = false;
-    private static volatile bool _keepaliveEnabled = true;
+    private static volatile bool _keepaliveEnabled = false;
     private static TimeSpan      _keepaliveInterval = TimeSpan.FromSeconds(5);
     private const  int           KeepaliveFailThreshold = 2;
     private static volatile bool _linkConnected = true;
@@ -302,7 +302,9 @@ class Program
     private static void StartKeepalive(Comm.PCCCComm pccc, Config cfg)
     {
         _keepaliveRunning = true;
-        _keepaliveEnabled = true;
+        // Keepalive defaults to OFF because Echo is not supported by all PLCs
+        // (e.g., some PLC-5 models). Users can enable it with 'keepalive on'.
+        _keepaliveEnabled = false;
         _linkConnected    = true;
         var thread = new System.Threading.Thread(() =>
         {
