@@ -321,17 +321,8 @@ public class PCCCEmulator : IDisposable
         _timer        = new Timer(_ => UpdateDateTime(), null, Timeout.Infinite, Timeout.Infinite);
         _waveformTimer = new Timer(_ => UpdateWaveform(), null, Timeout.Infinite, Timeout.Infinite);
 
-        // Start HTTP server if the family requires it (e.g. ML1400 serves /filelist.xml).
-        if (_profile.NeedsHttpServer)
-            _httpServer = new Ml1400HttpServer(_profile.BuildMemoryConfig(), Ml1400HttpPort);
-
         Logger.Always(this, $"PCCC emulator initialized in {mode} mode");
     }
-
-    /// <summary>HTTP port for ML1400 filelist.xml server (default 80).</summary>
-    public int Ml1400HttpPort { get; set; } = 8080;
-
-    private Ml1400HttpServer? _httpServer;
 
     /// <summary>
     /// Convenience constructor for DF1 mode (default transport).
@@ -350,7 +341,6 @@ public class PCCCEmulator : IDisposable
     public void Start()
     {
         _transport?.Start();
-        _httpServer?.Start();
         _timer?.Change(0, 1000);
         _waveformTimer?.Change(0, 500);
         Logger.Always(this, $"PCCC emulator started in {_mode} mode");
@@ -365,7 +355,6 @@ public class PCCCEmulator : IDisposable
         if (Interlocked.CompareExchange(ref _isDisposing, 1, 0) != 0) return;
 
         _transport?.Stop();
-        _httpServer?.Stop();
         _timer?.Change(Timeout.Infinite, Timeout.Infinite);
         _waveformTimer?.Change(Timeout.Infinite, Timeout.Infinite);
 
@@ -377,7 +366,6 @@ public class PCCCEmulator : IDisposable
         Stop();
         _timer?.Dispose();
         _waveformTimer?.Dispose();
-        _httpServer?.Dispose();
         _memory.Dispose();
         // EIPTransport does not implement IDisposable; Stop() above already drains
         // in-flight requests and closes all resources via its StopAsync() path.

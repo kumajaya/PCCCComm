@@ -61,7 +61,6 @@ class Program
         int cspPort = 2222;
         bool quietMode = false;
         string family = "slc";
-        int httpPort = 8080;
 
         // Parse positional port argument
         if (args.Length > 0 && !args[0].StartsWith("--"))
@@ -129,10 +128,6 @@ class Program
             {
                 family = args[++i].ToLowerInvariant();
             }
-            else if (a == "--http-port" && i + 1 < args.Length)
-            {
-                if (int.TryParse(args[++i], out var p)) httpPort = p;
-            }
             else if (a == "--help" || a == "-h")
             {
                 PrintUsage();
@@ -190,9 +185,6 @@ class Program
         if (quietMode)
             emulator.SetLoggingEnabled(false);
 
-        if (family == "ml1400")
-            emulator.Ml1400HttpPort = httpPort;
-
         try
         {
             emulator.Start();
@@ -227,8 +219,6 @@ class Program
             }
             
             Console.WriteLine($"      Family    : {emuProfile.Name}");
-            if (family == "ml1400")
-                Console.WriteLine($"      HTTP Port : {httpPort} (serves /filelist.xml)");
             Console.WriteLine($"      Logging   : {(quietMode ? "Disabled (High Performance)" : "Enabled")}");
             Logger.Always(null, "Press Enter to stop.");
             Console.ReadLine();
@@ -260,8 +250,7 @@ class Program
         Console.WriteLine("  --rts-deassert-delay <ms>        Delay after last byte before disabling (default 5)");
         Console.WriteLine("  --port <n>                EIP port number (default 44818)");
         Console.WriteLine("  --csp-port <n>            CSP port number (default 2222)");
-        Console.WriteLine("  --http-port <n>           HTTP port for ML1400 filelist.xml (default 80)");
-  Console.WriteLine("  --quiet, -q               Disable logging for maximum performance");
+        Console.WriteLine("  --quiet, -q               Disable logging for maximum performance");
         Console.WriteLine("  --help, -h                Show this help");
         Console.WriteLine();
         Console.WriteLine("Examples:");
