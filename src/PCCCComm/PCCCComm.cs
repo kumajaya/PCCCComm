@@ -668,6 +668,7 @@ public class PCCCComm : IDisposable, IHandlerContext
                 _currentTransport.Open();
             EnsureProtocol();
             EnsureHandler();
+            ResetCircuitBreaker();
             return 0;
         }
 
@@ -687,6 +688,7 @@ public class PCCCComm : IDisposable, IHandlerContext
                 transport.Open();
                 EnsureProtocol();
                 EnsureHandler();
+                ResetCircuitBreaker();
                 return 0;
             }
             catch (Exception ex)
@@ -741,6 +743,7 @@ public class PCCCComm : IDisposable, IHandlerContext
             // fine and only the PLC was unresponsive).
             EnsureProtocol();
             EnsureHandler();
+            ResetCircuitBreaker();
             return 0;
         }
         catch (PCCCException)
