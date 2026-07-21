@@ -1,13 +1,29 @@
 <Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <RuntimeIdentifiers>win-x64;linux-x64;osx-x64</RuntimeIdentifiers>
+    <AssemblyName>PCCCComm</AssemblyName>
+    <RootNamespace>PCCCComm</RootNamespace>
+
+    <!-- Package / assembly metadata -->
+    <Authors>Ketut Kumajaya</Authors>
+    <Product>PCCCComm</Product>
+    <Description>PCCC Communication Library for .NET — DF1, EtherNet/IP, and CSPv4 transports.</Description>
+    <Copyright>Copyright (c) 2026 Ketut Kumajaya</Copyright>
+    <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/kumajaya/PCCCComm</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/kumajaya/PCCCComm</PackageProjectUrl>
+    <Version>1.1.0</Version>
+    <PackageTags>pccc;allen-bradley;plc;df1;eip;csp;ethernet-ip;automation;scada;industrial</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
   </ItemGroup>
+
 </Project>

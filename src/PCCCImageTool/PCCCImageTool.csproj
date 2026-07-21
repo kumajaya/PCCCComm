@@ -4,11 +4,26 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
     <!-- Compiled bindings require x:DataType on every root element that uses them -->
     <AvaloniaUseCompiledBindings>true</AvaloniaUseCompiledBindings>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <RuntimeIdentifiers>win-x64;linux-x64;osx-x64</RuntimeIdentifiers>
+    <AssemblyName>PCCCImageTool</AssemblyName>
+    <RootNamespace>PCCCImageTool</RootNamespace>
+
+    <!-- Package / assembly metadata -->
+    <Authors>Ketut Kumajaya</Authors>
+    <Product>PCCCImageTool</Product>
+    <Description>Desktop GUI tool for upload/download/compare PLC images over PCCC (DF1, EIP, CSP).</Description>
+    <Copyright>Copyright (c) 2026 Ketut Kumajaya</Copyright>
+    <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/kumajaya/PCCCComm</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/kumajaya/PCCCComm</PackageProjectUrl>
+    <Version>1.1.0</Version>
+    <PackageTags>pccc;gui;image;upload;download;compare;allen-bradley;plc;automation</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
