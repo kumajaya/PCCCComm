@@ -91,6 +91,9 @@ public class SlcHandler : IPlcHandler
 
     private DataAddress ParseAddress(string address) => _addressCache.GetOrAdd(address, PCCCParser.Parse);
 
+    // Set when the processor rejects Masked Write (FNC 0xAB); bit writes then use read-modify-write.
+    private volatile bool _maskedWriteUnsupported;
+
     // ─── Private Helper Methods ────────────────────────────────────────────
 
     private bool IsMicroLogixFamily => _processorType switch
@@ -552,12 +555,12 @@ public class SlcHandler : IPlcHandler
         int numberOfElements = (totalBytesNeeded + bytesPerElem - 1) / bytesPerElem;
         int numberOfBytesToRead = numberOfElements * bytesPerElem;
 
-        // Control shares Timer/Counter's 3-word/6-byte element layout; see
-        // Plc5Handler.ReadWords for the derivation of this adjustment.
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
-            numberOfBytesToRead = (numberOfBytesToRead * 3) - 4;
+        // No Timer/Counter/Control adjustment here: ReadWords returns raw consecutive words
+        // starting at the addressed sub-element (SLC addresses the sub-element on the wire),
+        // so exactly numberOfWords words are read. The per-element stride for multi-element
+        // PRE/ACC/LEN/POS reads is applied by ReadAny/ReadAnyValues, not here — the former
+        // "(bytes * 3) - 4" over-fetch came from DF1Comm.vb, where it was paired with an
+        // every-6th-byte extraction that the port had dropped.
 
         byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytesToRead, out int reply);
         if (reply != 0)
@@ -658,20 +661,23 @@ public class SlcHandler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             return ReadAnyString(startAddress, numberOfElements);
 
-        int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
-            bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
-
-        int wordsPerElem = bytesPerElem / 2;
-        int totalWords = numberOfElements * wordsPerElem;
+        // Timer/Counter/Control elements are 3 words wide. A request for N elements of the
+        // same word (control word, PRE/ACC or LEN/POS) returns that word from N consecutive
+        // elements, as in the original DF1Comm.vb ("read an array of the same consecutive
+        // sub element") and in Plc5Handler. The read starts at the addressed sub-element and
+        // spans 3*(N-1)+1 words; every 3rd word is taken.
+        bool isTcr = p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                     p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                     p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control;
+        int wordsPerElem = isTcr ? 1 : p.BytesPerElements / 2;
+        int strideWords = isTcr ? 3 : wordsPerElem;
+        int totalWords = numberOfElements > 0 ? (numberOfElements - 1) * strideWords + wordsPerElem : 0;
         ushort[] rawWords = ReadWords(startAddress, totalWords);
 
         string[] result = new string[numberOfElements];
         for (int i = 0; i < numberOfElements; i++)
         {
-            int offset = i * wordsPerElem;
+            int offset = i * strideWords;
             switch (p.FileType)
             {
                 case (byte)PCCCConstants.SlcFileTypeCode.Float:
@@ -751,20 +757,23 @@ public class SlcHandler : IPlcHandler
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.String)
             throw new NotSupportedException("ReadAnyValues does not support String (ST) files. Use ReadAny instead.");
 
-        int bytesPerElem = p.BytesPerElements;
-        if (p.SubElement > 0 && (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
-                                  p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control))
-            bytesPerElem = PCCCConstants.Df1Limits.BytesPerWord;
-
-        int wordsPerElem = bytesPerElem / 2;
-        int totalWords = numberOfElements * wordsPerElem;
+        // Timer/Counter/Control elements are 3 words wide. A request for N elements of the
+        // same word (control word, PRE/ACC or LEN/POS) returns that word from N consecutive
+        // elements, as in the original DF1Comm.vb ("read an array of the same consecutive
+        // sub element") and in Plc5Handler. The read starts at the addressed sub-element and
+        // spans 3*(N-1)+1 words; every 3rd word is taken.
+        bool isTcr = p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Timer ||
+                     p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Counter ||
+                     p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Control;
+        int wordsPerElem = isTcr ? 1 : p.BytesPerElements / 2;
+        int strideWords = isTcr ? 3 : wordsPerElem;
+        int totalWords = numberOfElements > 0 ? (numberOfElements - 1) * strideWords + wordsPerElem : 0;
         ushort[] rawWords = ReadWords(startAddress, totalWords);
 
         double[] result = new double[numberOfElements];
         for (int i = 0; i < numberOfElements; i++)
         {
-            int offset = i * wordsPerElem;
+            int offset = i * strideWords;
             switch (p.FileType)
             {
                 case (byte)PCCCConstants.SlcFileTypeCode.Float:
@@ -891,6 +900,42 @@ public class SlcHandler : IPlcHandler
     public int WriteData(string startAddress, float dataToWrite)
         => WriteData(startAddress, 1, new float[] { dataToWrite });
 
+    /// <summary>
+    /// Sets or clears one bit atomically with Protected Typed Logical Masked Write
+    /// (CMD 0x0F, FNC 0xAB: 2-byte mask + 2-byte data), so bits changed by the PLC
+    /// program in the same word are not overwritten. libplctag and pycomm3 use the same
+    /// command for SLC/MicroLogix bit writes. If the processor rejects the command
+    /// (STS 0x10, illegal command), falls back to a non-atomic read-modify-write and
+    /// remembers that for later writes.
+    /// </summary>
+    private int WriteBit(DataAddress p, bool value)
+    {
+        if (!_maskedWriteUnsupported)
+        {
+            // EncodeWriteBody emits FNC 0xAB for bit addresses: mask = 1 << bit,
+            // data = mask when the first data byte is non-zero, otherwise 0.
+            var req = PCCCMessage.CreateWriteRequest(p, new byte[] { (byte)(value ? 1 : 0), 0 }, 0, 2, 0,
+                (byte)MyNode, (byte)TargetNode);
+            _protocol.SendRequest(req, out int sts);
+            if (sts == PCCCConstants.Sts.Success)
+                return 0;
+            if (sts != PCCCConstants.Sts.IllegalCommandOrFormat)
+                throw new PCCCException(PCCCErrors.DecodeStatus(sts));
+            _maskedWriteUnsupported = true;
+        }
+
+        // Fallback: read the word, change the bit, write the word back (not atomic).
+        DataAddress wordAddr = p;
+        wordAddr.BitNumber = 99;
+        DataAddress readAddr = wordAddr;
+        byte[] current = ReadRawDataWithChunking(ref readAddr, PCCCConstants.Df1Limits.BytesPerWord, out int readSts);
+        if (readSts != 0 || current.Length < 2)
+            throw new PCCCException(PCCCErrors.DecodeStatus(readSts));
+        int word = current[0] | (current[1] << 8);
+        word = value ? word | (1 << p.BitNumber) : word & ~(1 << p.BitNumber);
+        return WriteRawDataWithChunking(wordAddr, new byte[] { (byte)(word & 0xFF), (byte)((word >> 8) & 0xFF) });
+    }
+
     /// <summary>Writes multiple float values to the specified address.</summary>
     public int WriteData(string startAddress, int numberOfElements, float[] dataToWrite)
     {
@@ -900,16 +945,7 @@ public class SlcHandler : IPlcHandler
             throw new PCCCException("Use WriteData(string, string) for ST files.");
 
         if (p.BitNumber >= 0 && p.BitNumber < 16 && numberOfElements == 1)
-        {
-            string wordAddress = startAddress.Split('/')[0];
-            string[] current = ReadAny(wordAddress, 1);
-            int word = int.Parse(current[0], CultureInfo.InvariantCulture);
-            if (dataToWrite[0] != 0)
-                word |= (1 << p.BitNumber);
-            else
-                word &= ~(1 << p.BitNumber);
-            return WriteData(wordAddress, 1, new int[] { word });
-        }
+            return WriteBit(p, dataToWrite[0] != 0);
 
         ushort[] words;
         if (p.FileType == (byte)PCCCConstants.SlcFileTypeCode.Float)

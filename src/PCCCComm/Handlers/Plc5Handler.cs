@@ -658,6 +658,7 @@ public class Plc5Handler : IPlcHandler
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Timer:
                 case (byte)PCCCConstants.SlcFileTypeCode.Counter:
+                case (byte)PCCCConstants.SlcFileTypeCode.Control:
                     // p.SubElement selects control(0, default)/PRE-LEN(1)/ACC-POS(2) within
                     // this element's 3-word block — see ReadWords for why this can't be
                     // done on the wire and has to be picked out of the raw stream here.
@@ -752,7 +753,8 @@ public class Plc5Handler : IPlcHandler
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Timer:
                 case (byte)PCCCConstants.SlcFileTypeCode.Counter:
-                    // p.SubElement selects control(0)/PRE(1)/ACC(2) — see ReadAny above.
+                case (byte)PCCCConstants.SlcFileTypeCode.Control:
+                    // p.SubElement selects control(0)/PRE-LEN(1)/ACC-POS(2) — see ReadAny above.
                     result[i] = (short)rawWords[offset + p.SubElement];
                     break;
                 case (byte)PCCCConstants.SlcFileTypeCode.Binary:
@@ -916,14 +918,12 @@ public string WriteData(string startAddress, int dataToWrite)
 
         if (p.BitNumber >= 0 && p.BitNumber < 16 && numberOfElements == 1)
         {
-            string wordAddress = startAddress.Split('/')[0];
-            string[] current = ReadAny(wordAddress, 1);
-            int word = int.Parse(current[0], CultureInfo.InvariantCulture);
-            if (dataToWrite[0] != 0)
-                word |= (1 << p.BitNumber);
-            else
-                word &= ~(1 << p.BitNumber);
-            return WriteData(wordAddress, 1, new int[] { word });
+            // Atomic bit write via Read-Modify-Write (FNC 0x26) in WriteData(string, int),
+            // so bits changed by the PLC program in the same word are not overwritten.
+            string err = WriteData(startAddress, dataToWrite[0] != 0 ? 1 : 0);
+            if (err.Length > 0)
+                throw new PCCCException(err);
+            return 0;
         }
 
         ushort[] words;
