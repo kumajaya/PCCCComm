@@ -79,9 +79,15 @@ namespace PCCCComm.Pccc
             if (innerFrame == null || innerFrame.Length < 6) return;
             // Parse into a PCCCMessage so field names are used instead of raw indices.
             var msg = PCCCMessage.FromBytes(innerFrame);
+
+            // Keep the reply only if a request is waiting for this TNS. Late replies (after
+            // a timeout) and frames nobody asked for were stored before and never removed.
+            if (!_responseEvents.TryGetValue(msg.Tns, out var ev))
+                return;
+
             _responseData[msg.Tns] = innerFrame;
-            if (_responseEvents.TryGetValue(msg.Tns, out var ev))
-                ev.Set();
+            try { ev.Set(); }
+            catch (ObjectDisposedException) { /* the request timed out at the same moment */ }
         }
 
         /// <summary>
@@ -102,7 +108,10 @@ namespace PCCCComm.Pccc
             }
 
             // 2. Bulkhead: Limit concurrent requests to prevent thread pool starvation.
-            if (!_requestThrottle.Wait(_requestQueueTimeoutMs))
+            // Keep the instance that was acquired: MaxConcurrentRequests may swap the field
+            // while this request is in flight, and the slot must go back to the same semaphore.
+            SemaphoreSlim throttle = _requestThrottle;
+            if (!throttle.Wait(_requestQueueTimeoutMs))
             {
                 statusCode = -22; // Too busy (throttled)
                 return null;
@@ -150,6 +159,7 @@ namespace PCCCComm.Pccc
                 {
                     if (_responseEvents.TryRemove(tns, out var evToDispose))
                         evToDispose.Dispose();
+                    _responseData.TryRemove(tns, out _); // reply that raced the timeout
 
                     // Circuit Breaker Logic: Count consecutive timeouts to trip the breaker.
                     int timeouts = Interlocked.Increment(ref _consecutiveTimeouts);
@@ -192,7 +202,7 @@ namespace PCCCComm.Pccc
             }
             finally
             {
-                _requestThrottle.Release(); // Release the throttle slot
+                throttle.Release(); // Release the throttle slot
             }
         }
 
@@ -580,7 +590,17 @@ namespace PCCCComm.Pccc
             _responseEvents[tns] = ev;
             _responseData.TryRemove(tns, out _);
 
-            lock (_sendLock) { _transport.SendFrame(request.ToBytes()); }
+            try
+            {
+                lock (_sendLock) { _transport.SendFrame(request.ToBytes()); }
+            }
+            catch
+            {
+                // Nothing will ever answer this TNS: do not leave it registered as pending.
+                if (_responseEvents.TryRemove(tns, out var evFailed))
+                    evFailed.Dispose();
+                throw;
+            }
             return tns;
         }
 
@@ -685,8 +705,9 @@ namespace PCCCComm.Pccc
                 if (value > 0)
                 {
                     _maxConcurrentRequests = value;
-                    var old = Interlocked.Exchange(ref _requestThrottle, new SemaphoreSlim(value, value));
-                    old?.Dispose();
+                    // The old semaphore is not disposed: requests in flight still release
+                    // their slot on it (see SendRequest).
+                    Interlocked.Exchange(ref _requestThrottle, new SemaphoreSlim(value, value));
                 }
             }
         }
@@ -729,7 +750,8 @@ namespace PCCCComm.Pccc
             // Clear any pending events (without disposing them, as original never disposed)
             _responseEvents.Clear();
             _responseData.Clear();
-            _requestThrottle?.Dispose();
+            // _requestThrottle is deliberately not disposed: requests woken above still release
+            // their slot in SendRequest's finally block, which would throw ObjectDisposedException.
         }
     }
 }

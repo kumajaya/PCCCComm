@@ -295,7 +295,8 @@ public class PCCCComm : IDisposable, IHandlerContext
 
     private PCCCComm(NetworkTransportType networkType, string host, int port, int timeoutMs, byte lsapControlByte)
     {
-        _responseTimeoutMs = timeoutMs;
+        // Same rule as the ResponseTimeoutMs setter; 0 would also make the TCP connect fail at once.
+        _responseTimeoutMs = timeoutMs > 0 ? timeoutMs : 2000;
         _remoteHost = host;
         _remotePort = port;
         _networkType = networkType;
@@ -655,7 +656,17 @@ public class PCCCComm : IDisposable, IHandlerContext
     private void EnsureProtocol()
     {
         if (_protocol == null && _currentTransport != null)
-            _protocol = new PCCCProtocol(_currentTransport) { ResponseTimeoutMs = _responseTimeoutMs };
+        {
+            // Settings made before OpenComms() (or kept across a reconnect) must reach the
+            // new engine; previously only the timeout was copied and MaxConcurrentRequests /
+            // MaxConsecutiveTimeouts silently stayed at their defaults.
+            _protocol = new PCCCProtocol(_currentTransport)
+            {
+                ResponseTimeoutMs = _responseTimeoutMs,
+                MaxConcurrentRequests = _maxConcurrentRequests,
+                MaxConsecutiveTimeouts = _maxConsecutiveTimeouts
+            };
+        }
         if (_protocol == null)
             throw new InvalidOperationException("Communications not open. Call OpenComms() first.");
     }
@@ -812,7 +823,6 @@ public class PCCCComm : IDisposable, IHandlerContext
 
                     try
                     {
-                        var port = new SerialPortWrapper(_comPort, _baudRate, _parity);
                         using var transport = new DF1FullDuplexTransport(
                             new SerialPortWrapper(_comPort, _baudRate, _parity));
                         transport.ChecksumType = _checkSum;
