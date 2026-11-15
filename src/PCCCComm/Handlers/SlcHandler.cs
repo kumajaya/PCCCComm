@@ -301,7 +301,7 @@ public class SlcHandler : IPlcHandler
                 addr.SubElement += toWrite / PCCCConstants.Df1Limits.BytesPerWord;
         }
         if (reply == 0) return 0;
-        throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+        throw new PCCCException(reply);
     }
 
     /// <summary>
@@ -443,7 +443,7 @@ public class SlcHandler : IPlcHandler
         var req = PCCCMessage.CreateChangeModeRequest(modeValue, useFnc3A, 0, (byte)MyNode, (byte)TargetNode);
         _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success)
-            throw new PCCCException($"SetRunMode failed: {PCCCErrors.DecodeStatus(sts)}");
+            throw new PCCCException($"SetRunMode failed: {PCCCErrors.DecodeStatus(sts)}", sts);
     }
 
     /// <summary>
@@ -477,7 +477,7 @@ public class SlcHandler : IPlcHandler
         var req = PCCCMessage.CreateChangeModeRequest(modeValue, useFnc3A, 0, (byte)MyNode, (byte)TargetNode);
         _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success)
-            throw new PCCCException($"SetProgramMode failed: {PCCCErrors.DecodeStatus(sts)}");
+            throw new PCCCException($"SetProgramMode failed: {PCCCErrors.DecodeStatus(sts)}", sts);
     }
 
     /// <summary>
@@ -572,7 +572,7 @@ public class SlcHandler : IPlcHandler
 
         byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytesToRead, out int reply);
         if (reply != 0)
-            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+            throw new PCCCException(reply);
 
         int wordCount = Math.Min(numberOfWords, returnedData.Length / 2);
         ushort[] result = new ushort[wordCount];
@@ -603,7 +603,7 @@ public class SlcHandler : IPlcHandler
         }
         int status = WriteRawDataWithChunking(p, byteData);
         if (status != 0)
-            throw new PCCCException(PCCCErrors.DecodeStatus(status));
+            throw new PCCCException(status);
     }
 
     /// <summary>
@@ -622,7 +622,7 @@ public class SlcHandler : IPlcHandler
 
         byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytes, out int reply);
         if (reply != 0)
-            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+            throw new PCCCException(reply);
 
         string[] result = new string[arrayElements + 1];
         for (int i = 0; i <= arrayElements; i++)
@@ -928,7 +928,7 @@ public class SlcHandler : IPlcHandler
             if (sts == PCCCConstants.Sts.Success)
                 return 0;
             if (sts != PCCCConstants.Sts.IllegalCommandOrFormat)
-                throw new PCCCException(PCCCErrors.DecodeStatus(sts));
+                throw new PCCCException(sts);
             _maskedWriteUnsupported = true;
         }
 
@@ -938,7 +938,7 @@ public class SlcHandler : IPlcHandler
         DataAddress readAddr = wordAddr;
         byte[] current = ReadRawDataWithChunking(ref readAddr, PCCCConstants.Df1Limits.BytesPerWord, out int readSts);
         if (readSts != 0 || current.Length < 2)
-            throw new PCCCException(PCCCErrors.DecodeStatus(readSts));
+            throw new PCCCException(readSts);
         int word = current[0] | (current[1] << 8);
         word = value ? word | (1 << p.BitNumber) : word & ~(1 << p.BitNumber);
         return WriteRawDataWithChunking(wordAddr, new byte[] { (byte)(word & 0xFF), (byte)((word >> 8) & 0xFF) });
@@ -1174,12 +1174,12 @@ public class SlcHandler : IPlcHandler
     {
         var pAddr = new DataAddress { FileNumber = 0, FileType = 2, Element = 0x2F };
         byte[] data = ReadRawDataWithChunking(ref pAddr, 2, out int reply);
-        if (reply != 0) throw new PCCCException(PCCCErrors.DecodeStatus(reply) + " - Failed to get data table list");
+        if (reply != 0) throw new PCCCException(PCCCErrors.DecodeStatus(reply) + " - Failed to get data table list", reply);
 
         int fzSize = data[0] + data[1] * 256;
         pAddr.Element = 0; pAddr.SubElement = 0;
         byte[] fzd = ReadRawDataWithChunking(ref pAddr, fzSize, out reply);
-        if (reply != 0) throw new PCCCException(PCCCErrors.DecodeStatus(reply) + " - Failed to get data table list");
+        if (reply != 0) throw new PCCCException(PCCCErrors.DecodeStatus(reply) + " - Failed to get data table list", reply);
 
         var list = new List<DataFileDetails>();
         int filePosition = 143, idx = 0;
@@ -2488,7 +2488,7 @@ public class SlcHandler : IPlcHandler
             Array.Copy(data, srcOffset, chunk, 0, toWriteBytes);
             int sts = _protocol.FileWrite(tag, wordOffset, chunk, (byte)MyNode, (byte)TargetNode);
             if (sts != 0)
-                throw new PCCCException($"FileWrite failed at byte offset {currentByteOffset}: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"FileWrite failed at byte offset {currentByteOffset}: {PCCCErrors.DecodeStatus(sts)}", sts);
             bytesRemaining -= toWriteBytes;
             currentByteOffset += toWriteBytes;
         }

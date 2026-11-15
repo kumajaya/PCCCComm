@@ -221,7 +221,7 @@ namespace PCCCComm.Pccc
             // but an open breaker must still stop the send — otherwise AsyncMode writes keep
             // going out to a PLC already known to be unreachable.
             if (_healthState == 0)
-                throw new PCCCException(PCCCErrors.DecodeStatus(-23));
+                throw new PCCCException(-23);
 
             ushort tns = request.Tns == 0 ? GetNextTns() : request.Tns;
             request.Tns = tns;
@@ -304,7 +304,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateChangeModeRequest(modeValue, isMicroLogix, 0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"SetRunMode failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"SetRunMode failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         /// <summary>Places the processor in Program mode.</summary>
@@ -314,7 +314,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateChangeModeRequest(modeValue, isMicroLogix, 0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"SetProgramMode failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"SetProgramMode failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         /// <summary>Disables forces on the processor (CMD=0x0F, FNC=0x41).</summary>
@@ -323,7 +323,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateDisableForcesRequest(0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"DisableForces failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"DisableForces failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         /// <summary>Enables forces on the processor (CMD=0x0F, FNC=0x42).</summary>
@@ -332,7 +332,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateEnableForcesRequest(0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"EnableForces failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"EnableForces failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         /// <summary>Clears all forces on the processor (CMD=0x0F, FNC=0x43).</summary>
@@ -341,7 +341,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateClearForcesRequest(0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"ClearForces failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"ClearForces failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         // ========================================================================
@@ -353,7 +353,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateOpenFileRequest(fileNumber, fileType, 0, myNode, targetNode);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success || reply?.Data == null || reply.Data.Length < 2)
-                throw new PCCCException($"OpenFile failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"OpenFile failed: {PCCCErrors.DecodeStatus(sts)}", sts);
             return (ushort)(reply.Data[0] | (reply.Data[1] << 8));
         }
 
@@ -362,7 +362,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateCloseFileRequest(tag, 0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"CloseFile failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"CloseFile failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         public byte[] FileRead(ushort tag, int offset, int bytesToRead, byte myNode, byte targetNode)
@@ -370,7 +370,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateFileReadRequest(tag, offset, bytesToRead, 0, myNode, targetNode);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success || reply?.Data == null)
-                throw new PCCCException($"FileRead failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"FileRead failed: {PCCCErrors.DecodeStatus(sts)}", sts);
             return reply.Data;
         }
 
@@ -386,7 +386,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateUploadAllRequest(0, myNode, targetNode);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"UploadAllRequest failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"UploadAllRequest failed: {PCCCErrors.DecodeStatus(sts)}", sts);
             return reply?.Data ?? Array.Empty<byte>();
         }
 
@@ -395,7 +395,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateUploadCompletedRequest(0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"UploadCompleted failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"UploadCompleted failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         public byte[] DownloadAllRequest(byte myNode, byte targetNode)
@@ -403,7 +403,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateDownloadAllRequest(0, myNode, targetNode);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"DownloadAllRequest failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"DownloadAllRequest failed: {PCCCErrors.DecodeStatus(sts)}", sts);
             return reply?.Data ?? Array.Empty<byte>();
         }
 
@@ -412,7 +412,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateDownloadCompletedRequest(0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"DownloadCompleted failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"DownloadCompleted failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         public void ExecuteCommandList(byte[][] commands, byte myNode, byte targetNode)
@@ -420,7 +420,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateExecuteCommandListRequest(commands, 0, myNode, targetNode);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"ExecuteCommandList failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"ExecuteCommandList failed: {PCCCErrors.DecodeStatus(sts)}", sts);
             // Response data may contain per‑command status; usually not needed.
         }
 
@@ -429,7 +429,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateGetEditResourceRequest(0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"GetEditResource failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"GetEditResource failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         public void ReturnEditResource(byte myNode, byte targetNode)
@@ -437,7 +437,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateReturnEditResourceRequest(0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"ReturnEditResource failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"ReturnEditResource failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         public void ApplyPortConfiguration(byte myNode, byte targetNode)
@@ -445,7 +445,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateApplyPortConfigRequest(0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"ApplyPortConfiguration failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"ApplyPortConfiguration failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         public void InitializeMemory(byte myNode, byte targetNode)
@@ -453,7 +453,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateInitializeMemoryRequest(0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"InitializeMemory failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"InitializeMemory failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         // ========================================================================
@@ -465,7 +465,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateReadDiagnosticCountersRequest(0, myNode, targetNode);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success || reply?.Data == null)
-                throw new PCCCException($"ReadDiagnosticCounters failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"ReadDiagnosticCounters failed: {PCCCErrors.DecodeStatus(sts)}", sts);
             return reply.Data;
         }
 
@@ -474,7 +474,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateResetDiagnosticCountersRequest(0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"ResetDiagnosticCounters failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"ResetDiagnosticCounters failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         public byte ReadLinkParameters(byte myNode, byte targetNode)
@@ -482,7 +482,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateReadLinkParamsRequest(0, myNode, targetNode);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success || reply?.Data == null || reply.Data.Length == 0)
-                throw new PCCCException($"ReadLinkParameters failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"ReadLinkParameters failed: {PCCCErrors.DecodeStatus(sts)}", sts);
             return reply.Data[0];
         }
 
@@ -491,7 +491,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateSetLinkParamsRequest(maxAddress, 0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"SetLinkParameters failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"SetLinkParameters failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         public byte[] Echo(byte[] data, byte myNode, byte targetNode)
@@ -499,7 +499,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateEchoRequest(data, 0, myNode, targetNode);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success || reply?.Data == null)
-                throw new PCCCException($"Echo failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"Echo failed: {PCCCErrors.DecodeStatus(sts)}", sts);
 
             // Echo response format (AB 1770-6.5.16): CMD_reply STS TNS FNC(0x00) DATA
             // SendRequest parses with hasFnc:false so FNC byte lands in Data[0].
@@ -522,7 +522,7 @@ namespace PCCCComm.Pccc
                 0, myNode, targetNode, totalTransWords);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"WordRangeRead failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"WordRangeRead failed: {PCCCErrors.DecodeStatus(sts)}", sts);
             return reply?.Data ?? Array.Empty<byte>();
         }
 
@@ -536,7 +536,7 @@ namespace PCCCComm.Pccc
                 0, myNode, targetNode, totalTransWords);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"WordRangeWrite failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"WordRangeWrite failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         }
 
         /// <summary>
@@ -577,7 +577,7 @@ namespace PCCCComm.Pccc
             // already-unreachable PLC, each waiting the full EndRequest timeout, instead of
             // failing fast the same way SendRequest does.
             if (_healthState == 0)
-                throw new PCCCException(PCCCErrors.DecodeStatus(-23));
+                throw new PCCCException(-23);
 
             ushort tns = request.Tns;
             if (tns == 0)
@@ -664,7 +664,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateReadBytesPhysicalRequest(address, bytesToRead, 0, myNode, targetNode);
             var reply = SendRequest(req, out int sts);
             if (sts != Sts.Success || reply?.Data == null)
-                throw new PCCCException($"ReadBytesPhysical failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"ReadBytesPhysical failed: {PCCCErrors.DecodeStatus(sts)}", sts);
             return reply.Data;
         }
 
@@ -674,7 +674,7 @@ namespace PCCCComm.Pccc
             var req = PCCCMessage.CreateWriteBytesPhysicalRequest(address, data, 0, myNode, targetNode);
             SendRequest(req, out int sts);
             if (sts != Sts.Success)
-                throw new PCCCException($"WriteBytesPhysical failed: {PCCCErrors.DecodeStatus(sts)}");
+                throw new PCCCException($"WriteBytesPhysical failed: {PCCCErrors.DecodeStatus(sts)}", sts);
             return true;   // success
         }
 

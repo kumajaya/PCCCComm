@@ -228,7 +228,7 @@ public class Plc5Handler : IPlcHandler
         var req = PCCCMessage.CreateTypedReadRequest(logicalAddress, elementCount, 0, (byte)MyNode, (byte)TargetNode);
         var reply = _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success || reply?.Data == null)
-            throw new PCCCException($"TypedRead failed: {PCCCErrors.DecodeStatus(sts)}");
+            throw new PCCCException($"TypedRead failed: {PCCCErrors.DecodeStatus(sts)}", sts);
         int idx = 0;
         if (!SkipTypeDataParam(reply.Data, ref idx))
             throw new PCCCException("TypedRead: malformed type/data parameter in reply.");
@@ -242,7 +242,7 @@ public class Plc5Handler : IPlcHandler
             elementCount, 0, (byte)MyNode, (byte)TargetNode);
         _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success)
-            throw new PCCCException($"TypedWrite failed: {PCCCErrors.DecodeStatus(sts)}");
+            throw new PCCCException($"TypedWrite failed: {PCCCErrors.DecodeStatus(sts)}", sts);
     }
 
     // ---------------------------------------------------------------------
@@ -393,7 +393,7 @@ public class Plc5Handler : IPlcHandler
         }
 
         if (reply == 0) return 0;
-        throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+        throw new PCCCException(reply);
     }
 
     // ---------------------------------------------------------------------
@@ -441,7 +441,7 @@ public class Plc5Handler : IPlcHandler
         var req = PCCCMessage.CreateChangeModeRequest(modeValue, true, 0, (byte)MyNode, (byte)TargetNode);
         _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success)
-            throw new PCCCException($"SetRunMode failed: {PCCCErrors.DecodeStatus(sts)}");
+            throw new PCCCException($"SetRunMode failed: {PCCCErrors.DecodeStatus(sts)}", sts);
     }
 
     public void SetProgramMode()
@@ -452,7 +452,7 @@ public class Plc5Handler : IPlcHandler
         var req = PCCCMessage.CreateChangeModeRequest(modeValue, true, 0, (byte)MyNode, (byte)TargetNode);
         _protocol.SendRequest(req, out int sts);
         if (sts != PCCCConstants.Sts.Success)
-            throw new PCCCException($"SetProgramMode failed: {PCCCErrors.DecodeStatus(sts)}");
+            throw new PCCCException($"SetProgramMode failed: {PCCCErrors.DecodeStatus(sts)}", sts);
     }
 
     public int SetCpuMode(byte modeValue)
@@ -534,7 +534,7 @@ public class Plc5Handler : IPlcHandler
 
         byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytesToRead, out int reply);
         if (reply != 0)
-            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+            throw new PCCCException(reply);
 
         int wordCount = Math.Min(numberOfWords, returnedData.Length / 2);
         ushort[] result = new ushort[wordCount];
@@ -564,7 +564,7 @@ public class Plc5Handler : IPlcHandler
         }
         int status = WriteRawDataWithChunking(p, byteData);
         if (status != 0)
-            throw new PCCCException(PCCCErrors.DecodeStatus(status));
+            throw new PCCCException(status);
     }
 
     /// <summary>
@@ -590,7 +590,7 @@ public class Plc5Handler : IPlcHandler
 
         byte[] returnedData = ReadRawDataWithChunking(ref p, numberOfBytes, out int reply);
         if (reply != 0)
-            throw new PCCCException(PCCCErrors.DecodeStatus(reply));
+            throw new PCCCException(reply);
 
         string[] result = new string[arrayElements + 1];
         for (int i = 0; i <= arrayElements; i++)
@@ -837,7 +837,38 @@ public class Plc5Handler : IPlcHandler
         return sts;
     }
 
-public string WriteData(string startAddress, int dataToWrite)
+    /// <summary>
+    /// Sets or clears one bit atomically with Read-Modify-Write (FNC 0x26) and returns the STS.
+    /// </summary>
+    private int WriteBitRmw(DataAddress p, bool value)
+    {
+        int elemSize = p.BytesPerElements;
+        byte[] andMask = new byte[elemSize];
+        byte[] orMask = new byte[elemSize];
+
+        for (int i = 0; i < elemSize; i++)
+        {
+            andMask[i] = 0xFF;
+            orMask[i] = 0x00;
+        }
+
+        int byteIndex = p.BitNumber / 8;
+        int bitIndex = p.BitNumber % 8;
+
+        andMask[byteIndex] = (byte)~(1 << bitIndex);
+        if (value)
+            orMask[byteIndex] = (byte)(1 << bitIndex);
+
+        // Write-form (3-level) address, verified byte-exact against a live RSLinx
+        // bit-write (FNC 0x26): 07 00 <file> <elem> + AND mask + OR mask (2 bytes LE).
+        byte[] logicalAddress = EncodeWriteAddr(p.FileNumber, p.Element);
+        _protocol.ReadModifyWritePlc5(logicalAddress, andMask, orMask, out int status,
+            (byte)MyNode, (byte)TargetNode);
+
+        return status;
+    }
+
+    public string WriteData(string startAddress, int dataToWrite)
     {
         DataAddress p = ParseAddress(startAddress);
         if (p.FileType == 0) throw new PCCCException("Invalid Address");
@@ -851,29 +882,7 @@ public string WriteData(string startAddress, int dataToWrite)
         // 6-byte mask would incorrectly extend the AND/OR mask over PRE/ACC too.
         if (p.BitNumber >= 0 && p.BitNumber < p.BytesPerElements * 8)
         {
-            int elemSize = p.BytesPerElements;
-            byte[] andMask = new byte[elemSize];
-            byte[] orMask = new byte[elemSize];
-
-            for (int i = 0; i < elemSize; i++)
-            {
-                andMask[i] = 0xFF;
-                orMask[i] = 0x00;
-            }
-
-            int byteIndex = p.BitNumber / 8;
-            int bitIndex = p.BitNumber % 8;
-
-            andMask[byteIndex] = (byte)~(1 << bitIndex);
-            if (dataToWrite != 0)
-                orMask[byteIndex] = (byte)(1 << bitIndex);
-
-            // Write-form (3-level) address, verified byte-exact against a live RSLinx
-            // bit-write (FNC 0x26): 07 00 <file> <elem> + AND mask + OR mask (2 bytes LE).
-            byte[] logicalAddress = EncodeWriteAddr(p.FileNumber, p.Element);
-            _protocol.ReadModifyWritePlc5(logicalAddress, andMask, orMask, out int status,
-                (byte)MyNode, (byte)TargetNode);
-
+            int status = WriteBitRmw(p, dataToWrite != 0);
             return status == 0 ? string.Empty : PCCCErrors.DecodeStatus(status);
         }
 
@@ -929,9 +938,9 @@ public string WriteData(string startAddress, int dataToWrite)
         {
             // Atomic bit write via Read-Modify-Write (FNC 0x26) in WriteData(string, int),
             // so bits changed by the PLC program in the same word are not overwritten.
-            string err = WriteData(startAddress, dataToWrite[0] != 0 ? 1 : 0);
-            if (err.Length > 0)
-                throw new PCCCException(err);
+            int status = WriteBitRmw(p, dataToWrite[0] != 0);
+            if (status != 0)
+                throw new PCCCException(status);
             return 0;
         }
 
