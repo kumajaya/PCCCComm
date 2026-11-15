@@ -188,7 +188,15 @@ public class SlcHandler : IPlcHandler
                     break;
                 }
 
-                int bytesRead = Math.Min(toRead, reply.Data.Length);
+                // A short reply cannot be continued here: the address below advances by the
+                // requested size, so the next chunk would land at the wrong position.
+                if (reply.Data.Length < toRead)
+                {
+                    finalStatus = -8; // No data returned from PLC
+                    break;
+                }
+
+                int bytesRead = toRead;
                 Array.Copy(reply.Data, 0, result, filePosition, bytesRead);
                 filePosition += bytesRead;
 

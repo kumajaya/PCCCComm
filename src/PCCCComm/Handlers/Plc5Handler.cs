@@ -303,7 +303,16 @@ public class Plc5Handler : IPlcHandler
                     break;
                 }
 
+                // Keep whole elements only: the next chunk's address is filePosition / bytesPerElem,
+                // so a partial element here would shift every later value.
                 int bytesRead = Math.Min(chunkBytes, reply.Data.Length);
+                bytesRead -= bytesRead % bytesPerElem;
+                if (bytesRead <= 0)
+                {
+                    // An empty reply would otherwise repeat the same request forever.
+                    finalStatus = -8; // No data returned from PLC
+                    break;
+                }
                 Array.Copy(reply.Data, 0, result, filePosition, bytesRead);
                 filePosition += bytesRead;
             }
