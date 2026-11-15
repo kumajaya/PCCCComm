@@ -120,6 +120,12 @@ public class PCCCComm : IDisposable, IHandlerContext
 
     public bool AsyncMode { get; set; }
 
+    /// <summary>
+    /// True when a transport exists and is open. Unlike <see cref="OpenComms"/>, reading it
+    /// has no side effects (OpenComms also resets the circuit breaker).
+    /// </summary>
+    public bool IsOpen => _currentTransport?.IsOpen == true;
+
     public int SlaveAddress
     {
         get => _slaveAddress;
