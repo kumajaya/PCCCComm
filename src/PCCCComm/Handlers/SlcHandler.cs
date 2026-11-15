@@ -832,8 +832,9 @@ public class SlcHandler : IPlcHandler
     /// Reads each specified word, applies AND mask (resets bits where mask bit = 0),
     /// then OR mask (sets bits where mask bit = 1), and writes back.
     /// 
-    /// SLC uses a single multi-set request; PLC-5 sends one logical-binary RMW per set
-    /// (see Plc5Handler.ReadModifyWrite).
+    /// SLC/MicroLogix sends one Masked Write (FNC 0xAB) per set, falling back to a single
+    /// multi-set FNC 0x26 request if 0xAB is rejected; PLC-5 sends one logical-binary RMW
+    /// per set (see Plc5Handler.ReadModifyWrite).
     /// 
     /// Reference: AB Publication 1770-6.5.16, page 7-20
     /// </summary>
@@ -854,9 +855,35 @@ public class SlcHandler : IPlcHandler
                 throw new PCCCException($"ReadModifyWrite: invalid address '{addresses[i]}'.");
         }
 
+        // SLC/MicroLogix: one Protected Typed Logical Masked Write (FNC 0xAB) per set — the
+        // command libplctag and pycomm3 use for these processors. FNC 0x26 is the PLC-5
+        // Read-Modify-Write and is only used as a fallback if 0xAB is rejected.
+        // AND/OR maps exactly onto mask/data: result = (old & AND) | OR equals
+        // (old & ~mask) | (data & mask) with mask = ~AND | OR and data = OR.
+        if (!_maskedWriteUnsupported)
+        {
+            int sts = 0;
+            for (int i = 0; i < parsed.Length; i++)
+            {
+                ushort mask = (ushort)(~andMasks[i] | orMasks[i]);
+                ushort data = orMasks[i];
+                var mreq = PCCCMessage.CreateMaskedWriteRequest(parsed[i], mask, data, 0, (byte)MyNode, (byte)TargetNode);
+                _protocol.SendRequest(mreq, out sts);
+                if (sts == PCCCConstants.Sts.IllegalCommandOrFormat && i == 0)
+                {
+                    _maskedWriteUnsupported = true;
+                    break;
+                }
+                if (sts != PCCCConstants.Sts.Success)
+                    return sts; // stop on first PLC-side error
+            }
+            if (!_maskedWriteUnsupported)
+                return sts;
+        }
+
         var req = PCCCMessage.CreateReadModifyWriteRequest(parsed, andMasks, orMasks, 0, (byte)MyNode, (byte)TargetNode);
-        _protocol.SendRequest(req, out int sts);
-        return sts;
+        _protocol.SendRequest(req, out int rmwSts);
+        return rmwSts;
     }
 
     /// <summary>

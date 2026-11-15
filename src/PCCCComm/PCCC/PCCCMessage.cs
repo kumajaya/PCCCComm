@@ -249,6 +249,37 @@ namespace PCCCComm.Pccc
             return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns, (byte)fnc, body);
         }
 
+        /// <summary>
+        /// Protected Typed Logical Masked Write with three address fields (CMD 0x0F, FNC 0xAB):
+        /// [size=2][file][type][element][sub-element][mask lo/hi][data lo/hi]. Bits set in
+        /// <paramref name="mask"/> take the value from <paramref name="data"/>; the others are kept.
+        /// </summary>
+        public static PCCCMessage CreateMaskedWriteRequest(DataAddress addr, ushort mask, ushort data, ushort tns, byte myNode, byte targetNode)
+        {
+            var body = new List<byte>(13) { 2, (byte)addr.FileNumber, (byte)addr.FileType };
+            AppendAddressField(body, addr.Element);
+            AppendAddressField(body, addr.SubElement >= 0 ? addr.SubElement : 0);
+            body.Add((byte)(mask & 0xFF));
+            body.Add((byte)(mask >> 8));
+            body.Add((byte)(data & 0xFF));
+            body.Add((byte)(data >> 8));
+            return new PCCCMessage(targetNode, myNode, PCCCConstants.Cmd.ProtectedWrite, 0, tns,
+                PCCCConstants.Fnc.WriteBit, body.ToArray());
+        }
+
+        // Element/sub-element field: 1 byte if < 255, else 0xFF followed by 2 bytes (LE).
+        private static void AppendAddressField(List<byte> body, int value)
+        {
+            if (value < 255)
+                body.Add((byte)value);
+            else
+            {
+                body.Add(0xFF);
+                body.Add((byte)(value & 0xFF));
+                body.Add((byte)((value >> 8) & 0xFF));
+            }
+        }
+
         public static PCCCMessage CreateReadModifyWriteRequest(DataAddress[] addrs, ushort[] andMasks, ushort[] orMasks, ushort tns, byte myNode, byte targetNode)
         {
             // Pre-calculate total body size to avoid dynamic list reallocation
